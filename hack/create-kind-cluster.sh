@@ -34,6 +34,7 @@ fi
 if [ "$(docker inspect -f '{{.State.Running}}' "${reg_name}" 2>/dev/null || true)" != "true" ]; then
   docker run \
     -d --restart=always \
+    --label created-by=agent-substrate \
     -p "127.0.0.1:${reg_port}:5000" \
     -p "[::1]:${reg_port}:5000" \
     --network bridge --name "${reg_name}" \
