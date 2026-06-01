@@ -28,7 +28,7 @@ import (
 	"sync"
 
 	"cloud.google.com/go/compute/metadata"
-	"github.com/agent-substrate/substrate/cmd/ateom-gvisor/internal/ateom"
+	"github.com/agent-substrate/substrate/internal/actorlogger"
 	"github.com/agent-substrate/substrate/internal/ateinterceptors"
 	"github.com/agent-substrate/substrate/internal/ateompath"
 	"github.com/agent-substrate/substrate/internal/contextlogging"
@@ -71,7 +71,7 @@ func do(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	syncedWriter := ateom.NewSyncedWriter(os.Stdout)
+	syncedWriter := actorlogger.NewSyncedWriter(os.Stdout)
 	logger := slog.New(contextlogging.NewHandler(slog.NewJSONHandler(syncedWriter, nil)))
 	slog.SetDefault(logger)
 
@@ -142,7 +142,7 @@ func do(ctx context.Context) error {
 		return fmt.Errorf("while creating ateom-interior netns: %w", err)
 	}
 
-	actorLogger := ateom.NewActorLogger(syncedWriter, metadata.OnGCE())
+	actorLogger := actorlogger.NewActorLogger(syncedWriter, metadata.OnGCE())
 	ateomService := NewService(interiorNetNS, eth0LinkInfo, actorLogger)
 
 	svr := grpc.NewServer(
@@ -170,13 +170,13 @@ type AteomService struct {
 
 	interiorNetNS netns.NsHandle
 	eth0LinkInfo  *SaveLinkInfo
-	actorLogger   *ateom.ActorLogger
+	actorLogger   *actorlogger.ActorLogger
 }
 
 var _ ateompb.AteomServer = (*AteomService)(nil)
 
 // NewService creates a new AteomService.
-func NewService(interiorNetNS netns.NsHandle, eth0LinkInfo *SaveLinkInfo, actorLogger *ateom.ActorLogger) *AteomService {
+func NewService(interiorNetNS netns.NsHandle, eth0LinkInfo *SaveLinkInfo, actorLogger *actorlogger.ActorLogger) *AteomService {
 	svc := &AteomService{
 		interiorNetNS: interiorNetNS,
 		eth0LinkInfo:  eth0LinkInfo,
@@ -276,38 +276,7 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 		return nil, fmt.Errorf("while restoring eth0 in interior netns: %w", err)
 	}
 
-	rcmd := &runsc{
-		path:                   req.GetRunscPath(),
-		actorTemplateNamespace: req.GetActorTemplateNamespace(),
-		actorTemplateName:      req.GetActorTemplateName(),
-		actorID:                req.GetActorId(),
-	}
-
-	// Create and start pause container
-	if err := rcmd.cmdCreate(ctx, os.Stdout, "pause"); err != nil {
-		return nil, fmt.Errorf("while creating pause container: %w", err)
-	}
-	if err := rcmd.cmdStart(ctx, os.Stdout, "pause"); err != nil {
-		return nil, fmt.Errorf("while starting pause container: %w", err)
-	}
-
-	pw, err := s.actorLogger.StartJSONLogPipe(req.GetActorId(), req.GetActorTemplateName(), req.GetActorTemplateNamespace())
-	if err != nil {
-		return nil, fmt.Errorf("while starting json log pipe: %w", err)
-	}
-	defer pw.Close()
-
-	// Create and start each application container
-	for _, ac := range req.GetSpec().GetContainers() {
-		if err := rcmd.cmdCreate(ctx, pw, ac.GetName()); err != nil {
-			return nil, fmt.Errorf("while creating %q application container: %w", ac.GetName(), err)
-		}
-		if err := rcmd.cmdStart(ctx, pw, ac.GetName()); err != nil {
-			return nil, fmt.Errorf("while starting %q application container: %w", ac.GetName(), err)
-		}
-	}
-
-	s.actorLogger.EmitLifecycleLog("Actor started", req.GetActorId(), req.GetActorTemplateName(), req.GetActorTemplateNamespace())
+	slog.InfoContext(ctx, "Ateom network prepared, returning to atelet")
 
 	return &ateompb.RunWorkloadResponse{}, nil
 }
@@ -320,49 +289,11 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 
 	// Contract with atelet:
 	//
-	//   * After we exit, atelet will upload checkpoint to GCS
+	//   * atelet has already checkpointed and deleted the containers locally.
+	//   * After we exit, atelet will upload the checkpoint to GCS.
 	//   * After we exit, atelet will tear down OCI bundles and reset the actor directory.
-
-	rcmd := &runsc{
-		path:                   req.GetRunscPath(),
-		actorTemplateNamespace: req.GetActorTemplateNamespace(),
-		actorTemplateName:      req.GetActorTemplateName(),
-		actorID:                req.GetActorId(),
-	}
-
-	checkpointPath := ateompath.CheckpointStateDir(req.GetActorTemplateNamespace(), req.GetActorTemplateName(), req.GetActorId())
-	if err := os.MkdirAll(checkpointPath, 0o700); err != nil {
-		return nil, fmt.Errorf("while creating checkpoint directory: %w", err)
-	}
-
-	// Checkpoint pause container (root of the sandbox)
-	if err := rcmd.cmdCheckpoint(ctx, "pause", checkpointPath); err != nil {
-		return nil, fmt.Errorf("while checkpointing pause: %w", err)
-	}
-
-	// Check state of all containers to mimic containerd.
 	//
-	// Without this, `runsc delete` occasionally throws an error.
-	if err := rcmd.cmdState(ctx, "pause"); err != nil {
-		return nil, fmt.Errorf("while checking state of pause container: %w", err)
-	}
-	for _, ctr := range req.GetSpec().GetContainers() {
-		if err := rcmd.cmdState(ctx, ctr.GetName()); err != nil {
-			return nil, fmt.Errorf("while deleting %q application container: %w", ctr.GetName(), err)
-		}
-	}
-
-	// Delete all application containers
-	for _, ctr := range req.GetSpec().GetContainers() {
-		if err := rcmd.cmdDelete(ctx, ctr.GetName()); err != nil {
-			return nil, fmt.Errorf("while deleting %q application container: %w", ctr.GetName(), err)
-		}
-	}
-
-	// Delete pause container
-	if err := rcmd.cmdDelete(ctx, "pause"); err != nil {
-		return nil, fmt.Errorf("while deleting pause container: %w", err)
-	}
+	// Here we only need to move the network namespace state back.
 
 	// Yoink eth0 back to the pod netns.
 	podNetNS, err := netns.Get()
@@ -454,40 +385,9 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		return nil, fmt.Errorf("while restoring eth0 in interior netns: %w", err)
 	}
 
-	rcmd := &runsc{
-		path:                   req.GetRunscPath(),
-		actorTemplateNamespace: req.GetActorTemplateNamespace(),
-		actorTemplateName:      req.GetActorTemplateName(),
-		actorID:                req.GetActorId(),
-	}
-
-	checkpointDir := ateompath.RestoreStateDir(req.GetActorTemplateNamespace(), req.GetActorTemplateName(), req.GetActorId())
-
-	// Create and restore pause container
-	if err := rcmd.cmdCreate(ctx, os.Stdout, "pause"); err != nil {
-		return nil, fmt.Errorf("while creating pause container: %w", err)
-	}
-	if err := rcmd.cmdRestore(ctx, os.Stdout, "pause", checkpointDir); err != nil {
-		return nil, fmt.Errorf("while starting pause container: %w", err)
-	}
-
-	pw, err := s.actorLogger.StartJSONLogPipe(req.GetActorId(), req.GetActorTemplateName(), req.GetActorTemplateNamespace())
-	if err != nil {
-		return nil, fmt.Errorf("while starting json log pipe: %w", err)
-	}
-	defer pw.Close()
-
-	// Create and restore each application container
-	for _, ac := range req.GetSpec().GetContainers() {
-		if err := rcmd.cmdCreate(ctx, pw, ac.GetName()); err != nil {
-			return nil, fmt.Errorf("while creating %q application container: %w", ac.GetName(), err)
-		}
-		if err := rcmd.cmdRestore(ctx, pw, ac.GetName(), checkpointDir); err != nil {
-			return nil, fmt.Errorf("while starting %q application container: %w", ac.GetName(), err)
-		}
-	}
-
-	s.actorLogger.EmitLifecycleLog("Actor restored", req.GetActorId(), req.GetActorTemplateName(), req.GetActorTemplateNamespace())
+	// atelet does the local runsc restore (create + restore) under its own
+	// process tree once we return.
+	slog.InfoContext(ctx, "Ateom network restored, returning to atelet")
 
 	return &ateompb.RestoreWorkloadResponse{}, nil
 }

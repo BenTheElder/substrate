@@ -30,7 +30,9 @@ import (
 	"strconv"
 	"strings"
 
+	"cloud.google.com/go/compute/metadata"
 	"cloud.google.com/go/storage"
+	"github.com/agent-substrate/substrate/internal/actorlogger"
 	"github.com/agent-substrate/substrate/internal/ategcs"
 	"github.com/agent-substrate/substrate/internal/ateinterceptors"
 	"github.com/agent-substrate/substrate/internal/ateompath"
@@ -148,12 +150,17 @@ func main() {
 		wrappedGCS = ategcs.NewGCSClient(gcsClient)
 	}
 
+	startReaper()
+
+	actorLogger := actorlogger.NewActorLogger(actorlogger.NewSyncedWriter(os.Stdout), metadata.OnGCE())
+
 	wmService := NewService(
 		ctx,
 		ateomDialer,
 		wrappedAnonGCS,
 		wrappedGCS,
 		pullCache,
+		actorLogger,
 	)
 
 	lis, err := net.Listen("tcp", ":"+strconv.Itoa(*port))
@@ -179,6 +186,7 @@ type AteomHerder struct {
 	pullCache     *memorypullcache.MemoryPullCache
 	anonGCSClient ategcs.ObjectStorage
 	gcsClient     ategcs.ObjectStorage
+	actorLogger   *actorlogger.ActorLogger
 }
 
 var _ ateletpb.AteomHerderServer = (*AteomHerder)(nil)
@@ -190,12 +198,14 @@ func NewService(
 	anonGCSClient ategcs.ObjectStorage,
 	gcsClient ategcs.ObjectStorage,
 	pullCache *memorypullcache.MemoryPullCache,
+	actorLogger *actorlogger.ActorLogger,
 ) *AteomHerder {
 	wms := &AteomHerder{
 		ateomDialer:   ateomDialer,
 		pullCache:     pullCache,
 		anonGCSClient: anonGCSClient,
 		gcsClient:     gcsClient,
+		actorLogger:   actorLogger,
 	}
 	return wms
 }
@@ -290,8 +300,7 @@ func (s *AteomHerder) Run(ctx context.Context, req *ateletpb.RunRequest) (*atele
 		return nil, err
 	}
 
-	// Tell ateom to do runsc create + runsc start for pause container and
-	// all application containers.
+	// Tell ateom to set up the network namespace first.
 	if _, err := client.RunWorkload(ctx, &ateompb.RunWorkloadRequest{
 		ActorTemplateNamespace: req.GetActorTemplateNamespace(),
 		ActorTemplateName:      req.GetActorTemplateName(),
@@ -301,6 +310,40 @@ func (s *AteomHerder) Run(ctx context.Context, req *ateletpb.RunRequest) (*atele
 	}); err != nil {
 		return nil, fmt.Errorf("while calling ateom.RunWorkload: %w", err)
 	}
+
+	// Now start runsc locally under atelet's process tree.
+	rcmd := &runsc{
+		path:                   runscPath,
+		actorTemplateNamespace: req.GetActorTemplateNamespace(),
+		actorTemplateName:      req.GetActorTemplateName(),
+		actorID:                req.GetActorId(),
+	}
+
+	s.actorLogger.EmitLifecycleLog("Actor starting locally", req.GetActorId(), req.GetActorTemplateName(), req.GetActorTemplateNamespace())
+
+	if err := rcmd.cmdCreate(ctx, os.Stdout, "pause"); err != nil {
+		return nil, fmt.Errorf("while creating pause container locally: %w", err)
+	}
+	if err := rcmd.cmdStart(ctx, os.Stdout, "pause"); err != nil {
+		return nil, fmt.Errorf("while starting pause container locally: %w", err)
+	}
+
+	pw, err := s.actorLogger.StartJSONLogPipe(req.GetActorId(), req.GetActorTemplateName(), req.GetActorTemplateNamespace())
+	if err != nil {
+		return nil, fmt.Errorf("while starting json log pipe locally: %w", err)
+	}
+	defer pw.Close()
+
+	for _, ac := range req.GetSpec().GetContainers() {
+		if err := rcmd.cmdCreate(ctx, pw, ac.GetName()); err != nil {
+			return nil, fmt.Errorf("while creating %q application container locally: %w", ac.GetName(), err)
+		}
+		if err := rcmd.cmdStart(ctx, pw, ac.GetName()); err != nil {
+			return nil, fmt.Errorf("while starting %q application container locally: %w", ac.GetName(), err)
+		}
+	}
+
+	s.actorLogger.EmitLifecycleLog("Actor started locally", req.GetActorId(), req.GetActorTemplateName(), req.GetActorTemplateNamespace())
 
 	return &ateletpb.RunResponse{}, nil
 }
@@ -318,7 +361,48 @@ func (s *AteomHerder) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRe
 		return nil, err
 	}
 
-	// Tell ateom to take checkpoint and delete containers.
+	rcmd := &runsc{
+		path:                   runscPath,
+		actorTemplateNamespace: req.GetActorTemplateNamespace(),
+		actorTemplateName:      req.GetActorTemplateName(),
+		actorID:                req.GetActorId(),
+	}
+
+	// Checkpoint into checkpoint-state, which is a separate directory from
+	// restore-state. This lets us checkpoint even while a background restore is
+	// still demand-paging from restore-state.
+	if err := os.MkdirAll(checkpointDir, 0o700); err != nil {
+		return nil, fmt.Errorf("while creating checkpoint dir: %w", err)
+	}
+
+	s.actorLogger.EmitLifecycleLog("Actor checkpointing locally", req.GetActorId(), req.GetActorTemplateName(), req.GetActorTemplateNamespace())
+
+	if err := rcmd.cmdCheckpoint(ctx, "pause", checkpointDir); err != nil {
+		return nil, fmt.Errorf("while checkpointing pause locally: %w", err)
+	}
+
+	if err := rcmd.cmdState(ctx, "pause"); err != nil {
+		return nil, fmt.Errorf("while checking state of pause container locally: %w", err)
+	}
+	for _, ctr := range req.GetSpec().GetContainers() {
+		if err := rcmd.cmdState(ctx, ctr.GetName()); err != nil {
+			return nil, fmt.Errorf("while checking state of %q application container locally: %w", ctr.GetName(), err)
+		}
+	}
+
+	for _, ctr := range req.GetSpec().GetContainers() {
+		if err := rcmd.cmdDelete(ctx, ctr.GetName()); err != nil {
+			return nil, fmt.Errorf("while deleting %q application container locally: %w", ctr.GetName(), err)
+		}
+	}
+
+	if err := rcmd.cmdDelete(ctx, "pause"); err != nil {
+		return nil, fmt.Errorf("while deleting pause container locally: %w", err)
+	}
+
+	s.actorLogger.EmitLifecycleLog("Actor checkpointed locally", req.GetActorId(), req.GetActorTemplateName(), req.GetActorTemplateNamespace())
+
+	// Tell ateom to clean up/restore network namespace and move eth0 back.
 	if _, err := client.CheckpointWorkload(ctx, &ateompb.CheckpointWorkloadRequest{
 		ActorTemplateNamespace: req.GetActorTemplateNamespace(),
 		ActorTemplateName:      req.GetActorTemplateName(),
@@ -411,8 +495,7 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 		return nil, err
 	}
 
-	// Tell ateom to do runsc create + runsc restore for pause container and
-	// all application containers.
+	// Tell ateom to prepare/restore network namespace.
 	if _, err := client.RestoreWorkload(ctx, &ateompb.RestoreWorkloadRequest{
 		ActorTemplateNamespace: ns,
 		ActorTemplateName:      tmpl,
@@ -422,6 +505,44 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 	}); err != nil {
 		return nil, fmt.Errorf("while calling ateom.RestoreWorkload: %w", err)
 	}
+
+	// Now restore runsc locally under atelet's process tree.
+	rcmd := &runsc{
+		path:                   runscPath,
+		actorTemplateNamespace: ns,
+		actorTemplateName:      tmpl,
+		actorID:                actorID,
+	}
+
+	// Restore locally from restore-state (where we downloaded the checkpoint
+	// above). This is a separate directory from checkpoint-state, so a later
+	// checkpoint won't clobber files that a "-direct -background" restore is
+	// still demand-paging from here.
+	s.actorLogger.EmitLifecycleLog("Actor restoring locally", actorID, tmpl, ns)
+
+	if err := rcmd.cmdCreate(ctx, os.Stdout, "pause"); err != nil {
+		return nil, fmt.Errorf("while creating pause container locally: %w", err)
+	}
+	if err := rcmd.cmdRestore(ctx, os.Stdout, "pause", checkpointDir); err != nil {
+		return nil, fmt.Errorf("while restoring pause container locally: %w", err)
+	}
+
+	pw, err := s.actorLogger.StartJSONLogPipe(actorID, tmpl, ns)
+	if err != nil {
+		return nil, fmt.Errorf("while starting json log pipe locally: %w", err)
+	}
+	defer pw.Close()
+
+	for _, ac := range req.GetSpec().GetContainers() {
+		if err := rcmd.cmdCreate(ctx, pw, ac.GetName()); err != nil {
+			return nil, fmt.Errorf("while creating %q application container locally: %w", ac.GetName(), err)
+		}
+		if err := rcmd.cmdRestore(ctx, pw, ac.GetName(), checkpointDir); err != nil {
+			return nil, fmt.Errorf("while restoring %q application container locally: %w", ac.GetName(), err)
+		}
+	}
+
+	s.actorLogger.EmitLifecycleLog("Actor restored locally", actorID, tmpl, ns)
 
 	return &ateletpb.RestoreResponse{}, nil
 }
