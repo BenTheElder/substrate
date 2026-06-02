@@ -163,6 +163,13 @@ func (r *runsc) cmdRestore(ctx context.Context, out io.Writer, containerName, ch
 		"-bundle", ateompath.OCIBundlePath(r.actorTemplateNamespace, r.actorTemplateName, r.actorID, containerName),
 		"-image-path", checkpointPath,
 		"-pid-file", ateompath.PIDFilePath(r.actorTemplateNamespace, r.actorTemplateName, r.actorID, containerName),
+		// The guest starts executing sooner because gVisor only loads the
+		// pages it needs and demand-pages the rest in the background. This is
+		// safe because we restore from restore-state and checkpoint into the
+		// separate checkpoint-state dir, so a later checkpoint never clobbers
+		// the image files this restore is still reading.
+		"-background",
+		"-direct",
 		"-detach",
 		containerName,
 	)
