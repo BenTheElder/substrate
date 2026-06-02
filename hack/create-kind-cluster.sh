@@ -72,6 +72,14 @@ for node in $("${ROOT}"/hack/kind.sh get nodes --name "${KIND_CLUSTER_NAME}"); d
   docker exec "${node}" sysctl net.ipv4.conf.all.proxy_arp=1
 done
 
+# 2.6 Remount /run/ateom-gvisor as executable on kind nodes (since /run is default noexec on kind nodes)
+echo "Remounting /run/ateom-gvisor with exec permissions on kind nodes..."
+for node in $("${ROOT}"/hack/kind.sh get nodes --name "${KIND_CLUSTER_NAME}"); do
+  docker exec "${node}" mkdir -p /run/ateom-gvisor
+  docker exec "${node}" mount -o bind /run/ateom-gvisor /run/ateom-gvisor
+  docker exec "${node}" mount -o remount,exec /run/ateom-gvisor
+done
+
 # 3. Add the registry config to the nodes
 echo "Adding registry config to kind nodes..."
 REGISTRY_DIR="/etc/containerd/certs.d/localhost:${reg_port}"
