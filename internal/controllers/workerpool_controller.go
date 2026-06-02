@@ -159,17 +159,30 @@ func buildDeploymentApplyConfig(wp *atev1alpha1.WorkerPool) *appsv1ac.Deployment
 									WithFieldRef(corev1ac.ObjectFieldSelector().
 										WithFieldPath("metadata.name"))),
 						).
-						WithVolumeMounts(corev1ac.VolumeMount().
-							WithName("run-ateom").
-							WithMountPath("/run/ateom-gvisor"))).
+						WithVolumeMounts(
+							corev1ac.VolumeMount().
+								WithName("run-ateom").
+								WithMountPath("/run/ateom-gvisor"),
+							corev1ac.VolumeMount().
+								WithName("run-netns").
+								WithMountPath("/run/netns").
+								WithMountPropagation(corev1.MountPropagationBidirectional),
+						)).
 					WithSecurityContext(corev1ac.PodSecurityContext().
 						WithRunAsUser(0).
 						WithRunAsGroup(0)).
-					WithVolumes(corev1ac.Volume().
-						WithName("run-ateom").
-						WithHostPath(corev1ac.HostPathVolumeSource().
-							WithPath("/run/ateom-gvisor").
-							WithType(corev1.HostPathDirectoryOrCreate))))))
+					WithVolumes(
+						corev1ac.Volume().
+							WithName("run-ateom").
+							WithHostPath(corev1ac.HostPathVolumeSource().
+								WithPath("/run/ateom-gvisor").
+								WithType(corev1.HostPathDirectoryOrCreate)),
+						corev1ac.Volume().
+							WithName("run-netns").
+							WithHostPath(corev1ac.HostPathVolumeSource().
+								WithPath("/run/netns").
+								WithType(corev1.HostPathDirectoryOrCreate)),
+					))))
 }
 
 // SetupWithManager sets up the controller with the Manager.

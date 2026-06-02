@@ -138,8 +138,9 @@ func TestWorkerPoolCreatesDeployment(t *testing.T) {
 		if len(dep.OwnerReferences) == 0 || dep.OwnerReferences[0].Name != wp.Name {
 			return false, nil
 		}
-		return len(dep.Spec.Template.Spec.Volumes) == 1 &&
-			dep.Spec.Template.Spec.Volumes[0].Name == "run-ateom", nil
+		return len(dep.Spec.Template.Spec.Volumes) == 2 &&
+			dep.Spec.Template.Spec.Volumes[0].Name == "run-ateom" &&
+			dep.Spec.Template.Spec.Volumes[1].Name == "run-netns", nil
 	})
 }
 
