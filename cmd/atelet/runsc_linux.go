@@ -17,14 +17,19 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"os/exec"
+	"strings"
+	"unsafe"
 
 	"github.com/agent-substrate/substrate/internal/ateompath"
+	"golang.org/x/sys/unix"
 )
 
 type runsc struct {
@@ -245,6 +250,10 @@ func (r *runsc) cmdPause(ctx context.Context, containerName string) error {
 		return fmt.Errorf("while running `runsc pause`: %w", err)
 	}
 
+	if reclaimErr := r.reclaimMemory(ctx, containerName); reclaimErr != nil {
+		slog.ErrorContext(ctx, "failed to reclaim memory after pause", slog.String("container", containerName), slog.Any("error", reclaimErr))
+	}
+
 	return nil
 }
 
@@ -279,4 +288,103 @@ func (r *runsc) cmdResume(ctx context.Context, containerName string) error {
 	}
 
 	return nil
+}
+
+func (r *runsc) reclaimMemory(ctx context.Context, containerName string) error {
+	pidFilePath := ateompath.PIDFilePath(r.actorTemplateNamespace, r.actorTemplateName, r.actorID, containerName)
+	pidBytes, err := os.ReadFile(pidFilePath)
+	if err != nil {
+		return fmt.Errorf("failed to read PID file %s: %w", pidFilePath, err)
+	}
+	var pid int
+	if _, err := fmt.Sscanf(string(bytes.TrimSpace(pidBytes)), "%d", &pid); err != nil {
+		return fmt.Errorf("failed to parse PID %q: %w", string(pidBytes), err)
+	}
+
+	slog.InfoContext(ctx, "Triggering memory reclaim for process", slog.Int("pid", pid), slog.String("container", containerName))
+
+	// Open pidfd for the process
+	pidfd, err := unix.PidfdOpen(pid, 0)
+	if err != nil {
+		return fmt.Errorf("failed to open pidfd for PID %d: %w", pid, err)
+	}
+	defer unix.Close(pidfd)
+
+	mapsFile, err := os.Open(fmt.Sprintf("/proc/%d/maps", pid))
+	if err != nil {
+		return fmt.Errorf("failed to open proc maps: %w", err)
+	}
+	defer mapsFile.Close()
+
+	var iovecs []unix.Iovec
+	scanner := bufio.NewScanner(mapsFile)
+	for scanner.Scan() {
+		line := scanner.Text()
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		var start, end uintptr
+		if _, err := fmt.Sscanf(fields[0], "%x-%x", &start, &end); err != nil {
+			continue
+		}
+		if end <= start {
+			continue
+		}
+		perms := fields[1]
+		if !strings.ContainsAny(perms, "rwx") {
+			// Skip guard pages or regions without any read/write/execute permissions.
+			continue
+		}
+		// Skip special kernel regions
+		if len(fields) >= 6 {
+			path := fields[5]
+			if path == "[vvar]" || path == "[vdso]" || path == "[vsyscall]" {
+				continue
+			}
+		}
+		iovecs = append(iovecs, unix.Iovec{
+			Base: (*byte)(unsafe.Pointer(start)),
+			Len:  uint64(end - start),
+		})
+
+		// UIO_MAXIOV is typically 1024.
+		if len(iovecs) >= 1024 {
+			if _, err := processMadvise(pidfd, iovecs, 21 /* MADV_PAGEOUT */, 0); err != nil {
+				slog.ErrorContext(ctx, "Failed to page out batch of process memory", slog.Int("pid", pid), slog.Any("error", err))
+			}
+			iovecs = iovecs[:0]
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("error reading proc maps: %w", err)
+	}
+
+	if len(iovecs) > 0 {
+		if _, err := processMadvise(pidfd, iovecs, 21 /* MADV_PAGEOUT */, 0); err != nil {
+			slog.ErrorContext(ctx, "Failed to page out final batch of process memory", slog.Int("pid", pid), slog.Any("error", err))
+		}
+	}
+
+	return nil
+}
+
+func processMadvise(pidfd int, iovecs []unix.Iovec, advice int, flags uint32) (int, error) {
+	if len(iovecs) == 0 {
+		return 0, nil
+	}
+	r1, _, errno := unix.Syscall6(
+		unix.SYS_PROCESS_MADVISE,
+		uintptr(pidfd),
+		uintptr(unsafe.Pointer(&iovecs[0])),
+		uintptr(len(iovecs)),
+		uintptr(advice),
+		uintptr(flags),
+		0,
+	)
+	if errno != 0 {
+		return 0, errno
+	}
+	return int(r1), nil
 }
