@@ -63,6 +63,7 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: "9090"
     spec:
+      hostPID: true
       serviceAccountName: atelet
       containers:
       - name: atelet

@@ -54,3 +54,11 @@ func (r *runsc) cmdDelete(ctx context.Context, containerName string) error {
 func (r *runsc) cmdState(ctx context.Context, containerName string) error {
 	return errUnsupported
 }
+
+func (r *runsc) cmdPause(ctx context.Context, containerName string) error {
+	return errUnsupported
+}
+
+func (r *runsc) cmdResume(ctx context.Context, containerName string) error {
+	return errUnsupported
+}

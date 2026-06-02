@@ -159,4 +159,67 @@ func TestDemo3(t *testing.T) {
 
 	t.Logf("Successfully queried Substrate API. Found %d active actors total, %d in our namespace %s.",
 		len(listResp.GetActors()), len(myActors), nsObj.Name)
+
+	t.Logf("Resuming Actor %q...", actorID)
+	resumeResp, err := clients.SubstrateAPI.ResumeActor(ctx, &ateapipb.ResumeActorRequest{
+		ActorId: actorID,
+	})
+	if err != nil {
+		t.Fatalf("failed to resume Actor: %v", err)
+	}
+	t.Logf("Actor resume response status: %v", resumeResp.GetActor().GetStatus())
+
+	// Wait for actor to be RUNNING
+	const actorTimeout = 30 * time.Second
+	actorCtx, actorCancel := context.WithTimeout(ctx, actorTimeout)
+	defer actorCancel()
+	for {
+		getResp, err := clients.SubstrateAPI.GetActor(actorCtx, &ateapipb.GetActorRequest{
+			ActorId: actorID,
+		})
+		if err != nil {
+			t.Fatalf("failed to get Actor: %v", err)
+		}
+		if getResp.GetActor().GetStatus() == ateapipb.Actor_STATUS_RUNNING {
+			t.Logf("Actor %q is RUNNING", actorID)
+			break
+		}
+		select {
+		case <-actorCtx.Done():
+			t.Fatalf("Timed out waiting for Actor %q to be RUNNING, current status: %v", actorID, getResp.GetActor().GetStatus())
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+
+	t.Logf("Suspending Actor %q...", actorID)
+	suspendResp, err := clients.SubstrateAPI.SuspendActor(ctx, &ateapipb.SuspendActorRequest{
+		ActorId: actorID,
+	})
+	if err != nil {
+		t.Fatalf("failed to suspend Actor: %v", err)
+	}
+	t.Logf("Actor suspend response status: %v", suspendResp.GetActor().GetStatus())
+
+	// Wait for actor to be SUSPENDED
+	susCtx, susCancel := context.WithTimeout(ctx, actorTimeout)
+	defer susCancel()
+	for {
+		getResp, err := clients.SubstrateAPI.GetActor(susCtx, &ateapipb.GetActorRequest{
+			ActorId: actorID,
+		})
+		if err != nil {
+			t.Fatalf("failed to get Actor: %v", err)
+		}
+		if getResp.GetActor().GetStatus() == ateapipb.Actor_STATUS_SUSPENDED {
+			t.Logf("Actor %q is SUSPENDED", actorID)
+			break
+		}
+		select {
+		case <-susCtx.Done():
+			t.Fatalf("Timed out waiting for Actor %q to be SUSPENDED, current status: %v", actorID, getResp.GetActor().GetStatus())
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+
+	t.Logf("Successfully queried Substrate API and tested local Resume/Suspend cycle.")
 }

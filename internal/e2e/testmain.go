@@ -69,6 +69,5 @@ func runAndCleanup(m *testing.M) int {
 	}
 
 	defer CleanupNamespaces()
-
 	return m.Run()
 }

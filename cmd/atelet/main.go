@@ -368,6 +368,29 @@ func (s *AteomHerder) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRe
 		actorID:                req.GetActorId(),
 	}
 
+	if req.GetKeepPausedLocally() {
+		s.actorLogger.EmitLifecycleLog("Actor pausing locally", req.GetActorId(), req.GetActorTemplateName(), req.GetActorTemplateNamespace())
+
+		if err := rcmd.cmdPause(ctx, "pause"); err != nil {
+			return nil, fmt.Errorf("while pausing pause container locally: %w", err)
+		}
+
+		s.actorLogger.EmitLifecycleLog("Actor paused locally", req.GetActorId(), req.GetActorTemplateName(), req.GetActorTemplateNamespace())
+
+		// Tell ateom to clean up/restore network namespace and move eth0 back.
+		if _, err := client.CheckpointWorkload(ctx, &ateompb.CheckpointWorkloadRequest{
+			ActorTemplateNamespace: req.GetActorTemplateNamespace(),
+			ActorTemplateName:      req.GetActorTemplateName(),
+			ActorId:                req.GetActorId(),
+			RunscPath:              runscPath,
+			Spec:                   buildAteomWorkloadSpec(req.GetSpec()),
+		}); err != nil {
+			return nil, fmt.Errorf("while calling ateom.CheckpointWorkload: %w", err)
+		}
+
+		return &ateletpb.CheckpointResponse{}, nil
+	}
+
 	// Checkpoint into checkpoint-state, which is a separate directory from
 	// restore-state. This lets us checkpoint even while a background restore is
 	// still demand-paging from restore-state.
@@ -455,6 +478,42 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 	}
 
 	ns, tmpl, actorID := req.GetActorTemplateNamespace(), req.GetActorTemplateName(), req.GetActorId()
+
+	// Check if the container is already paused locally on this node
+	stateDir := ateompath.RunSCStateDir(ns, tmpl, actorID)
+	pauseStatePath := filepath.Join(stateDir, "pause_sandbox:pause.state")
+	if fi, statErr := os.Stat(pauseStatePath); statErr == nil && !fi.IsDir() {
+		s.actorLogger.EmitLifecycleLog("Actor resuming locally", actorID, tmpl, ns)
+
+		client, err := s.dialAteom(ctx, req.GetTargetAteomNamespace(), req.GetTargetAteomName())
+		if err != nil {
+			return nil, err
+		}
+
+		// Tell ateom to prepare/restore network namespace.
+		if _, err := client.RestoreWorkload(ctx, &ateompb.RestoreWorkloadRequest{
+			ActorTemplateNamespace: ns,
+			ActorTemplateName:      tmpl,
+			ActorId:                actorID,
+			RunscPath:              runscPath,
+			Spec:                   buildAteomWorkloadSpec(req.GetSpec()),
+		}); err != nil {
+			return nil, fmt.Errorf("while calling ateom.RestoreWorkload: %w", err)
+		}
+
+		rcmd := &runsc{
+			path:                   runscPath,
+			actorTemplateNamespace: ns,
+			actorTemplateName:      tmpl,
+			actorID:                actorID,
+		}
+		if err := rcmd.cmdResume(ctx, "pause"); err != nil {
+			return nil, fmt.Errorf("while resuming pause container locally: %w", err)
+		}
+
+		s.actorLogger.EmitLifecycleLog("Actor resumed locally", actorID, tmpl, ns)
+		return &ateletpb.RestoreResponse{}, nil
+	}
 
 	if err := resetActorDirs(ns, tmpl, actorID); err != nil {
 		return nil, fmt.Errorf("while resetting actor dirs: %w", err)

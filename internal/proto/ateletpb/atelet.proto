@@ -114,6 +114,8 @@ message CheckpointRequest {
   //
   // For example: "gs://bucket/actors/1234/snapshots/5678/"
   string snapshot_uri_prefix = 8;
+
+  bool keep_paused_locally = 9;
 }
 
 message CheckpointResponse {

@@ -560,6 +560,7 @@ type CheckpointRequest struct {
 	//
 	// For example: "gs://bucket/actors/1234/snapshots/5678/"
 	SnapshotUriPrefix string `protobuf:"bytes,8,opt,name=snapshot_uri_prefix,json=snapshotUriPrefix,proto3" json:"snapshot_uri_prefix,omitempty"`
+	KeepPausedLocally bool   `protobuf:"varint,9,opt,name=keep_paused_locally,json=keepPausedLocally,proto3" json:"keep_paused_locally,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -648,6 +649,13 @@ func (x *CheckpointRequest) GetSnapshotUriPrefix() string {
 		return x.SnapshotUriPrefix
 	}
 	return ""
+}
+
+func (x *CheckpointRequest) GetKeepPausedLocally() bool {
+	if x != nil {
+		return x.KeepPausedLocally
+	}
+	return false
 }
 
 type CheckpointResponse struct {
@@ -863,7 +871,7 @@ const file_atelet_proto_rawDesc = "" +
 	"\bEnvEntry\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value\"\r\n" +
-	"\vRunResponse\"\xff\x02\n" +
+	"\vRunResponse\"\xaf\x03\n" +
 	"\x11CheckpointRequest\x124\n" +
 	"\x16target_ateom_namespace\x18\x01 \x01(\tR\x14targetAteomNamespace\x12*\n" +
 	"\x11target_ateom_name\x18\x02 \x01(\tR\x0ftargetAteomName\x128\n" +
@@ -872,7 +880,8 @@ const file_atelet_proto_rawDesc = "" +
 	"\bactor_id\x18\x05 \x01(\tR\aactorId\x12)\n" +
 	"\x05runsc\x18\x06 \x01(\v2\x13.atelet.RunscConfigR\x05runsc\x12(\n" +
 	"\x04spec\x18\a \x01(\v2\x14.atelet.WorkloadSpecR\x04spec\x12.\n" +
-	"\x13snapshot_uri_prefix\x18\b \x01(\tR\x11snapshotUriPrefix\"\x14\n" +
+	"\x13snapshot_uri_prefix\x18\b \x01(\tR\x11snapshotUriPrefix\x12.\n" +
+	"\x13keep_paused_locally\x18\t \x01(\bR\x11keepPausedLocally\"\x14\n" +
 	"\x12CheckpointResponse\"\xfc\x02\n" +
 	"\x0eRestoreRequest\x124\n" +
 	"\x16target_ateom_namespace\x18\x01 \x01(\tR\x14targetAteomNamespace\x12*\n" +

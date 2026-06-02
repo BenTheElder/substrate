@@ -40,11 +40,18 @@ func (r *runsc) cmdCreate(ctx context.Context, out io.Writer, containerName stri
 
 	slog.InfoContext(ctx, "About to run runsc create", slog.String("container", containerName))
 
+	logDir := ateompath.RunscDebugLogDir(r.actorTemplateNamespace, r.actorTemplateName, r.actorID, containerName)
+	if err := os.MkdirAll(logDir, 0o700); err != nil {
+		return fmt.Errorf("while creating debug log dir: %w", err)
+	}
+
 	cmd := exec.CommandContext(
 		ctx,
 		r.path,
 		"-log-format", "json",
 		"--alsologtostderr",
+		"-debug",
+		"-debug-log", logDir+"/",
 		"-root", ateompath.RunSCStateDir(r.actorTemplateNamespace, r.actorTemplateName, r.actorID),
 		"create",
 		"-bundle", ateompath.OCIBundlePath(r.actorTemplateNamespace, r.actorTemplateName, r.actorID, containerName),
@@ -68,11 +75,18 @@ func (r *runsc) cmdStart(ctx context.Context, out io.Writer, containerName strin
 
 	slog.InfoContext(ctx, "About to run runsc start", slog.String("container", containerName))
 
+	logDir := ateompath.RunscDebugLogDir(r.actorTemplateNamespace, r.actorTemplateName, r.actorID, containerName)
+	if err := os.MkdirAll(logDir, 0o700); err != nil {
+		return fmt.Errorf("while creating debug log dir: %w", err)
+	}
+
 	cmd := exec.CommandContext(
 		ctx,
 		r.path,
 		"-log-format", "json",
 		"--alsologtostderr",
+		"-debug",
+		"-debug-log", logDir+"/",
 		"-allow-connected-on-save",
 		"-root", ateompath.RunSCStateDir(r.actorTemplateNamespace, r.actorTemplateName, r.actorID),
 		"start",
@@ -95,11 +109,18 @@ func (r *runsc) cmdCheckpoint(ctx context.Context, containerName, checkpointPath
 
 	slog.InfoContext(ctx, "About to run runsc checkpoint", slog.String("container", containerName))
 
+	logDir := ateompath.RunscDebugLogDir(r.actorTemplateNamespace, r.actorTemplateName, r.actorID, containerName)
+	if err := os.MkdirAll(logDir, 0o700); err != nil {
+		return fmt.Errorf("while creating debug log dir: %w", err)
+	}
+
 	cmd := exec.CommandContext(
 		ctx,
 		r.path,
 		"-log-format", "json",
 		"--alsologtostderr",
+		"-debug",
+		"-debug-log", logDir+"/",
 		"-root", ateompath.RunSCStateDir(r.actorTemplateNamespace, r.actorTemplateName, r.actorID),
 		"checkpoint",
 		"-image-path", checkpointPath,
@@ -120,11 +141,18 @@ func (r *runsc) cmdRestore(ctx context.Context, out io.Writer, containerName, ch
 
 	slog.InfoContext(ctx, "About to run runsc restore", slog.String("container", containerName))
 
+	logDir := ateompath.RunscDebugLogDir(r.actorTemplateNamespace, r.actorTemplateName, r.actorID, containerName)
+	if err := os.MkdirAll(logDir, 0o700); err != nil {
+		return fmt.Errorf("while creating debug log dir: %w", err)
+	}
+
 	cmd := exec.CommandContext(
 		ctx,
 		r.path,
 		"-log-format", "json",
 		"--alsologtostderr",
+		"-debug",
+		"-debug-log", logDir+"/",
 		"-root", ateompath.RunSCStateDir(r.actorTemplateNamespace, r.actorTemplateName, r.actorID),
 		"restore",
 		"-bundle", ateompath.OCIBundlePath(r.actorTemplateNamespace, r.actorTemplateName, r.actorID, containerName),
@@ -184,5 +212,71 @@ func (r *runsc) cmdState(ctx context.Context, containerName string) error {
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("while running `runsc state`: %w", err)
 	}
+	return nil
+}
+
+func (r *runsc) cmdPause(ctx context.Context, containerName string) error {
+	lockReaper()
+	defer unlockReaper()
+
+	slog.InfoContext(ctx, "About to run runsc pause", slog.String("container", containerName))
+
+	logDir := ateompath.RunscDebugLogDir(r.actorTemplateNamespace, r.actorTemplateName, r.actorID, containerName)
+	if err := os.MkdirAll(logDir, 0o700); err != nil {
+		return fmt.Errorf("while creating debug log dir: %w", err)
+	}
+
+	cmd := exec.CommandContext(
+		ctx,
+		r.path,
+		"-log-format", "json",
+		"--alsologtostderr",
+		"-debug",
+		"-debug-log", logDir+"/",
+		"-root", ateompath.RunSCStateDir(r.actorTemplateNamespace, r.actorTemplateName, r.actorID),
+		"pause",
+		containerName,
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	err := cmd.Run()
+	if err != nil {
+		return fmt.Errorf("while running `runsc pause`: %w", err)
+	}
+
+	return nil
+}
+
+func (r *runsc) cmdResume(ctx context.Context, containerName string) error {
+	lockReaper()
+	defer unlockReaper()
+
+	slog.InfoContext(ctx, "About to run runsc resume", slog.String("container", containerName))
+
+	logDir := ateompath.RunscDebugLogDir(r.actorTemplateNamespace, r.actorTemplateName, r.actorID, containerName)
+	if err := os.MkdirAll(logDir, 0o700); err != nil {
+		return fmt.Errorf("while creating debug log dir: %w", err)
+	}
+
+	cmd := exec.CommandContext(
+		ctx,
+		r.path,
+		"-log-format", "json",
+		"--alsologtostderr",
+		"-debug",
+		"-debug-log", logDir+"/",
+		"-root", ateompath.RunSCStateDir(r.actorTemplateNamespace, r.actorTemplateName, r.actorID),
+		"resume",
+		containerName,
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	err := cmd.Run()
+	if err != nil {
+		return fmt.Errorf("while running `runsc resume`: %w", err)
+	}
+
 	return nil
 }

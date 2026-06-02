@@ -135,6 +135,11 @@ func (s *CallAteletSuspendStep) Execute(ctx context.Context, input *SuspendInput
 		runscCfg.Authentication = authnCfg
 	}
 
+	keepPausedLocally := true
+	if state.ActorTemplate.Status.GoldenActorID == state.Actor.GetActorId() {
+		keepPausedLocally = false
+	}
+
 	req := &ateletpb.CheckpointRequest{
 		TargetAteomNamespace:   state.Actor.GetAteomPodNamespace(),
 		TargetAteomName:        state.Actor.GetAteomPodName(),
@@ -146,6 +151,7 @@ func (s *CallAteletSuspendStep) Execute(ctx context.Context, input *SuspendInput
 			PauseImage: state.ActorTemplate.Spec.PauseImage,
 		},
 		SnapshotUriPrefix: state.Actor.GetInProgressSnapshot(),
+		KeepPausedLocally: keepPausedLocally,
 	}
 	for _, ctr := range state.ActorTemplate.Spec.Containers {
 		ateletCtr := &ateletpb.Container{
