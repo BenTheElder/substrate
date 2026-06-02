@@ -26,6 +26,7 @@ import (
 	"cloud.google.com/go/container/apiv1/containerpb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
 
@@ -62,6 +63,19 @@ func createClusterInternal(ctx context.Context, env *Environment, client *contai
 					InitialNodeCount: 2,
 					Config: &containerpb.NodeConfig{
 						MachineType: env.GVisorNodeMachineType,
+						ImageType:   "ubuntu_containerd",
+						LinuxNodeConfig: &containerpb.LinuxNodeConfig{
+							SwapConfig: &containerpb.LinuxNodeConfig_SwapConfig{
+								Enabled: proto.Bool(true),
+								PerformanceProfile: &containerpb.LinuxNodeConfig_SwapConfig_BootDiskProfile_{
+									BootDiskProfile: &containerpb.LinuxNodeConfig_SwapConfig_BootDiskProfile{
+										SwapSize: &containerpb.LinuxNodeConfig_SwapConfig_BootDiskProfile_SwapSizeGib{
+											SwapSizeGib: 8,
+										},
+									},
+								},
+							},
+						},
 					},
 				},
 			},
@@ -185,7 +199,141 @@ func createClusterIdempotent(ctx context.Context, env *Environment) error {
 		slog.Info("Cluster EnableK8SBetaApis match perfectly.", slog.String("cluster", env.ClusterName))
 	}
 
+	if err := reconcileNodePools(ctx, env, client, clusterName); err != nil {
+		return fmt.Errorf("reconciling node pools: %w", err)
+	}
+
 	return nil
+}
+
+func reconcileNodePools(ctx context.Context, env *Environment, client *container.ClusterManagerClient, clusterName string) error {
+	slog.Info("Reconciling node pools...", slog.String("cluster", clusterName))
+
+	// List node pools of the cluster
+	resp, err := client.ListNodePools(ctx, &containerpb.ListNodePoolsRequest{
+		Parent: clusterName,
+	})
+	if err != nil {
+		return fmt.Errorf("list node pools: %w", err)
+	}
+
+	desiredNodePoolName := env.NodePoolName
+	if desiredNodePoolName == "" {
+		desiredNodePoolName = "substrate-node-pool"
+	}
+
+	var matchingPool *containerpb.NodePool
+	var mismatchingPools []*containerpb.NodePool
+	var unrelatedPools []*containerpb.NodePool
+
+	for _, np := range resp.NodePools {
+		isOurPool := np.Name == desiredNodePoolName ||
+			strings.HasPrefix(np.Name, desiredNodePoolName+"-")
+
+		if isOurPool {
+			// Check if configuration matches
+			matches := true
+			if np.Config == nil {
+				matches = false
+			} else {
+				if np.Config.ImageType != "ubuntu_containerd" {
+					matches = false
+				}
+				if np.Config.LinuxNodeConfig == nil ||
+					np.Config.LinuxNodeConfig.SwapConfig == nil ||
+					np.Config.LinuxNodeConfig.SwapConfig.Enabled == nil ||
+					!*np.Config.LinuxNodeConfig.SwapConfig.Enabled {
+					matches = false
+				}
+			}
+			if matches {
+				matchingPool = np
+			} else {
+				slog.Info("Found mismatching node pool configuration", slog.String("nodePool", np.Name))
+				mismatchingPools = append(mismatchingPools, np)
+			}
+		} else {
+			unrelatedPools = append(unrelatedPools, np)
+		}
+	}
+
+	// Determine new pool name if we need to create it
+	var activePoolName string
+	if matchingPool != nil {
+		activePoolName = matchingPool.Name
+		slog.Info("Matching node pool already exists", slog.String("nodePool", activePoolName))
+	} else {
+		// Determine which name is free among the blue-green candidates
+		if !isNameInUse(resp.NodePools, desiredNodePoolName) {
+			activePoolName = desiredNodePoolName
+		} else if !isNameInUse(resp.NodePools, desiredNodePoolName+"-a") {
+			activePoolName = desiredNodePoolName + "-a"
+		} else {
+			activePoolName = desiredNodePoolName + "-b"
+		}
+
+		slog.Info("Creating node pool with Ubuntu and Swap configuration...", slog.String("nodePool", activePoolName))
+		req := &containerpb.CreateNodePoolRequest{
+			Parent: clusterName,
+			NodePool: &containerpb.NodePool{
+				Name:             activePoolName,
+				InitialNodeCount: 2,
+				Config: &containerpb.NodeConfig{
+					MachineType: env.GVisorNodeMachineType,
+					ImageType:   "ubuntu_containerd",
+					LinuxNodeConfig: &containerpb.LinuxNodeConfig{
+						SwapConfig: &containerpb.LinuxNodeConfig_SwapConfig{
+							Enabled: proto.Bool(true),
+							PerformanceProfile: &containerpb.LinuxNodeConfig_SwapConfig_BootDiskProfile_{
+								BootDiskProfile: &containerpb.LinuxNodeConfig_SwapConfig_BootDiskProfile{
+									SwapSize: &containerpb.LinuxNodeConfig_SwapConfig_BootDiskProfile_SwapSizeGib{
+										SwapSizeGib: 8,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+		op, err := client.CreateNodePool(ctx, req)
+		if err != nil {
+			return fmt.Errorf("create node pool %s: %w", activePoolName, err)
+		}
+		if err := waitContainerOperation(ctx, client, op.Name, env); err != nil {
+			return err
+		}
+		slog.Info("Node pool created successfully", slog.String("nodePool", activePoolName))
+	}
+
+	// Delete mismatching pools and unrelated pools (like default-pool)
+	poolsToDelete := append(mismatchingPools, unrelatedPools...)
+	for _, np := range poolsToDelete {
+		slog.Info("Deleting old/unwanted node pool...", slog.String("nodePool", np.Name))
+		op, err := client.DeleteNodePool(ctx, &containerpb.DeleteNodePoolRequest{
+			Name: fmt.Sprintf("%s/nodePools/%s", clusterName, np.Name),
+		})
+		if err != nil {
+			slog.ErrorContext(ctx, "failed to delete node pool", slog.String("nodePool", np.Name), slog.Any("error", err))
+			continue
+		}
+		if err := waitContainerOperation(ctx, client, op.Name, env); err != nil {
+			slog.ErrorContext(ctx, "failed waiting for node pool deletion", slog.String("nodePool", np.Name), slog.Any("error", err))
+			continue
+		}
+		slog.Info("Node pool deleted successfully", slog.String("nodePool", np.Name))
+	}
+
+	return nil
+}
+
+func isNameInUse(pools []*containerpb.NodePool, name string) bool {
+	for _, p := range pools {
+		if p.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 func waitContainerOperation(ctx context.Context, client *container.ClusterManagerClient, opName string, env *Environment) error {

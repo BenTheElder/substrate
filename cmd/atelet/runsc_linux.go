@@ -388,3 +388,51 @@ func processMadvise(pidfd int, iovecs []unix.Iovec, advice int, flags uint32) (i
 	}
 	return int(r1), nil
 }
+
+func setupHostSwap(ctx context.Context) error {
+	const zswapEnabledPath = "/sys/module/zswap/parameters/enabled"
+	if _, err := os.Stat(zswapEnabledPath); os.IsNotExist(err) {
+		slog.InfoContext(ctx, "zswap is not supported or enabled in the host kernel (enabled parameter file not found)")
+		return nil
+	}
+
+	slog.InfoContext(ctx, "Configuring zswap on host kernel...")
+
+	// 1. Enable zswap
+	if err := os.WriteFile(zswapEnabledPath, []byte("Y\n"), 0644); err != nil {
+		return fmt.Errorf("failed to enable zswap: %w", err)
+	}
+	slog.InfoContext(ctx, "Enabled zswap")
+
+	// 2. Set compressor: try zstd, fall back to lz4, then lzo
+	compressors := []string{"zstd", "lz4", "lzo"}
+	var compressorApplied string
+	for _, comp := range compressors {
+		if err := os.WriteFile("/sys/module/zswap/parameters/compressor", []byte(comp+"\n"), 0644); err == nil {
+			compressorApplied = comp
+			break
+		}
+	}
+	if compressorApplied != "" {
+		slog.InfoContext(ctx, "Configured zswap compressor", slog.String("compressor", compressorApplied))
+	} else {
+		slog.WarnContext(ctx, "Failed to configure zswap compressor (used kernel default)")
+	}
+
+	// 3. Set zpool: try zsmalloc, fall back to z3fold, then zbud
+	zpools := []string{"zsmalloc", "z3fold", "zbud"}
+	var zpoolApplied string
+	for _, zp := range zpools {
+		if err := os.WriteFile("/sys/module/zswap/parameters/zpool", []byte(zp+"\n"), 0644); err == nil {
+			zpoolApplied = zp
+			break
+		}
+	}
+	if zpoolApplied != "" {
+		slog.InfoContext(ctx, "Configured zswap zpool", slog.String("zpool", zpoolApplied))
+	} else {
+		slog.WarnContext(ctx, "Failed to configure zswap zpool (used kernel default)")
+	}
+
+	return nil
+}

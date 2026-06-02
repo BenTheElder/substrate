@@ -62,3 +62,7 @@ func (r *runsc) cmdPause(ctx context.Context, containerName string) error {
 func (r *runsc) cmdResume(ctx context.Context, containerName string) error {
 	return errUnsupported
 }
+
+func setupHostSwap(ctx context.Context) error {
+	return nil
+}

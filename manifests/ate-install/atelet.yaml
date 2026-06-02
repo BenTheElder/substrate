@@ -97,6 +97,8 @@ spec:
         - name: run-netns
           mountPath: /run/netns
           mountPropagation: Bidirectional
+        - name: sys
+          mountPath: /sys
       volumes:
       - name: run-ateom
         hostPath:
@@ -106,3 +108,7 @@ spec:
         hostPath:
           path: /run/netns
           type: DirectoryOrCreate
+      - name: sys
+        hostPath:
+          path: /sys
+          type: Directory

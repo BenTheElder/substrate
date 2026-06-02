@@ -152,6 +152,10 @@ func main() {
 
 	startReaper()
 
+	if err := setupHostSwap(ctx); err != nil {
+		slog.WarnContext(ctx, "Failed to configure host swap/zswap", slog.Any("error", err))
+	}
+
 	actorLogger := actorlogger.NewActorLogger(actorlogger.NewSyncedWriter(os.Stdout), metadata.OnGCE())
 
 	wmService := NewService(
