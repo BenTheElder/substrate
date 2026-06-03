@@ -17,6 +17,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -213,4 +214,27 @@ func (r *runsc) cmdState(ctx context.Context, containerName string) error {
 		return fmt.Errorf("while running `runsc state`: %w", err)
 	}
 	return nil
+}
+
+// containerExists reports whether containerName exists in this actor's runsc
+// root. It runs `runsc state`, capturing combined output so a missing container
+// can be distinguished from a genuine failure (see parseContainerExists).
+func (r *runsc) containerExists(ctx context.Context, containerName string) (bool, error) {
+	reapLock.RLock()
+	defer reapLock.RUnlock()
+
+	cmd := exec.CommandContext(
+		ctx,
+		r.path,
+		"-log-format", "json",
+		"--alsologtostderr",
+		"-root", ateompath.RunSCStateDir(r.actorTemplateNamespace, r.actorTemplateName, r.actorID),
+		"state",
+		containerName,
+	)
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	runErr := cmd.Run()
+	return parseContainerExists(buf.String(), runErr)
 }

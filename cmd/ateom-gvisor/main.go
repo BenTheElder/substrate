@@ -41,7 +41,9 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/reflection"
+	"google.golang.org/grpc/status"
 )
 
 var (
@@ -333,6 +335,22 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 	checkpointPath := ateompath.CheckpointStateDir(req.GetActorTemplateNamespace(), req.GetActorTemplateName(), req.GetActorId())
 	if err := os.MkdirAll(checkpointPath, 0o700); err != nil {
 		return nil, fmt.Errorf("while creating checkpoint directory: %w", err)
+	}
+
+	// If the pause container (root of the sandbox) is not present, there is
+	// nothing to checkpoint. This happens on duplicate/retry calls after the
+	// actor was already checkpointed and torn down, or if it was never restored
+	// on this ateom. Surface a typed NotFound rather than letting `runsc
+	// checkpoint` fail opaquely ("FetchSpec failed: ... does not exist", exit
+	// status 128), so the caller can distinguish this from a real failure.
+	exists, err := rcmd.containerExists(ctx, "pause")
+	if err != nil {
+		return nil, fmt.Errorf("while checking for pause container: %w", err)
+	}
+	if !exists {
+		return nil, status.Errorf(codes.NotFound,
+			"pause container not present for actor %s/%s/%s; nothing to checkpoint",
+			req.GetActorTemplateNamespace(), req.GetActorTemplateName(), req.GetActorId())
 	}
 
 	// Checkpoint pause container (root of the sandbox)
