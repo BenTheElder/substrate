@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -63,7 +64,7 @@ func createClusterInternal(ctx context.Context, env *Environment, client *contai
 					InitialNodeCount: 2,
 					Config: &containerpb.NodeConfig{
 						MachineType: env.GVisorNodeMachineType,
-						ImageType:   "ubuntu_containerd",
+						ImageType:   "cos_containerd",
 						LinuxNodeConfig: &containerpb.LinuxNodeConfig{
 							SwapConfig: &containerpb.LinuxNodeConfig_SwapConfig{
 								Enabled: proto.Bool(true),
@@ -199,11 +200,95 @@ func createClusterIdempotent(ctx context.Context, env *Environment) error {
 		slog.Info("Cluster EnableK8SBetaApis match perfectly.", slog.String("cluster", env.ClusterName))
 	}
 
+	if err := reconcileClusterVersion(ctx, env, client, clusterName, cluster.GetCurrentMasterVersion()); err != nil {
+		return fmt.Errorf("reconciling cluster version: %w", err)
+	}
+
 	if err := reconcileNodePools(ctx, env, client, clusterName); err != nil {
 		return fmt.Errorf("reconciling node pools: %w", err)
 	}
 
 	return nil
+}
+
+// reconcileClusterVersion upgrades the cluster control plane to env.ClusterVersion
+// when the current version is older. GKE does not support downgrades, so a
+// current version that is newer than (or equal to) the desired version is left
+// untouched.
+func reconcileClusterVersion(ctx context.Context, env *Environment, client *container.ClusterManagerClient, clusterName, currentVersion string) error {
+	desired := env.ClusterVersion
+	if desired == "" {
+		slog.Info("CLUSTER_VERSION not set; skipping control plane version reconciliation")
+		return nil
+	}
+	if !gkeVersionLess(currentVersion, desired) {
+		slog.Info("Cluster control plane version is up to date", slog.String("current", currentVersion), slog.String("desired", desired))
+		return nil
+	}
+
+	slog.Info("Upgrading cluster control plane...", slog.String("current", currentVersion), slog.String("desired", desired))
+	op, err := client.UpdateCluster(ctx, &containerpb.UpdateClusterRequest{
+		Name: clusterName,
+		Update: &containerpb.ClusterUpdate{
+			DesiredMasterVersion: desired,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("upgrade control plane to %s: %w", desired, err)
+	}
+	if err := waitContainerOperation(ctx, client, op.Name, env); err != nil {
+		return err
+	}
+	slog.Info("Cluster control plane upgraded successfully", slog.String("version", desired))
+	return nil
+}
+
+// desiredNodePoolVersion returns the version node pools should run. It prefers
+// NODE_POOL_VERSION and falls back to CLUSTER_VERSION. Node pool versions may
+// not exceed the control plane version, which reconcileClusterVersion upgrades
+// first.
+func desiredNodePoolVersion(env *Environment) string {
+	if env.NodePoolVersion != "" {
+		return env.NodePoolVersion
+	}
+	return env.ClusterVersion
+}
+
+// parseGKEVersion splits a GKE version like "1.36.0-gke.2459000" into comparable
+// integer components [major, minor, patch, gkeBuild]. Missing or non-numeric
+// components are treated as 0 so comparisons degrade gracefully.
+func parseGKEVersion(v string) [4]int {
+	var out [4]int
+	v = strings.TrimPrefix(v, "v")
+	semver := v
+	if i := strings.Index(v, "-gke."); i >= 0 {
+		semver = v[:i]
+		gke := strings.SplitN(v[i+len("-gke."):], ".", 2)[0]
+		out[3] = atoiSafe(gke)
+	}
+	for i, p := range strings.Split(semver, ".") {
+		if i > 2 {
+			break
+		}
+		out[i] = atoiSafe(p)
+	}
+	return out
+}
+
+func atoiSafe(s string) int {
+	n, _ := strconv.Atoi(strings.TrimFunc(s, func(r rune) bool { return r < '0' || r > '9' }))
+	return n
+}
+
+// gkeVersionLess reports whether GKE version a is strictly older than b.
+func gkeVersionLess(a, b string) bool {
+	pa, pb := parseGKEVersion(a), parseGKEVersion(b)
+	for i := range pa {
+		if pa[i] != pb[i] {
+			return pa[i] < pb[i]
+		}
+	}
+	return false
 }
 
 func reconcileNodePools(ctx context.Context, env *Environment, client *container.ClusterManagerClient, clusterName string) error {
@@ -236,7 +321,7 @@ func reconcileNodePools(ctx context.Context, env *Environment, client *container
 			if np.Config == nil {
 				matches = false
 			} else {
-				if np.Config.ImageType != "ubuntu_containerd" {
+				if np.Config.ImageType != "cos_containerd" {
 					matches = false
 				}
 				if np.Config.LinuxNodeConfig == nil ||
@@ -262,6 +347,30 @@ func reconcileNodePools(ctx context.Context, env *Environment, client *container
 	if matchingPool != nil {
 		activePoolName = matchingPool.Name
 		slog.Info("Matching node pool already exists", slog.String("nodePool", activePoolName))
+
+		// Upgrade the node pool in place if it is older than the desired version.
+		desiredNPV := desiredNodePoolVersion(env)
+		if desiredNPV != "" && gkeVersionLess(matchingPool.GetVersion(), desiredNPV) {
+			slog.Info("Upgrading node pool version...",
+				slog.String("nodePool", activePoolName),
+				slog.String("current", matchingPool.GetVersion()),
+				slog.String("desired", desiredNPV))
+			op, err := client.UpdateNodePool(ctx, &containerpb.UpdateNodePoolRequest{
+				Name:        fmt.Sprintf("%s/nodePools/%s", clusterName, matchingPool.Name),
+				NodeVersion: desiredNPV,
+				// ImageType is required by UpdateNodePool; keep it on COS.
+				ImageType: "cos_containerd",
+			})
+			if err != nil {
+				return fmt.Errorf("upgrade node pool %s: %w", matchingPool.Name, err)
+			}
+			if err := waitContainerOperation(ctx, client, op.Name, env); err != nil {
+				return err
+			}
+			slog.Info("Node pool upgraded successfully", slog.String("nodePool", activePoolName))
+		} else {
+			slog.Info("Node pool version is up to date", slog.String("nodePool", activePoolName), slog.String("version", matchingPool.GetVersion()))
+		}
 	} else {
 		// Determine which name is free among the blue-green candidates
 		if !isNameInUse(resp.NodePools, desiredNodePoolName) {
@@ -272,15 +381,16 @@ func reconcileNodePools(ctx context.Context, env *Environment, client *container
 			activePoolName = desiredNodePoolName + "-b"
 		}
 
-		slog.Info("Creating node pool with Ubuntu and Swap configuration...", slog.String("nodePool", activePoolName))
+		slog.Info("Creating node pool with COS and Swap configuration...", slog.String("nodePool", activePoolName), slog.String("version", desiredNodePoolVersion(env)))
 		req := &containerpb.CreateNodePoolRequest{
 			Parent: clusterName,
 			NodePool: &containerpb.NodePool{
 				Name:             activePoolName,
 				InitialNodeCount: 2,
+				Version:          desiredNodePoolVersion(env),
 				Config: &containerpb.NodeConfig{
 					MachineType: env.GVisorNodeMachineType,
-					ImageType:   "ubuntu_containerd",
+					ImageType:   "cos_containerd",
 					LinuxNodeConfig: &containerpb.LinuxNodeConfig{
 						SwapConfig: &containerpb.LinuxNodeConfig_SwapConfig{
 							Enabled: proto.Bool(true),
