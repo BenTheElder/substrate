@@ -19,21 +19,38 @@ import (
 	"fmt"
 
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
+
+const maxPageSize = 1000
 
 func (s *Service) ListActors(ctx context.Context, req *ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
 	if err := validateListActorsRequest(req); err != nil {
-		return nil, err
+		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	actors, err := s.persistence.ListActors(ctx)
+	pageSize := req.GetPageSize()
+	if pageSize == 0 {
+		pageSize = maxPageSize
+	}
+
+	actors, nextToken, err := s.persistence.ListActors(ctx, pageSize, req.GetPageToken())
 	if err != nil {
 		return nil, fmt.Errorf("while listing actors in db: %w", err)
 	}
 	return &ateapipb.ListActorsResponse{
-		Actors: actors,
+		Actors:        actors,
+		NextPageToken: nextToken,
 	}, nil
 }
 
-func validateListActorsRequest(_ *ateapipb.ListActorsRequest) error {
+func validateListActorsRequest(req *ateapipb.ListActorsRequest) error {
+	pageSize := req.GetPageSize()
+	if pageSize < 0 {
+		return fmt.Errorf("page_size cannot be negative")
+	}
+	if pageSize > maxPageSize {
+		return fmt.Errorf("page_size %d exceeds maximum page size %d", pageSize, maxPageSize)
+	}
 	return nil
 }
