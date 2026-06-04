@@ -133,6 +133,13 @@ dev server **survives suspend/resume on all mechanisms and serves HTTP again**
 **sparse-copy wins when wake touches most of it** (Vite: serving faults the graph).
 Sparse makes copy cheap in both cases (it only ever reads touched pages).
 
+Caveat measured while fixing the correctness check (see Open items): ondemand's
+per-page userfaultfd fault-in is **slow in aggregate (~40 MB/s)** — faulting a full
+4 GiB working set back in took **~98 s**, vs `copy`'s eager bulk read of the same
+4 GiB in **~2.6 s**. So ondemand's flat ~25 ms is a *first-response* win; if the
+workload ends up touching most of its memory, **copy is far better in total** (and
+the gap widens with size). Pick ondemand only when wake genuinely touches little.
+
 ## 5. gVisor/runsc — C workload (n=3)
 
 | mechanism | WS | resume | suspend | image | freed (cgroup swap) |
@@ -309,9 +316,16 @@ survive a plain HTTP upload anyway.
 - **gVisor: DONE** (see §5) — C + Vite, checkpoint/restore + swap + coldstart all
   work and verify. (Minor: gVisor `host_rss_freed` is undercounted for swap; use
   the cgroup `swap.current` figure.)
-- **Correctness at scale**: the multi-GB `HASH` read deadline was raised to 180 s
-  (lazy fault-in of many GB legitimately takes tens of seconds); earlier `0/2`
-  flags were that timeout, not corruption (copy passed; resume succeeded).
+- **Correctness at scale: FIXED.** The post-resume correctness `HASH` reads the
+  whole working set; on ondemand restore / swap-in that faults the entire set in
+  lazily, which at multi-GB outran the old fixed RPC deadline and was mis-recorded
+  as `0/2` "corruption" (it wasn't — `copy` passed and resume succeeded; only the
+  read timed out). Fix (harness-only): (1) do `WALK` **before** `HASH` so the
+  fault-in is borne by `WALK` (already non-fatal) and `HASH` then reads resident
+  memory; (2) scale the per-command read deadline with the working set
+  (`60 s + WS/50 MBps`). Optional further hardening (not done — needs a workload
+  rebuild): make `HASH` sample one word per spread-of-pages so correctness compute
+  is O(sample) regardless of size.
 
 ## Reproducing
 See `README.md`. Results JSONL/CSV are written under `results/`. Raw data for these

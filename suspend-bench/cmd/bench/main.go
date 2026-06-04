@@ -314,6 +314,13 @@ func runCell(ctx context.Context, cfg config, host results.HostMeta, cl cell) re
 	if err != nil {
 		return fail(fmt.Errorf("boot ready ping: %w", err))
 	}
+	// WALK/HASH read the whole working set; on ondemand restore / swap-in that
+	// faults the entire set in via userfaultfd, which is slow (~40 MB/s measured:
+	// 4 GiB took ~98 s). Scale the per-command read deadline with the working set
+	// (budget ~25 MB/s for margin) so it never times out and gets misread as
+	// corruption. (e.g. 4 GiB → ~224 s, 16 GiB → ~12 min.)
+	cmdTimeout := 60*time.Second + time.Duration(cl.wsBytes/(25<<20))*time.Second
+	bc.SetCmdTimeout(cmdTimeout)
 	res.BootMs = metrics.Ms(bootStart)
 
 	// Drive to target working set and capture the pre-suspend state token + hash.
@@ -362,8 +369,17 @@ func runCell(ctx context.Context, cfg config, host results.HostMeta, cl cell) re
 	res.ResumeCallMs = rr.ResumeCallMs
 	res.ResumeToFirstPingMs = rr.ResumeToFirstPingMs
 
-	// Correctness + post-resume page walk (cost of faulting everything back).
+	// Post-resume page walk THEN correctness. WALK faults the whole working set
+	// back in (its cost is exactly post_resume_walk_ms, and a timeout here is
+	// non-fatal); doing it first means the subsequent HASH reads resident memory,
+	// so the correctness check can't be misread as corruption just because a
+	// multi-GB lazy fault-in outran a deadline.
 	rc := rr.Client
+	rc.SetCmdTimeout(cmdTimeout)
+	walkStart := time.Now()
+	if _, err := rc.Cmd("WALK"); err == nil {
+		res.PostResumeWalkMs = metrics.Ms(walkStart)
+	}
 	if mech.PreservesState() {
 		postHash, herr := rc.Hash()
 		res.CorrectnessOK = herr == nil &&
@@ -372,10 +388,6 @@ func runCell(ctx context.Context, cfg config, host results.HostMeta, cl cell) re
 			postHash == preHash
 	} else {
 		res.CorrectnessOK = true // baseline: state intentionally not preserved
-	}
-	walkStart := time.Now()
-	if _, err := rc.Cmd("WALK"); err == nil {
-		res.PostResumeWalkMs = metrics.Ms(walkStart)
 	}
 	rc.Close()
 

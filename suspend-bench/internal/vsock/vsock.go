@@ -36,9 +36,15 @@ import (
 // Client is a control-channel connection speaking the newline-delimited workload
 // protocol (PING/SETWS/DIRTY/WALK/HASH/READY/QUIT).
 type Client struct {
-	conn net.Conn
-	r    *bufio.Reader
+	conn       net.Conn
+	r          *bufio.Reader
+	cmdTimeout time.Duration // read deadline per Cmd; 0 => default
 }
+
+// SetCmdTimeout sets the per-command read deadline. WALK/HASH over a large region
+// can take a long time on ondemand restore / swap-in (the whole working set faults
+// in), so callers scale this with the working-set size.
+func (c *Client) SetCmdTimeout(d time.Duration) { c.cmdTimeout = d }
 
 // StateToken is the cheap liveness/identity reply to PING. Seed and Counter live
 // in guest memory and must be unchanged across suspend/resume.
@@ -122,7 +128,11 @@ func (c *Client) Cmd(cmd string) (string, error) {
 	if _, err := fmt.Fprintf(c.conn, "%s\n", cmd); err != nil {
 		return "", err
 	}
-	c.conn.SetReadDeadline(time.Now().Add(180 * time.Second))
+	d := c.cmdTimeout
+	if d <= 0 {
+		d = 180 * time.Second
+	}
+	c.conn.SetReadDeadline(time.Now().Add(d))
 	line, err := c.r.ReadString('\n')
 	if err != nil {
 		return "", err
