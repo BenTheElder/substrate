@@ -201,13 +201,10 @@ func (r *Runtime) Restore(ctx context.Context, h *runtime.Handle, srcDir, mode s
 	restoreArg := "source_url=file://" + srcDir
 	switch mode {
 	case "ondemand":
-		// ondemand uses userfaultfd; prefault must be off. Requires a CH build
-		// new enough to expose memory_restore_mode (CH v44's CLI does NOT — it
-		// errors "unknown option: memory_restore_mode"; upgrade CH for ondemand).
+		// ondemand uses userfaultfd; prefault must be off.
 		restoreArg += ",memory_restore_mode=ondemand,prefault=off"
 	case "copy", "":
-		// Default eager copy. Do NOT pass memory_restore_mode: older CH builds
-		// reject the option outright, and copy is the default behavior anyway.
+		// Eager copy (CH's default), so leave memory_restore_mode unset.
 	default:
 		return fmt.Errorf("unknown restore mode %q", mode)
 	}

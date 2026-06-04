@@ -26,11 +26,10 @@
 set -euo pipefail
 
 # --- Pinned versions (override via env). -------------------------------------
-# NOTE: cloud-hypervisor must be recent enough for BOTH features we rely on:
-#   - `memory_restore_mode=ondemand` (userfaultfd lazy restore) — v44's CLI rejects it
+# NOTE: cloud-hypervisor must support BOTH features we rely on (v52.0 does, and is
+# what FINDINGS.md was measured on):
+#   - `memory_restore_mode=ondemand` (userfaultfd lazy restore)
 #   - sparse snapshots of memfd-backed RAM (PR #8113) — needs shared=true guest RAM
-# v52.0 has both and is what FINDINGS.md was measured on. (v44 lacks ondemand and
-# also requires image_type=Raw handling differences.)
 CH_VERSION="${CH_VERSION:-v52.0}"
 RUNSC_VERSION="${RUNSC_VERSION:-latest}"   # gVisor release channel or release-YYYYMMDD.N
 KATA_VERSION="${KATA_VERSION:-3.20.0}"     # used by rootfs/fetch-kernel.sh for vmlinux

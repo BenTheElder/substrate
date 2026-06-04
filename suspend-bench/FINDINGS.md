@@ -22,22 +22,24 @@ suspended actors under a node-level component to leverage swap.
   (48 GiB swapfile). See `provision/setup-nvme.sh`.
 - **cloud-hypervisor v52.0**, runsc `release-20260525.0`, guest kernel = Kata
   `vmlinux-6.12.42` (direct boot).
-- Guest = **ext4 virtio-blk rootfs built from a container image**; control channel
-  = **virtio-vsock** (C workload) or vsock→unix via socat (Node). No virtio-fs
-  (breaks CH restore), no tap (avoids net-FD-on-restore).
+- Guest = **ext4 virtio-blk rootfs built from a container image**. Control channel:
+  on CH, **virtio-vsock** (C) / vsock→unix via socat (Node); on gVisor, **netstack
+  TCP** over a per-instance veth (a host-uds socket can't be checkpointed — see §5).
+  No virtio-fs (breaks CH restore), no tap (avoids net-FD-on-restore).
 - **zswap is NOT compiled into the Debian 13 cloud kernel** (`CONFIG_ZSWAP`
   unset) → "swap" here is **plain on-disk swap** (no compress-in-RAM tier).
 
 ### CH config details that matter (learned the hard way)
-- **`image_type: "Raw"`** is required on v52 — it auto-detects raw images and
-  disables sector-0 writes, which otherwise panics the ext4 rootfs (`Unable to
-  mount root fs … ReadOnly`).
+All runs use **cloud-hypervisor v52.0**; the data below is all v52.
+- **`image_type: "Raw"`** must be declared on each disk — CH auto-detects raw
+  images and disables sector-0 writes, which otherwise panics the ext4 rootfs
+  (`Unable to mount root fs … ReadOnly`).
 - **`memory.shared = true`** (memfd-backed guest RAM) enables **sparse snapshots**
   ([CH PR #8113](https://github.com/cloud-hypervisor/cloud-hypervisor/pull/8113)):
   CH walks `SEEK_DATA`/`SEEK_HOLE` and writes only touched pages. Anonymous mmap
   and plain file-backed RAM fall back to a dense (full-RAM) image.
 - **`memory_restore_mode`**: `copy` (eager, default) vs `ondemand` (userfaultfd,
-  lazy). CH **v44's CLI rejects** the option; **v52** accepts it.
+  lazy). Both are used below.
 - memfd does **not** compromise portability: the snapshot is an ordinary sparse
   file, restored into a brand-new CH process (verified: correctness holds across a
   fresh-process restore).
@@ -148,8 +150,11 @@ Getting gVisor checkpoint to work at all required two non-obvious things:
   bound host socket`, panic). The harness instead gives each gVisor sandbox a
   **veth + netns** and the workload listens on TCP; gVisor *can* checkpoint a
   netstack socket. (CH has no such issue — vsock state is in the VM snapshot.)
-- `-overlay2=none` (the default overlay writes a `.gvisor.filestore` into the
-  shared rootfs and breaks on reuse) and a per-instance OCI bundle.
+- **`-overlay2=all:memory`** (in-memory writable overlay) + a per-instance OCI
+  bundle. The default overlay writes a `.gvisor.filestore` into the shared rootfs
+  (breaks on reuse); a memory overlay keeps the shared rootfs clean while letting
+  writable-rootfs workloads (Node/Vite write `/tmp`, the cache, the agent's edits)
+  run — the C workload writes nothing so its overlay stays empty.
 
 Findings:
 - **gVisor checkpoint images are smaller than CH's** (67/269 MB vs CH sparse
@@ -212,11 +217,9 @@ flat ~25 ms ondemand resume) benefits enormously from checkpoint/restore.
   swap (and snapshot-zstd) on a zswap-enabled kernel to isolate whether any swap
   advantage is the "z" (compression) vs the suspend mechanism. (A
   `c3-standard-22-lssd` host with a zswap kernel is being prepared.)
-- **gVisor: DONE** (see §5). checkpoint/restore + swap + coldstart all work and
-  verify; the host-uds checkpoint blocker was solved by switching the control
-  channel to netstack TCP (veth/netns). Remaining nice-to-haves: gVisor has no
-  lazy restore (eager only); a Node/Vite gVisor run for parity with §4; and the
-  gVisor swap `host_rss_freed` undercount (use cgroup `swap.current`).
+- **gVisor: DONE** (see §5) — C + Vite, checkpoint/restore + swap + coldstart all
+  work and verify. (Minor: gVisor `host_rss_freed` is undercounted for swap; use
+  the cgroup `swap.current` figure.)
 - **Faster local SSD**: re-run on `c4`/`c3` (Titanium SSD) — copy-restore and
   suspend are SSD-write-bound, so absolute numbers should improve.
 - **Correctness at scale**: the multi-GB `HASH` read deadline was raised to 180 s

@@ -36,17 +36,19 @@ sudo rm -rf /run/suspend-bench/* 2>/dev/null
 # Install freshly-staged binary if present.
 [ -f /tmp/bench.new ] && install -m0755 /tmp/bench.new ~/suspend-bench/bin/bench
 
-# Small matrix: the primary swap-vs-checkpoint comparison (+ coldstart baseline)
-# across two working sets, several reps. 1 GiB guest. Restore=copy (CH v44 has no
-# ondemand). Results stream to the persistent boot disk.
+# Small matrix: swap vs checkpoint (copy + ondemand) + coldstart baseline, with
+# memfd sparse snapshots, across two working sets. 1 GiB guest. Results stream to
+# the persistent boot disk.
 sudo ./bin/bench \
   --runtimes ch \
   --mechanisms checkpoint_local,swap,coldstart \
+  --restore-modes copy,ondemand \
+  --shared-mem \
   --workloads c \
   --working-sets "${WS:-64MiB,256MiB}" \
   --guest-mem "${GUEST_MEM:-1073741824}" \
   --reps "${REPS:-3}" \
-  --resume-deadline 20s \
+  --resume-deadline 30s \
   --cell-timeout 120s \
   --out "$OUT"
 
