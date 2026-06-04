@@ -1,0 +1,18 @@
+# Benchmark outputs (streamed to the persistent boot disk, never committed).
+results/
+*.jsonl
+*.csv
+
+# Build artifacts (root-anchored so they don't match cmd/bench, cmd/pinger).
+/bin/
+/bench
+/pinger
+
+# Guest assets fetched/built on the VM (large, host-specific, ephemeral).
+*.img
+*.raw
+*.tar
+vmlinux
+kernel/
+rootfs/*.img
+rootfs/*.tar
