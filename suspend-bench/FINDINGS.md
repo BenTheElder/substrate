@@ -132,7 +132,7 @@ dev server **survives suspend/resume on all mechanisms and serves HTTP again**
 **sparse-copy wins when wake touches most of it** (Vite: serving faults the graph).
 Sparse makes copy cheap in both cases (it only ever reads touched pages).
 
-Caveat measured while fixing the correctness check (see Open items): ondemand's
+Caveat measured while fixing the correctness check: ondemand's
 per-page userfaultfd fault-in is **slow in aggregate (~40 MB/s)** — faulting a full
 4 GiB working set back in took **~98 s**, vs `copy`'s eager bulk read of the same
 4 GiB in **~2.6 s**. So ondemand's flat ~25 ms is a *first-response* win; if the
@@ -305,26 +305,6 @@ survive a plain HTTP upload anyway.
   path) and benefits only resume — it cannot overcome a multi-second suspend.
 - **memfd (needed for sparse) does not pin to a node** — snapshots restore into a
   fresh process tree, so portability is intact.
-
-## Open items
-- **zswap diagnostic: DONE** (§6.2) — on a zswap-enabled kernel, zswap makes swap
-  *suspend* slower and only helps resume; the "z" is not a swap advantage.
-- **Faster/striped local SSD: DONE** (§6.1) — RAID0 over 4× local SSD buys ~15–20%
-  on checkpoint-copy suspend/resume; ondemand resume stays flat ~22 ms
-  (storage-independent).
-- **gVisor: DONE** (see §5) — C + Vite, checkpoint/restore + swap + coldstart all
-  work and verify. (Minor: gVisor `host_rss_freed` is undercounted for swap; use
-  the cgroup `swap.current` figure.)
-- **Correctness at scale: FIXED.** The post-resume correctness `HASH` reads the
-  whole working set; on ondemand restore / swap-in that faults the entire set in
-  lazily, which at multi-GB outran the old fixed RPC deadline and was mis-recorded
-  as `0/2` "corruption" (it wasn't — `copy` passed and resume succeeded; only the
-  read timed out). Fix (harness-only): (1) do `WALK` **before** `HASH` so the
-  fault-in is borne by `WALK` (already non-fatal) and `HASH` then reads resident
-  memory; (2) scale the per-command read deadline with the working set
-  (`60 s + WS/50 MBps`). Optional further hardening (not done — needs a workload
-  rebuild): make `HASH` sample one word per spread-of-pages so correctness compute
-  is O(sample) regardless of size.
 
 ## Reproducing
 See `README.md`. Results JSONL/CSV are written under `results/`. Raw data for these
