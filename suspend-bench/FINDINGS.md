@@ -3,10 +3,9 @@
 Data collected with the `suspend-bench` harness on a single GCE VM. **Headline:
 sparse + demand-paged checkpoint/restore to local SSD beats live swap on every
 axis — suspend, resume, footprint, and portability — and the gap widens with
-memory size.** This quantifies and strengthens the recommendation in
-[`../docs/dev/poc2-swap-suspend-findings.md`](../docs/dev/poc2-swap-suspend-findings.md):
-prefer checkpoint/restore over live swap; you do **not** need to schedule
-suspended actors under a node-level component to leverage swap.
+memory size.** The recommendation: prefer checkpoint/restore over live swap; you
+do **not** need to schedule suspended actors under a node-level component to
+leverage swap.
 
 > Status: cloud-hypervisor and gVisor/runsc evaluated on `bench-host-n2` (§1–§5).
 > A second host (`bench-c3-standard-22-lssd`: zswap-enabled kernel, RAID0 local
