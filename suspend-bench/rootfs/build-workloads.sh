@@ -29,6 +29,12 @@ IMG_DIR="${IMG_DIR:-/mnt/nvme-images/rootfs}"
 BUNDLE_DIR="${BUNDLE_DIR:-/mnt/nvme-images/bundles}"
 C_SIZE="${C_SIZE:-512MiB}"     # small static workload
 NODE_SIZE="${NODE_SIZE:-2GiB}" # node + socat userspace
+CHROME_SIZE="${CHROME_SIZE:-4GiB}" # chromium tree + mirrored site (ext4 is sparse)
+# Real site mirrored INTO the chrome image at build time (host egress only); the
+# mirrored bytes live in the image, never in the repo. Override to taste.
+SITE_URL="${SITE_URL:-https://en.wikipedia.org/wiki/Cloud_computing}"
+# Set CHROME=0 to skip the (slow) chromium image build when iterating on c/node.
+CHROME="${CHROME:-1}"
 
 log() { printf '\033[1;34m[workloads]\033[0m %s\n' "$*"; }
 
@@ -40,6 +46,11 @@ make -C "${ROOT}/workloads/initshim"
 log "building images with ${BUILDER}"
 "${BUILDER_BIN[@]}" build -t suspend-bench/cworkload:latest "${ROOT}/workloads/cworkload"
 "${BUILDER_BIN[@]}" build -t suspend-bench/nodeworkload:latest "${ROOT}/workloads/nodeworkload"
+if [[ "${CHROME}" == "1" ]]; then
+  log "building chrome image (mirroring ${SITE_URL} into the image, local-only)"
+  "${BUILDER_BIN[@]}" build --build-arg "SITE_URL=${SITE_URL}" \
+    -t suspend-bench/chromeworkload:latest "${ROOT}/workloads/chromeworkload"
+fi
 
 # 3. Flatten each image to a rootfs tar (builder-agnostic; podman has no daemon
 #    for crane to read, so we export the merged filesystem directly).
@@ -54,16 +65,19 @@ trap 'rm -rf "${TARS}"' EXIT
 log "exporting rootfs tars"
 export_tar suspend-bench/cworkload:latest   "${TARS}/cworkload.tar"
 export_tar suspend-bench/nodeworkload:latest "${TARS}/nodeworkload.tar"
+[[ "${CHROME}" == "1" ]] && export_tar suspend-bench/chromeworkload:latest "${TARS}/chromeworkload.tar"
 sudo chmod 0644 "${TARS}"/*.tar  # rootful builder writes root-owned tars
 
 # 4. CH ext4 rootfs images (need root for the loop mount + the NVMe dir).
 log "building CH ext4 rootfs images -> ${IMG_DIR}"
 sudo "${HERE}/build-rootfs.sh" "${TARS}/cworkload.tar"   "${IMG_DIR}/cworkload.img"   "${C_SIZE}"
 sudo "${HERE}/build-rootfs.sh" "${TARS}/nodeworkload.tar" "${IMG_DIR}/nodeworkload.img" "${NODE_SIZE}"
+[[ "${CHROME}" == "1" ]] && sudo "${HERE}/build-rootfs.sh" "${TARS}/chromeworkload.tar" "${IMG_DIR}/chromeworkload.img" "${CHROME_SIZE}"
 
 # 5. gVisor OCI bundles (sudo: the NVMe mount is root-owned).
 log "building gVisor bundles -> ${BUNDLE_DIR}"
 sudo "${HERE}/build-bundle.sh" "${TARS}/cworkload.tar"   "${BUNDLE_DIR}/cworkload"
 sudo "${HERE}/build-bundle.sh" "${TARS}/nodeworkload.tar" "${BUNDLE_DIR}/nodeworkload"
+[[ "${CHROME}" == "1" ]] && sudo "${HERE}/build-bundle.sh" "${TARS}/chromeworkload.tar" "${BUNDLE_DIR}/chromeworkload"
 
 log "done. Now: ./rootfs/fetch-kernel.sh (if not yet), then sudo bin/bench --smoke"

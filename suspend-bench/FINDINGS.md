@@ -292,6 +292,45 @@ survive a plain HTTP upload anyway.
   paths `config.json` references, or those paths rewritten. Same-node
   suspend/resume needs none of this.
 
+### 6.6 Headless Chrome — the "agent driving a browser" workload
+A realistic browser workload (`workloads/chromeworkload`): headless Chromium
+loading a **real webpage mirrored into the image at build time** (served on
+`127.0.0.1` — the guest has no egress), driven via the DevTools Protocol. The
+working set is **real renderer memory** — `SETWS/DIRTY/WALK/HASH` allocate and
+verify a `Uint8Array` inside the page, so the bytes live in Chrome's V8 renderer
+heap (captured by snapshot / reclaimed by cgroup) on top of the loaded page's own
+~0.7 GB footprint. `PING` gates on the page being DOM-ready, so resume→first-ping =
+**"time until the browser tab is usable again."** CH, 4 GiB guest, memfd sparse, n=3:
+
+| mechanism | mode | WS | suspend | resume→usable | sparse img |
+|---|---|--:|--:|--:|--:|
+| coldstart | — | 128 MiB | — | **2861 ms** | — |
+| checkpoint | copy | 128 MiB | 417 ms | 491 ms | 823 MB |
+| checkpoint | **ondemand** | 128 MiB | 420 ms | **353 ms** | 821 MB |
+| swap | — | 128 MiB | 520 ms | 1120 ms | — |
+| coldstart | — | 512 MiB | — | **2866 ms** | — |
+| checkpoint | copy | 512 MiB | 629 ms | 680 ms | 1225 MB |
+| checkpoint | **ondemand** | 512 MiB | 624 ms | **347 ms** | 1224 MB |
+| swap | — | 512 MiB | **3689 ms** | 1402 ms | — |
+
+- **Waking a suspended browser is ~8× faster than cold-starting one** — checkpoint
+  ondemand resume **~350 ms vs ~2.9 s** to cold-boot Chrome + load the page. This is
+  the headline for an agent that parks idle browser sandboxes.
+- **ondemand resume is flat ~350 ms** across 128→512 MiB (first-response is
+  fault-bound), same as the C workload; copy scales with the touched set.
+- **Checkpoint ≫ swap on suspend at size** — 512 MiB: checkpoint 0.6 s vs swap
+  **3.7 s** (page-by-page reclaim again). At 128 MiB they're close (~0.4–0.5 s).
+- The ~0.7 GB sparse-image floor is Chrome's **real** renderer+browser footprint,
+  so these numbers reflect a genuine browser, not a synthetic buffer.
+- Correctness 3/3 everywhere (renderer state survives suspend/resume).
+
+**gVisor (n=1, stretch):** Chrome runs and **checkpoint/restore works** (state
+preserved). coldstart→usable **1318 ms** (gVisor boots faster than CH), checkpoint
+resume **701 ms**, swap resume **363 ms**; checkpoint image is **305 MB** — smaller
+than CH's 821 MB because gVisor serializes app state, not a guest-RAM dump. Here
+checkpoint resume (0.7 s) **beats** gVisor cold start (1.3 s) — unlike the fast
+Vite case (§5), because Chrome's own cold start is slow enough that restore wins.
+
 ---
 
 ## Conclusion (for the architecture decision)
@@ -309,5 +348,5 @@ survive a plain HTTP upload anyway.
 ## Reproducing
 See `README.md`. Results JSONL/CSV are written under `results/`. Raw data for these
 tables: `results/{memfd,multigb,node_real,v52}.jsonl` on `bench-host-n2`; the §6
-host data is `results/c3_{multigb,zswap,node,16g,16g_zswap}.jsonl` on
+host data is `results/c3_{multigb,zswap,node,chrome,chrome_gvisor}.jsonl` on
 `bench-c3-standard-22-lssd`.

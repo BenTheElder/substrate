@@ -83,10 +83,10 @@ type config struct {
 func parseFlags() config {
 	var c config
 	var runtimes, mechs, workloads, wss, comp, rmode, zswap string
-	var rootfsC, rootfsNode, bundleC, bundleNode string
+	var rootfsC, rootfsNode, rootfsChrome, bundleC, bundleNode, bundleChrome string
 	flag.StringVar(&runtimes, "runtimes", "ch", "comma list: ch,gvisor")
 	flag.StringVar(&mechs, "mechanisms", "checkpoint_local,swap,coldstart", "comma list")
-	flag.StringVar(&workloads, "workloads", "c", "comma list: c,node")
+	flag.StringVar(&workloads, "workloads", "c", "comma list: c,node,chrome")
 	flag.StringVar(&wss, "working-sets", "64MiB", "comma list of sizes, e.g. 64MiB,256MiB,1GiB")
 	flag.IntVar(&c.reps, "reps", 5, "repetitions per cell")
 	flag.StringVar(&comp, "compression", "none", "checkpoint_local: none,zstd,lz4")
@@ -104,6 +104,8 @@ func parseFlags() config {
 	flag.StringVar(&rootfsNode, "rootfs-node", "/mnt/nvme-images/rootfs/nodeworkload.img", "ch ext4 rootfs for node workload")
 	flag.StringVar(&bundleC, "bundle-c", "/mnt/nvme-images/bundles/cworkload", "gvisor OCI bundle for c workload")
 	flag.StringVar(&bundleNode, "bundle-node", "/mnt/nvme-images/bundles/nodeworkload", "gvisor OCI bundle for node workload")
+	flag.StringVar(&rootfsChrome, "rootfs-chrome", "/mnt/nvme-images/rootfs/chromeworkload.img", "ch ext4 rootfs for chrome workload")
+	flag.StringVar(&bundleChrome, "bundle-chrome", "/mnt/nvme-images/bundles/chromeworkload", "gvisor OCI bundle for chrome workload")
 	flag.StringVar(&c.imageBase, "image-dir", "/mnt/nvme-images/snapshots", "base dir for snapshots (local NVMe)")
 	flag.StringVar(&c.workBase, "work-base", "/run/suspend-bench", "per-instance scratch base")
 	flag.StringVar(&c.hostMeta, "host-meta", "/var/lib/suspend-bench/host-metadata.json", "host metadata json")
@@ -127,8 +129,8 @@ func parseFlags() config {
 		}
 		c.workingSets = append(c.workingSets, n)
 	}
-	c.rootfs = map[string]string{"c": rootfsC, "node": rootfsNode}
-	c.bundle = map[string]string{"c": bundleC, "node": bundleNode}
+	c.rootfs = map[string]string{"c": rootfsC, "node": rootfsNode, "chrome": rootfsChrome}
+	c.bundle = map[string]string{"c": bundleC, "node": bundleNode, "chrome": bundleChrome}
 	return c
 }
 
