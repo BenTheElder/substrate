@@ -44,9 +44,9 @@ import (
 // root container; here there is just one).
 const containerName = "workload"
 
-// pingGuestDir is the in-guest mount where the workload's AF_UNIX socket lives.
-const pingGuestDir = "/run/ping"
-const pingSockName = "ping.sock"
+// workloadTCPPort is the guest TCP port the workload listens on (netstack),
+// reachable from the host via the per-instance veth.
+const workloadTCPPort = 1234
 
 // Runtime is the gVisor/runsc Runtime implementation.
 type Runtime struct {
@@ -75,7 +75,7 @@ type gvState struct {
 	bundle    string // per-instance OCI bundle dir (holds config.json only)
 	rootfsDir string // shared extracted image rootfs (referenced by config.json)
 	pidFile   string
-	pingSock  string // host path to the workload's unix socket
+	net       *netConf // per-instance veth/netns; net.guestAddr is the TCP control addr
 	logFile   string
 }
 
@@ -85,11 +85,12 @@ func (r *Runtime) runsc(ctx context.Context, st *gvState, args ...string) error 
 	full := append([]string{
 		"-log-format", "json",
 		"--alsologtostderr",
-		// Allow the sandboxed workload to bind an AF_UNIX socket that is backed by
-		// a real host socket (on the bind-mounted ping dir), so the harness can
-		// reach it. Without this, gVisor keeps the socket inside the sentry VFS and
-		// the host sees "no such file or directory".
-		"-host-uds=all",
+		// No overlay: gVisor's default overlay writes a .gvisor.filestore into the
+		// (shared) rootfs and breaks on reuse; with none the gofer serves the
+		// rootfs directly (the workload writes nothing to it). Also: do NOT use
+		// -host-uds — a bound host socket cannot be checkpointed; the control
+		// channel is netstack TCP over a per-instance veth/netns instead.
+		"-overlay2=none",
 		"-root", st.stateRoot,
 	}, args...)
 	cmd := exec.CommandContext(ctx, r.bin, full...)
@@ -106,9 +107,9 @@ func (r *Runtime) runsc(ctx context.Context, st *gvState, args ...string) error 
 	return nil
 }
 
-func (r *Runtime) dialFunc(pingSock string) vsock.DialFunc {
+func (r *Runtime) dialFunc(tcpAddr string) vsock.DialFunc {
 	return func(timeout time.Duration) (*vsock.Client, error) {
-		return vsock.DialUnix(pingSock, timeout)
+		return vsock.DialTCP(tcpAddr, timeout)
 	}
 }
 
@@ -124,18 +125,30 @@ func (r *Runtime) Boot(ctx context.Context, spec runtime.BootSpec) (*runtime.Han
 		bundle:    filepath.Join(spec.WorkDir, "bundle"),
 		rootfsDir: filepath.Join(spec.BundlePath, "rootfs"),
 		pidFile:   filepath.Join(spec.WorkDir, "sentry.pid"),
-		pingSock:  filepath.Join(spec.WorkDir, "ping", pingSockName),
 		logFile:   filepath.Join(spec.WorkDir, "runsc.log"),
 	}
-	for _, d := range []string{st.stateRoot, st.bundle, filepath.Dir(st.pingSock)} {
+	for _, d := range []string{st.stateRoot, st.bundle} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return nil, err
 		}
 	}
+	// Per-instance veth/netns so the host can reach the sandbox's netstack TCP
+	// listener (checkpointable, unlike a host-uds socket).
+	nc, err := setupNet(ctx, spec.ID, workloadTCPPort)
+	if err != nil {
+		return nil, fmt.Errorf("network setup: %w", err)
+	}
+	st.net = nc
+	ok := false
+	defer func() {
+		if !ok {
+			teardownNet(st.net)
+		}
+	}()
+
 	if err := r.writeOCIConfig(ctx, spec, st); err != nil {
 		return nil, err
 	}
-
 	if err := r.runsc(ctx, st, "create", "-bundle", st.bundle, "-pid-file", st.pidFile, containerName); err != nil {
 		return nil, err
 	}
@@ -157,10 +170,11 @@ func (r *Runtime) Boot(ctx context.Context, spec runtime.BootSpec) (*runtime.Han
 		ID:     spec.ID,
 		VMMPid: pid,
 		Cgroup: spec.Cgroup,
-		Dial:   r.dialFunc(st.pingSock),
+		Dial:   r.dialFunc(st.net.guestAddr),
 		Spec:   spec,
 	}
 	h.SetPriv(st)
+	ok = true
 	return h, nil
 }
 
@@ -184,6 +198,13 @@ func (r *Runtime) Snapshot(ctx context.Context, h *runtime.Handle, destDir strin
 // (unlike CH) there is no separate resume after restore — Resume is a no-op.
 func (r *Runtime) Restore(ctx context.Context, h *runtime.Handle, srcDir, _ string) error {
 	st := h.Priv().(*gvState)
+	// The post-checkpoint Teardown deletes the netns; re-create it identically
+	// (deterministic in the instance ID) so config.json's netns path resolves.
+	nc, err := setupNet(ctx, h.Spec.ID, workloadTCPPort)
+	if err != nil {
+		return fmt.Errorf("network re-setup for restore: %w", err)
+	}
+	st.net = nc
 	if err := r.runsc(ctx, st,
 		"restore",
 		"-bundle", st.bundle,
@@ -210,7 +231,9 @@ func (r *Runtime) Teardown(ctx context.Context, h *runtime.Handle) error {
 	if !ok || st == nil {
 		return nil
 	}
-	return r.runsc(ctx, st, "delete", "-force", containerName)
+	err := r.runsc(ctx, st, "delete", "-force", containerName)
+	teardownNet(st.net)
+	return err
 }
 
 func readPIDFile(path string) (int, error) {
@@ -222,8 +245,8 @@ func readPIDFile(path string) (int, error) {
 }
 
 // writeOCIConfig generates a default config.json via `runsc spec` and patches it:
-// process args -> the workload + its unix socket path, a bind mount for the ping
-// dir, the rootfs path, and the leaf cgroupsPath.
+// process args -> the workload listening on TCP, the rootfs path, the per-instance
+// network namespace, and the leaf cgroupsPath.
 func (r *Runtime) writeOCIConfig(ctx context.Context, spec runtime.BootSpec, st *gvState) error {
 	// `runsc spec -bundle DIR` writes a template config.json into DIR, but refuses
 	// to overwrite an existing one (exit 128). Boot can run twice for one instance
@@ -242,23 +265,27 @@ func (r *Runtime) writeOCIConfig(ctx context.Context, spec runtime.BootSpec, st 
 		return err
 	}
 
-	// process.args -> ["/workload", "/run/ping/ping.sock"], no terminal.
+	// process.args -> ["/workload", "tcp:<port>"], no terminal.
 	if proc, ok := cfg["process"].(map[string]any); ok {
-		proc["args"] = []any{"/workload", filepath.Join(pingGuestDir, pingSockName)}
+		proc["args"] = []any{"/workload", fmt.Sprintf("tcp:%d", workloadTCPPort)}
 		proc["terminal"] = false
 	}
-	// root.path -> absolute path to the shared extracted image rootfs.
-	cfg["root"] = map[string]any{"path": st.rootfsDir, "readonly": false}
+	// root.path -> absolute path to the shared extracted image rootfs (read-only;
+	// the workload writes nothing to it, and ro keeps the shared dir pristine).
+	cfg["root"] = map[string]any{"path": st.rootfsDir, "readonly": true}
 
-	// Add a bind mount so the workload's unix socket is visible on the host.
-	mounts, _ := cfg["mounts"].([]any)
-	mounts = append(mounts, map[string]any{
-		"destination": pingGuestDir,
-		"type":        "bind",
-		"source":      filepath.Dir(st.pingSock),
-		"options":     []any{"rbind", "rw"},
-	})
-	cfg["mounts"] = mounts
+	// Point the network namespace at our per-instance veth netns so gVisor's
+	// netstack adopts the veth + IP and the host can reach the workload's TCP port.
+	if lx, ok := cfg["linux"].(map[string]any); ok {
+		nsList, _ := lx["namespaces"].([]any)
+		for _, e := range nsList {
+			if m, ok := e.(map[string]any); ok && m["type"] == "network" {
+				m["path"] = st.net.nsPath
+			}
+		}
+		lx["namespaces"] = nsList
+		cfg["linux"] = lx
+	}
 
 	// Place the sandbox in our leaf cgroup (absolute path under the cgroup root).
 	if lx, ok := cfg["linux"].(map[string]any); ok && spec.Cgroup != nil {

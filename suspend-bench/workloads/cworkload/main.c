@@ -35,10 +35,13 @@
 // after a restore (a fresh VMM) or after resume — which is exactly what
 // resume-to-first-ping measures.
 //
-// Transport: with no args it binds AF_VSOCK port 1234 (the cloud-hypervisor path).
-// With one arg it binds an AF_UNIX stream socket at that path instead — used for
-// the gVisor/runsc path, where the bundle bind-mounts the socket dir to the host
-// and gVisor does not provide AF_VSOCK.
+// Transport (chosen by argv[1]):
+//   (none)        -> AF_VSOCK port 1234            (cloud-hypervisor path)
+//   tcp:<port>    -> AF_INET TCP on 0.0.0.0:<port> (gVisor path: a netstack
+//                    socket, which gVisor CAN checkpoint — unlike a host-uds
+//                    socket, which it refuses with "bound host socket")
+//   <path>        -> AF_UNIX stream socket at <path> (gVisor host-uds path;
+//                    works but blocks runsc checkpoint)
 
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -50,6 +53,7 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <netinet/in.h>
 #include <linux/vm_sockets.h>
 
 #define PORT 1234
@@ -221,9 +225,42 @@ static int listen_unix(const char *path) {
   return s;
 }
 
+// listen_tcp binds an AF_INET TCP socket on 0.0.0.0:port (gVisor netstack path).
+static int listen_tcp(int port) {
+  int s = socket(AF_INET, SOCK_STREAM, 0);
+  if (s < 0) {
+    perror("socket(AF_INET)");
+    return -1;
+  }
+  int one = 1;
+  setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  addr.sin_port = htons((uint16_t)port);
+  if (bind(s, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+    perror("bind(AF_INET)");
+    return -1;
+  }
+  if (listen(s, 4) != 0) {
+    perror("listen");
+    return -1;
+  }
+  fprintf(stderr, "[cworkload] listening on tcp 0.0.0.0:%d\n", port);
+  return s;
+}
+
 int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IONBF, 0);
-  int s = (argc > 1) ? listen_unix(argv[1]) : listen_vsock();
+  int s;
+  if (argc > 1 && strncmp(argv[1], "tcp:", 4) == 0) {
+    s = listen_tcp(atoi(argv[1] + 4));
+  } else if (argc > 1) {
+    s = listen_unix(argv[1]);
+  } else {
+    s = listen_vsock();
+  }
   if (s < 0) return 1;
   for (;;) {
     int c = accept(s, NULL, NULL);

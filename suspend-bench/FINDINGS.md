@@ -9,8 +9,9 @@ prefer checkpoint/restore over live swap; you do **not** need to schedule
 suspended actors under a node-level component to leverage swap.
 
 > Status: cloud-hypervisor evaluated thoroughly (C micro-workload + realistic
-> Vite dev server + multi-GB). gVisor and the zswap diagnostic are still open
-> (see [Open items](#open-items)).
+> Vite dev server + multi-GB) and gVisor/runsc evaluated (§5). The zswap
+> diagnostic and a faster-SSD/striping run are still open (see
+> [Open items](#open-items)).
 
 ## Test host & toolchain
 
@@ -130,6 +131,48 @@ dev server **survives suspend/resume on all mechanisms and serves HTTP again**
 **sparse-copy wins when wake touches most of it** (Vite: serving faults the graph).
 Sparse makes copy cheap in both cases (it only ever reads touched pages).
 
+## 5. gVisor/runsc — C workload (n=3)
+
+| mechanism | WS | resume | suspend | image | freed (cgroup swap) |
+|---|--:|--:|--:|--:|--:|
+| checkpoint | 64 MiB | 545 ms | 112 ms | **67 MB** | n/a |
+| swap | 64 MiB | 49 ms | 3031 ms | — | 83 MB |
+| coldstart | 64 MiB | 441 ms | — | — | — |
+| checkpoint | 256 MiB | 984 ms | 234 ms | **269 MB** | n/a |
+| swap | 256 MiB | 58 ms | 700 ms | — | 285 MB |
+
+Getting gVisor checkpoint to work at all required two non-obvious things:
+- **Control channel must be a netstack TCP socket, not a host-uds socket.** With
+  `runsc -host-uds=all` the workload's AF_UNIX socket is a *bound host socket*,
+  which gVisor's state encoder **refuses to save** (`Cannot save endpoint with
+  bound host socket`, panic). The harness instead gives each gVisor sandbox a
+  **veth + netns** and the workload listens on TCP; gVisor *can* checkpoint a
+  netstack socket. (CH has no such issue — vsock state is in the VM snapshot.)
+- `-overlay2=none` (the default overlay writes a `.gvisor.filestore` into the
+  shared rootfs and breaks on reuse) and a per-instance OCI bundle.
+
+Findings:
+- **gVisor checkpoint images are smaller than CH's** (67/269 MB vs CH sparse
+  127/328 MB at the same working set) — gVisor serializes *application state*, not
+  a guest-RAM dump, so there's no guest-kernel/page-table overhead.
+- **Suspend is comparable to CH sparse** (112/234 ms vs 83/206 ms).
+- **Resume is eager-only and scales with the working set** (545/984 ms): gVisor
+  has **no userfaultfd/lazy restore**, so it can't match CH ondemand's flat
+  ~25 ms. gVisor resume behaves like CH `copy`.
+- **Checkpoint ≫ swap on suspend** here too (112–234 ms vs 0.7–3.0 s).
+- Caveat: gVisor `host_rss_freed` is undercounted (we read one PID's VmRSS, but
+  gVisor spreads memory across sentry+gofer); the cgroup `swap.current`
+  (83/285 MB) is the accurate "freed" figure for gVisor swap.
+
+### cloud-hypervisor vs gVisor (checkpoint/restore)
+| | image size | suspend | resume | lazy resume? |
+|---|--:|--:|--:|:--:|
+| **CH (sparse + ondemand)** | touched set + ~0.34 GB | fast | **flat ~25 ms** | ✅ userfaultfd |
+| **gVisor (runsc)** | **smallest** (app state) | fast | scales w/ WS (eager) | ❌ |
+
+CH wins **resume latency** (constant, demand-paged); gVisor wins **image size**.
+Both crush live swap on suspend, and both can restore into a fresh process tree.
+
 ---
 
 ## Conclusion (for the architecture decision)
@@ -148,25 +191,11 @@ Sparse makes copy cheap in both cases (it only ever reads touched pages).
   swap (and snapshot-zstd) on a zswap-enabled kernel to isolate whether any swap
   advantage is the "z" (compression) vs the suspend mechanism. (A
   `c3-standard-22-lssd` host with a zswap kernel is being prepared.)
-- **gVisor (partial — one blocking limitation found):**
-  - **coldstart works** (~331 ms boot→serve, C workload) and **swap works**
-    (resume ~59 ms, suspend ~3.0 s; note it freed only ~9 MB of a 64 MiB working
-    set — gVisor's sentry holds the guest region in a way cgroup reclaim doesn't
-    evict well; worth a closer look).
-  - **checkpoint/restore is BLOCKED**: `runsc checkpoint` fails with
-    **"Cannot save endpoint with bound host socket"**. Our control channel uses
-    `runsc -host-uds=all` (the workload binds an AF_UNIX *host* socket so the
-    harness can reach it), and gVisor's state encoder **cannot serialize a bound
-    host socket** — it panics. This is a real difference vs cloud-hypervisor,
-    which snapshots the whole VM (vsock state included) with no such restriction.
-  - To benchmark gVisor checkpoint we'd need the workload to **quiesce** — close
-    its host-uds listener (and any host FDs) before `runsc checkpoint` and
-    re-bind after `runsc restore` — i.e. a control-plane "prepare-to-checkpoint"
-    handshake. Worth doing since gVisor checkpoints serialize app state (not a
-    full RAM dump) and could be much smaller.
-  - Harness plumbing for gVisor is otherwise done (per-instance OCI bundle,
-    `-host-uds=all`, cgroup placement, runsc create/start/checkpoint/restore/
-    delete with the repo's flags).
+- **gVisor: DONE** (see §5). checkpoint/restore + swap + coldstart all work and
+  verify; the host-uds checkpoint blocker was solved by switching the control
+  channel to netstack TCP (veth/netns). Remaining nice-to-haves: gVisor has no
+  lazy restore (eager only); a Node/Vite gVisor run for parity with §4; and the
+  gVisor swap `host_rss_freed` undercount (use cgroup `swap.current`).
 - **Faster local SSD**: re-run on `c4`/`c3` (Titanium SSD) — copy-restore and
   suspend are SSD-write-bound, so absolute numbers should improve.
 - **Correctness at scale**: the multi-GB `HASH` read deadline was raised to 180 s

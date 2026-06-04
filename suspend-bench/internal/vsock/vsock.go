@@ -74,9 +74,20 @@ func DialCH(socketPath string, port int, timeout time.Duration) (*Client, error)
 	return &Client{conn: conn, r: r}, nil
 }
 
-// DialUnix connects directly to an AF_UNIX socket (the gVisor path).
+// DialUnix connects directly to an AF_UNIX socket (the gVisor host-uds path —
+// note runsc cannot checkpoint a bound host socket, so prefer DialTCP for gVisor).
 func DialUnix(path string, timeout time.Duration) (*Client, error) {
 	conn, err := net.DialTimeout("unix", path, timeout)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{conn: conn, r: bufio.NewReader(conn)}, nil
+}
+
+// DialTCP connects to host:port (the gVisor netstack path — a netstack TCP socket
+// IS checkpointable by runsc, unlike a bound host unix socket). addr is "ip:port".
+func DialTCP(addr string, timeout time.Duration) (*Client, error) {
+	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
 		return nil, err
 	}
