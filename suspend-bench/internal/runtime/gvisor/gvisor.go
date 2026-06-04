@@ -85,12 +85,13 @@ func (r *Runtime) runsc(ctx context.Context, st *gvState, args ...string) error 
 	full := append([]string{
 		"-log-format", "json",
 		"--alsologtostderr",
-		// No overlay: gVisor's default overlay writes a .gvisor.filestore into the
-		// (shared) rootfs and breaks on reuse; with none the gofer serves the
-		// rootfs directly (the workload writes nothing to it). Also: do NOT use
-		// -host-uds — a bound host socket cannot be checkpointed; the control
-		// channel is netstack TCP over a per-instance veth/netns instead.
-		"-overlay2=none",
+		// In-memory overlay: writes (Vite's cache, /tmp, the agent's edits) go to a
+		// memory-backed upper layer, so the shared read-only rootfs stays clean
+		// (no .gvisor.filestore written into it) and writable-rootfs workloads like
+		// Node/Vite work. The C workload writes nothing, so its overlay stays empty.
+		// Also: do NOT use -host-uds — a bound host socket cannot be checkpointed;
+		// the control channel is netstack TCP over a per-instance veth/netns.
+		"-overlay2=all:memory",
 		"-root", st.stateRoot,
 	}, args...)
 	cmd := exec.CommandContext(ctx, r.bin, full...)
@@ -270,9 +271,10 @@ func (r *Runtime) writeOCIConfig(ctx context.Context, spec runtime.BootSpec, st 
 		proc["args"] = []any{"/workload", fmt.Sprintf("tcp:%d", workloadTCPPort)}
 		proc["terminal"] = false
 	}
-	// root.path -> absolute path to the shared extracted image rootfs (read-only;
-	// the workload writes nothing to it, and ro keeps the shared dir pristine).
-	cfg["root"] = map[string]any{"path": st.rootfsDir, "readonly": true}
+	// root.path -> absolute path to the shared extracted image rootfs. Writable=
+	// true so Node/Vite can write; the in-memory overlay (-overlay2=all:memory)
+	// keeps those writes off the shared rootfs.
+	cfg["root"] = map[string]any{"path": st.rootfsDir, "readonly": false}
 
 	// Point the network namespace at our per-instance veth netns so gVisor's
 	// netstack adopts the veth + IP and the host can reach the workload's TCP port.

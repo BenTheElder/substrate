@@ -164,14 +164,35 @@ Findings:
   gVisor spreads memory across sentry+gofer); the cgroup `swap.current`
   (83/285 MB) is the accurate "freed" figure for gVisor swap.
 
-### cloud-hypervisor vs gVisor (checkpoint/restore)
-| | image size | suspend | resume | lazy resume? |
-|---|--:|--:|--:|:--:|
-| **CH (sparse + ondemand)** | touched set + ~0.34 GB | fast | **flat ~25 ms** | ✅ userfaultfd |
-| **gVisor (runsc)** | **smallest** (app state) | fast | scales w/ WS (eager) | ❌ |
+### gVisor — realistic Vite dev server (n=2)
+| mechanism | WS | boot | resume | suspend | image |
+|---|--:|--:|--:|--:|--:|
+| checkpoint | 64 MiB | 837 | **1080 ms** | 204 ms | 196 MB |
+| coldstart | 64 MiB | 844 | **883 ms** | — | — |
+| swap | 64 MiB | 865 | 419 ms | 3042 ms | 219 MB |
+| checkpoint | 256 MiB | 861 | **1828 ms** | 298 ms | 383 MB |
+| coldstart | 256 MiB | 837 | **883 ms** | — | — |
+| swap | 256 MiB | 849 | 388 ms | 5177 ms | 407 MB |
 
-CH wins **resume latency** (constant, demand-paged); gVisor wins **image size**.
-Both crush live swap on suspend, and both can restore into a fresh process tree.
+**Surprise: for gVisor + a fast-booting app, checkpoint/restore resume is *slower
+than cold start*** (1080–1828 ms vs 883 ms). gVisor boots fast (~840 ms vs CH's
+~2 s), and its *eager* restore must deserialize the whole V8/Vite app-state, which
+costs more than just re-running the app. So gVisor checkpoint/restore only pays off
+for **slow-to-initialize** apps (restore ≪ cold init); for snappy ones, cold start
+wins. (swap resumes fast at ~400 ms but suspends in 3–5 s — still a loss.)
+
+### cloud-hypervisor vs gVisor (checkpoint/restore)
+| | image size | suspend | resume (C) | resume (Vite) | lazy resume? | boot |
+|---|--:|--:|--:|--:|:--:|--:|
+| **CH (sparse + ondemand)** | touched + ~0.34 GB | fast | **flat ~25 ms** | **275–432 ms** | ✅ userfaultfd | ~2 s |
+| **gVisor (runsc)** | **smallest** (app state) | fast | 545–984 ms (eager) | 1080–1828 ms (eager) | ❌ | **~0.8 s** |
+
+Takeaways: **CH wins resume latency decisively** (demand-paged guest RAM beats
+gVisor's eager app-state deserialization — ~25 ms vs ~1 s on Vite). **gVisor wins
+image size and boot time.** Both crush live swap on suspend and restore into a
+fresh process tree. The sharp one: **gVisor's fast boot can make checkpoint/restore
+not worth it** for fast-initializing workloads — whereas CH (slow VM boot ~2 s,
+flat ~25 ms ondemand resume) benefits enormously from checkpoint/restore.
 
 ---
 

@@ -33,7 +33,12 @@ const fs = require('fs')
 const crypto = require('crypto')
 
 const PAGE = 4096
-const sock = process.argv[2] || '/run/node.sock'
+// argv[2]: a unix socket path (CH path, bridged from vsock by socat), or
+// "tcp:<port>" to listen on TCP (gVisor path — a netstack socket is
+// checkpointable, unlike a bound host unix socket).
+const arg = process.argv[2] || '/run/node.sock'
+const isTCP = arg.startsWith('tcp:')
+const tcpPort = isTCP ? parseInt(arg.slice(4), 10) : 0
 const VITE = 'http://127.0.0.1:5173'
 const COUNTER_FILE = '/app/src/components/Counter.jsx'
 
@@ -88,7 +93,7 @@ async function handle(line) {
   return 'ERR unknown\n'
 }
 
-try { fs.unlinkSync(sock) } catch {}
+if (!isTCP) { try { fs.unlinkSync(arg) } catch {} }
 const server = net.createServer((conn) => {
   let buf = ''
   conn.on('data', async (chunk) => {
@@ -102,4 +107,8 @@ const server = net.createServer((conn) => {
   })
   conn.on('error', () => {})
 })
-server.listen(sock, () => console.error('[control] listening on', sock))
+if (isTCP) {
+  server.listen(tcpPort, '0.0.0.0', () => console.error('[control] listening on tcp', tcpPort))
+} else {
+  server.listen(arg, () => console.error('[control] listening on', arg))
+}
