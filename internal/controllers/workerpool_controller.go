@@ -136,6 +136,11 @@ func buildDeploymentApplyConfig(wp *atev1alpha1.WorkerPool) *appsv1ac.Deployment
 					"ate.dev/worker-pool": wp.Name,
 				}).
 				WithSpec(corev1ac.PodSpec().
+					// hostPID lets the gVisor sentry's pid-file PID (written by ateom)
+					// be host-global, so the node-level atelet can address it to page out
+					// and cgroup-reparent the sandbox when swapping the actor out. See the
+					// poc2-atelet swap mechanic in cmd/atelet/swap_linux.go.
+					WithHostPID(true).
 					WithContainers(corev1ac.Container().
 						WithName("ateom").
 						WithImage(wp.Spec.AteomImage).

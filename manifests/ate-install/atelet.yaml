@@ -63,6 +63,14 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: "9090"
     spec:
+      # hostPID so the swap mechanic (cmd/atelet/swap_linux.go) sees the gVisor
+      # sentry by its host-global PID, and so PIDs written to cgroup.procs are
+      # interpreted in the host PID namespace.
+      hostPID: true
+      # Run on every node, including control-plane/tainted nodes, so the per-node
+      # swap mechanic is always available where worker pods land.
+      tolerations:
+      - operator: "Exists"
       serviceAccountName: atelet
       containers:
       - name: atelet
@@ -91,8 +99,17 @@ spec:
         volumeMounts:
         - name: run-ateom
           mountPath: /run/ateom-gvisor
+        # Host cgroupfs (and the rest of /sys) so the swap mechanic can create
+        # the node-level /sys/fs/cgroup/ate-suspended/<actor> cgroup and move the
+        # sandbox's processes in and out of it.
+        - name: sys
+          mountPath: /sys
       volumes:
       - name: run-ateom
         hostPath:
           path: /run/ateom-gvisor
           type: DirectoryOrCreate
+      - name: sys
+        hostPath:
+          path: /sys
+          type: Directory

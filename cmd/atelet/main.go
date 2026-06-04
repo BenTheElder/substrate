@@ -64,6 +64,21 @@ var (
 )
 
 func main() {
+	// PoC swap mechanic (poc2-atelet): when invoked as a subcommand, run the
+	// swap-out/swap-in flow against an already-running actor and exit, rather
+	// than starting the gRPC server. Intercepted before flag.Parse() because
+	// the subcommand has its own flag set. Invoke via:
+	//   kubectl exec <atelet-pod> -- /ko-app/atelet swap-out|swap-in <flags>
+	if len(os.Args) > 1 && (os.Args[1] == "swap-out" || os.Args[1] == "swap-in") {
+		serverboot.InitLogger()
+		ctx := context.Background()
+		if err := runSwap(ctx, os.Args[1], os.Args[2:]); err != nil {
+			slog.ErrorContext(ctx, "swap command failed", slog.Any("err", err))
+			os.Exit(1)
+		}
+		return
+	}
+
 	flag.Parse()
 	if *showVersion {
 		fmt.Println(version.String())
