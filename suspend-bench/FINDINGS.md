@@ -8,10 +8,10 @@ memory size.** This quantifies and strengthens the recommendation in
 prefer checkpoint/restore over live swap; you do **not** need to schedule
 suspended actors under a node-level component to leverage swap.
 
-> Status: cloud-hypervisor evaluated thoroughly (C micro-workload + realistic
-> Vite dev server + multi-GB) and gVisor/runsc evaluated (§5). The zswap
-> diagnostic and a faster-SSD/striping run are still open (see
-> [Open items](#open-items)).
+> Status: cloud-hypervisor and gVisor/runsc evaluated on `bench-host-n2` (§1–§5).
+> A second host (`bench-c3-standard-22-lssd`: zswap-enabled kernel, RAID0 local
+> SSD, 22 vCPU Sapphire Rapids) adds the **zswap diagnostic**, **SSD-striping**,
+> and **large-allocation (up to 16 GiB)** results in **§6**.
 
 ## Test host & toolchain
 
@@ -24,7 +24,7 @@ suspended actors under a node-level component to leverage swap.
   `vmlinux-6.12.42` (direct boot).
 - Guest = **ext4 virtio-blk rootfs built from a container image**. Control channel:
   on CH, **virtio-vsock** (C) / vsock→unix via socat (Node); on gVisor, **netstack
-  TCP** over a per-instance veth (a host-uds socket can't be checkpointed — see §5).
+  TCP** over a per-instance veth (a host-uds socket can't be checkpointed).
   No virtio-fs (breaks CH restore), no tap (avoids net-FD-on-restore).
 - **zswap is NOT compiled into the Debian 13 cloud kernel** (`CONFIG_ZSWAP`
   unset) → "swap" here is **plain on-disk swap** (no compress-in-RAM tier).
@@ -143,19 +143,6 @@ Sparse makes copy cheap in both cases (it only ever reads touched pages).
 | checkpoint | 256 MiB | 984 ms | 234 ms | **269 MB** | n/a |
 | swap | 256 MiB | 58 ms | 700 ms | — | 285 MB |
 
-Getting gVisor checkpoint to work at all required two non-obvious things:
-- **Control channel must be a netstack TCP socket, not a host-uds socket.** With
-  `runsc -host-uds=all` the workload's AF_UNIX socket is a *bound host socket*,
-  which gVisor's state encoder **refuses to save** (`Cannot save endpoint with
-  bound host socket`, panic). The harness instead gives each gVisor sandbox a
-  **veth + netns** and the workload listens on TCP; gVisor *can* checkpoint a
-  netstack socket. (CH has no such issue — vsock state is in the VM snapshot.)
-- **`-overlay2=all:memory`** (in-memory writable overlay) + a per-instance OCI
-  bundle. The default overlay writes a `.gvisor.filestore` into the shared rootfs
-  (breaks on reuse); a memory overlay keeps the shared rootfs clean while letting
-  writable-rootfs workloads (Node/Vite write `/tmp`, the cache, the agent's edits)
-  run — the C workload writes nothing so its overlay stays empty.
-
 Findings:
 - **gVisor checkpoint images are smaller than CH's** (67/269 MB vs CH sparse
   127/328 MB at the same working set) — gVisor serializes *application state*, not
@@ -201,31 +188,133 @@ flat ~25 ms ondemand resume) benefits enormously from checkpoint/restore.
 
 ---
 
+## 6. Second host — `bench-c3-standard-22-lssd` (zswap kernel + striped SSD)
+
+A second GCE host added the three things the n2 could not measure: a
+**zswap-enabled kernel** (the stock Debian 13 *cloud* kernel has `CONFIG_ZSWAP`
+unset — we boot the generic kernel `6.12.90+deb13.1-amd64`), **RAID0 across 4×
+375 GB local SSD** (`/dev/md0`, ~1.5 TB), and a faster CPU (**22 vCPU Intel
+Sapphire Rapids 8481C** vs the n2's 16 vCPU). cloud-hypervisor **v52.0**, memfd
+sparse throughout. zswap = zstd / zsmalloc / 50% max pool. All cells verified.
+
+### 6.1 Striping (RAID0) vs the n2's separate disks — C, 8 GiB guest, checkpoint
+copy and ondemand are SSD-write/read-bound, so this isolates the storage win
+(zswap-irrelevant — checkpoint never swaps):
+
+| restore | WS | suspend (c3 / n2) | resume→ping (c3 / n2) |
+|---|--:|--:|--:|
+| ondemand | 1 GiB | 674 / 818 ms | **22 / 25.8 ms** |
+| copy | 1 GiB | **680 / 817 ms** | **684 / 765 ms** |
+| ondemand | 4 GiB | 2,274 / 2,776 ms | **23 / 24.5 ms** |
+| copy | 4 GiB | **2,288 / 2,909 ms** | **2,281 / 2,560 ms** |
+
+- Striping (+ the faster CPU) buys **~15–20%** on the SSD-bound paths
+  (checkpoint-copy suspend and resume).
+- **ondemand resume stays flat ~22 ms** regardless of striping — first-response
+  latency is fault-bound, not storage-bound, so faster disks don't move it. The
+  win from faster SSD lands entirely on *copy* restore and on *suspend* (the write
+  side), exactly where §3 predicted.
+
+### 6.2 zswap diagnostic (the question the n2 couldn't answer) — swap, C, 8 GiB guest
+Isolates whether any swap advantage is the **"z" (compress-in-RAM)** or the
+suspend **mechanism**, by toggling `zswap.enabled` on the same swap path:
+
+| zswap | WS | **suspend** | **resume→ping** | zswap pool | on-disk swap |
+|---|--:|--:|--:|--:|--:|
+| off | 256 MiB | **3,179 ms** | 79 ms | 0 | 511 MiB |
+| on | 256 MiB | 3,661 ms | **24 ms** | 18 MiB | 511 MiB |
+| off | 1 GiB | **3,695 ms** | 97 ms | 0 | 1,280 MiB |
+| on | 1 GiB | 5,358 ms | **45 ms** | 18 MiB | 1,280 MiB |
+
+- **zswap does not help suspend — it makes it *slower*** (1 GiB: 3.7 s → 5.4 s).
+  Compression runs inline during the page-by-page cgroup reclaim, adding CPU to the
+  exact path that is already swap's bottleneck.
+- **zswap roughly halves *resume*** (97 → 45 ms): the small compressed fraction
+  faults back from RAM instead of disk. But resume was never swap's problem.
+- **The C working set is largely incompressible** (a HASH fill): only **18 MiB**
+  ever entered the zswap pool while the *full* working set still hit on-disk swap.
+  So even where zswap *could* help, it barely engaged.
+- **Conclusion: the suspend cost is the reclaim mechanism, not the absence of
+  compression.** The "z" is not the source of any swap advantage (there isn't one);
+  it only ever helps the cheap axis (resume) and taxes the expensive one (suspend).
+  Swap suspend stays 3–5 s vs sparse-checkpoint's 0.7 s suspend / 22 ms resume.
+
+### 6.3 Large-allocation scaling — C, up to 16 GiB dirtied, 20 GiB guest, sparse
+_In progress — a checkpoint-vs-swap scaling run (8 + 16 GiB dirtied, copy/ondemand,
+plus zswap on/off at scale) is underway on the c3; numbers will be appended here.
+Based on §3, expect ondemand resume to stay flat (~tens of ms) and swap suspend to
+keep climbing linearly into the tens of seconds._
+
+### 6.4 Node/Vite re-run — 2 GiB guest
+| mechanism | WS | suspend | resume→serves | note |
+|---|--:|--:|--:|--|
+| checkpoint copy | 64 MiB | 185 ms | **259 ms** | ≈ n2 (275 ms), slightly faster |
+| checkpoint ondemand | 64 MiB | 186 ms | 326 ms | copy ≥ ondemand for Vite, as on n2 |
+| checkpoint copy | 256 MiB | 290 ms | **353 ms** | ≈ n2 (372 ms) |
+| swap | 64 MiB | **7,447 ms** | 267 ms | zswap on (host default) |
+| swap | 256 MiB | **8,114 ms** | 246 ms | zswap on (host default) |
+
+Checkpoint parity with n2 holds (copy ≥ ondemand for a fast-faulting app). Swap
+suspend here is *worse* than the n2's 3.6–4.1 s **because these ran with zswap on**
+(host default), reinforcing §6.2: compression taxes suspend.
+
+### 6.5 Backing up a snapshot to object storage
+A CH snapshot is a **directory**, not a single file:
+
+| file | size (2 GiB guest, idle) | contents |
+|---|--:|---|
+| `config.json` | ~1.5 KB | VM topology: kernel path, disk path, vsock socket, mem cfg |
+| `state.json` | ~56 KB | device + vCPU register state |
+| `memory-ranges` | **2 GiB apparent / 76 MB on-disk** | guest RAM dump — a **sparse file** |
+
+`memory-ranges` is sparse: logical size = full guest RAM, physical size = touched
+set only (measured: 8.59 GB apparent / 1.34 GB on-disk at 1 GiB WS; / 4.57 GB at
+4 GiB). **The trap:** object stores (GCS/S3) persist exactly the bytes you `PUT` —
+a naïve `cp`/`gsutil cp` reads the holes back as zeros and uploads the *full guest
+RAM* (~6.4× inflation that scales with guest size, not working set); holes don't
+survive a plain HTTP upload anyway.
+
+- **Compress before upload** (the §2 zstd path, already in
+  `internal/mechanism/compress.go` — it zstd's only `memory-ranges`): squeezes the
+  zero-holes to ~the touched-set size. `tar -S -I zstd -cf snap.tar.zst <dir>/` →
+  one object; restore = pull + decompress + `--restore source_url=file://<dir>`.
+- **Sparse-aware copy** (`tar -S`, `cp --sparse=always`, `rsync -S`) only helps a
+  *filesystem* hop, not a raw object upload.
+- **Cross-node restore needs more than the snapshot dir:** the snapshot holds RAM
+  + device state only — **not the rootfs disk, not the kernel**. The target node
+  also needs the guest kernel and the (rw, so current-state) rootfs image at the
+  paths `config.json` references, or those paths rewritten. Same-node
+  suspend/resume needs none of this.
+
+---
+
 ## Conclusion (for the architecture decision)
 - **Use sparse (memfd) + checkpoint/restore to local SSD.** Pick restore mode by
   wake access pattern (ondemand default; copy when the workload touches most of
   its memory on wake). Upload a compressed image to object storage for cross-node.
 - **Do not build live-swap-under-atelet.** Swap is slower to suspend (dramatically
   at multi-GB), slower to resume, the same footprint, and pins actors to a node.
-  Its only theoretical edge (compress-in-RAM via zswap) is unproven here and
-  cannot overcome a 7–17 s suspend.
+  Its only theoretical edge (compress-in-RAM via zswap) is now measured (§6.2) and
+  does **not** help: zswap makes suspend *slower* (inline compression on the reclaim
+  path) and benefits only resume — it cannot overcome a multi-second suspend.
 - **memfd (needed for sparse) does not pin to a node** — snapshots restore into a
   fresh process tree, so portability is intact.
 
 ## Open items
-- **zswap diagnostic**: the Debian 13 cloud kernel lacks `CONFIG_ZSWAP`; re-run
-  swap (and snapshot-zstd) on a zswap-enabled kernel to isolate whether any swap
-  advantage is the "z" (compression) vs the suspend mechanism. (A
-  `c3-standard-22-lssd` host with a zswap kernel is being prepared.)
+- **zswap diagnostic: DONE** (§6.2) — on a zswap-enabled kernel, zswap makes swap
+  *suspend* slower and only helps resume; the "z" is not a swap advantage.
+- **Faster/striped local SSD: DONE** (§6.1) — RAID0 over 4× local SSD buys ~15–20%
+  on checkpoint-copy suspend/resume; ondemand resume stays flat ~22 ms
+  (storage-independent).
 - **gVisor: DONE** (see §5) — C + Vite, checkpoint/restore + swap + coldstart all
   work and verify. (Minor: gVisor `host_rss_freed` is undercounted for swap; use
   the cgroup `swap.current` figure.)
-- **Faster local SSD**: re-run on `c4`/`c3` (Titanium SSD) — copy-restore and
-  suspend are SSD-write-bound, so absolute numbers should improve.
 - **Correctness at scale**: the multi-GB `HASH` read deadline was raised to 180 s
   (lazy fault-in of many GB legitimately takes tens of seconds); earlier `0/2`
   flags were that timeout, not corruption (copy passed; resume succeeded).
 
 ## Reproducing
 See `README.md`. Results JSONL/CSV are written under `results/`. Raw data for these
-tables: `results/{memfd,multigb,node_real,v52}.jsonl` on the bench host.
+tables: `results/{memfd,multigb,node_real,v52}.jsonl` on `bench-host-n2`; the §6
+host data is `results/c3_{multigb,zswap,node,16g,16g_zswap}.jsonl` on
+`bench-c3-standard-22-lssd`.
