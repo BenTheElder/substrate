@@ -1,11 +1,16 @@
 # Suspend/Resume Benchmark — Findings (cloud-hypervisor)
 
 Data collected with the `suspend-bench` harness on a single GCE VM. **Headline:
-sparse + demand-paged checkpoint/restore to local SSD beats live swap on every
-axis — suspend, resume, footprint, and portability — and the gap widens with
-memory size.** The recommendation: prefer checkpoint/restore over live swap; you
-do **not** need to schedule suspended actors under a node-level component to
-leverage swap.
+sparse + demand-paged checkpoint/restore to local SSD matches or beats live swap
+on the axes that matter — resume latency, density, footprint, and (decisively)
+portability — at the same on-disk cost.** The recommendation: prefer
+checkpoint/restore over live swap; you do **not** need to schedule suspended actors
+under a node-level component to leverage swap. (We do *not* rest the case on the
+swap-`suspend` *latency* — that measures synchronous full eviction and production
+could reclaim asynchronously — but the eviction *work* still matters for density:
+checkpoint teardown returns **100%** of the actor's RAM to the host, while a
+swap-suspended VM stays a **live, partially-resident process**. The verdict stands
+on **resume + density + portability**.)
 
 > Status: cloud-hypervisor and gVisor/runsc evaluated on `bench-host-n2` (§1–§5).
 > A second host (`bench-c3-standard-22-lssd`: zswap-enabled kernel, RAID0 local
@@ -54,6 +59,25 @@ Metric of record: **`resume → first-ping`** = restore/resume call → first
 successful response (for Node, the Vite dev server serving HTTP again). All runs
 verified state survives (seed/counter + region hash); n = medians as noted.
 
+> ⚠️ **Reading the swap `suspend` numbers (latency vs density).** Our `suspend_ms`
+> for swap measures **synchronous, full eviction** — we loop `memory.reclaim` until
+> the cgroup's resident set hits the floor — i.e. "time until the RAM is freed."
+> As a **control-plane latency** this overstates swap: production could pause + set
+> `memory.high`/`swap.max` and return in ms, letting the kernel page out lazily. So
+> we don't use these as a *latency* verdict. **But the eviction work still matters
+> for density**, and there the two differ structurally:
+> - **checkpoint**: teardown kills the VMM → **100% of the actor's RAM returns to
+>   the host**; the suspended actor costs **zero node RAM** (just a disk image).
+> - **swap**: the VM stays **alive (paused)** — you free most guest RAM to the swap
+>   device but keep a **residual resident floor (~32 MiB we can't evict) + a live
+>   process** (PID, fds, vCPU threads, KVM/task structures) **per suspended actor**,
+>   plus swap-space usage. At high suspended-actor counts that live-process tax caps
+>   density well below checkpoint's "disk-only."
+>
+> So: trust `resume` and **density** (and portability) for the verdict, not swap's
+> `suspend` *latency*. (Checkpoint `suspend` is itself mostly time-to-page-cache,
+> durable flush async.)
+
 ---
 
 ## 1. C micro-workload, 1 GiB guest, memfd sparse (n=3)
@@ -67,9 +91,12 @@ verified state survives (seed/counter + region hash); n = medians as noted.
 | checkpoint copy | 256 MiB | 206 ms | 198 ms | 328 MB img | 336 MB | ✅ |
 | swap | 256 MiB | 3641 ms | 83 ms | 329 MB swap | 331 MB | ❌ |
 
-Checkpoint suspends **15–38× faster** than swap, resumes **~3× faster** (ondemand),
-**same on-disk footprint** (sparse image == touched set == swap size), and is
-portable. There is no axis on which swap wins.
+Checkpoint resumes **~3× faster** (ondemand), has the **same on-disk footprint**
+(sparse image == touched set == swap size), frees **100%** of node RAM (vs swap's
+live paused process), and is portable. Swap wins no axis. (Checkpoint's
+full-eviction `suspend` is also 15–38× faster here, but that's a synchronous-
+eviction number — see the suspend caveat above; the verdict rests on resume +
+density + portability.)
 
 ## 2. Snapshot-size levers (1 GiB guest, 64 MiB touched)
 
@@ -101,8 +128,10 @@ naïve copy/upload; compression squeezes the zeros for the GCS hop).
 - **ondemand resume is FLAT ~25 ms even at 4 GiB** — first-response latency is
   independent of guest size (only first-touched pages fault in). copy scales with
   the touched set; swap ~100–170 ms.
-- **Swap suspend is catastrophic at scale: 7 s (1 GiB) → 17 s (4 GiB)** —
-  reclaiming GB page-by-page. The checkpoint-vs-swap suspend gap widens with size.
+- **Swap's full-eviction time climbs with size: 7 s (1 GiB) → 17 s (4 GiB)** —
+  reclaiming GB page-by-page. As a *latency* this can be hidden (async reclaim, see
+  caveat), but it is the throughput at which a node's RAM is actually reclaimed —
+  and the VM stays a live process throughout, so it's also the density rate-limiter.
 
 ## 4. Realistic workload — agent-edited Vite + React dev server, 2 GiB guest, sparse (n=3)
 
@@ -337,11 +366,21 @@ Vite case (§5), because Chrome's own cold start is slow enough that restore win
 - **Use sparse (memfd) + checkpoint/restore to local SSD.** Pick restore mode by
   wake access pattern (ondemand default; copy when the workload touches most of
   its memory on wake). Upload a compressed image to object storage for cross-node.
-- **Do not build live-swap-under-atelet.** Swap is slower to suspend (dramatically
-  at multi-GB), slower to resume, the same footprint, and pins actors to a node.
-  Its only theoretical edge (compress-in-RAM via zswap) is now measured (§6.2) and
-  does **not** help: zswap makes suspend *slower* (inline compression on the reclaim
-  path) and benefits only resume — it cannot overcome a multi-second suspend.
+- **Do not build live-swap-under-atelet.** The decisive axes are **resume latency,
+  density, and portability**, and swap loses all three:
+  - **Portability**: swap is node-local (netns/PID-ns immutable) → an actor is
+    pinned to its node; checkpoint restores into a fresh process on any node.
+  - **Density**: checkpoint teardown returns **100%** of the actor's RAM (suspended
+    actor = a disk image, **zero node RAM**); a swap-suspended VM stays a **live,
+    partially-resident process** (~32 MiB floor + PID/fds/vCPU/KVM overhead) per
+    actor, capping how many you can pack.
+  - **Resume**: ondemand checkpoint is a flat **~25 ms** vs swap's **~80–170 ms**
+    (swap must page CH's own memory back in, not just guest RAM).
+  Swap's theoretical edge (compress-in-RAM via zswap) is measured (§6.2) and only
+  helps resume, never suspend/density. *(We do not lean on the multi-second
+  swap-`suspend` latency — that's synchronous full eviction; production could
+  reclaim async — but the eviction work is exactly what density depends on; see the
+  caveat under "Mechanisms compared.")*
 - **memfd (needed for sparse) does not pin to a node** — snapshots restore into a
   fresh process tree, so portability is intact.
 
