@@ -75,6 +75,16 @@ spec:
                 format: int32
                 minimum: 0
                 type: integer
+              sandboxClass:
+                default: gvisor
+                description: |-
+                  SandboxClass selects the sandbox runtime family, which drives the worker
+                  pod shape (KVM/vhost device mounts and node placement). The concrete binary
+                  is still selected by AteomImage. Defaults to gvisor.
+                enum:
+                - gvisor
+                - microvm
+                type: string
             required:
             - ateomImage
             - replicas
