@@ -42,6 +42,8 @@ message RunRequest {
   RunscConfig runsc = 8;
 
   WorkloadSpec spec = 7;
+  RuntimeAssetsConfig runtime_assets = 9;
+
 }
 
 message GCPAuthenticationConfig {
@@ -66,6 +68,26 @@ message RunscConfig {
   RunscPlatformConfig arm64 = 2;
 
   // How should atelet authenticate to fetch the runsc binary?
+  AuthenticationConfig authentication = 3;
+}
+
+// RuntimeAsset is one content-addressed file atelet fetches for a non-gVisor
+// runtime (e.g. the kata shim, cloud-hypervisor, virtiofsd, guest kernel/image,
+// base configuration.toml).
+message RuntimeAsset {
+  // sha256_hash both names the cached file and verifies its integrity.
+  string sha256_hash = 1;
+  // gs:// URL to download from (resolved against the authenticated client when
+  // authentication is set, else the anonymous public client).
+  string url = 2;
+}
+
+// RuntimeAssetsConfig describes the asset set for a non-gVisor runtime. atelet
+// fetches each asset content-addressed (like runsc) and passes the local paths
+// to ateom. Empty/runtime="gvisor" means use the runsc path instead.
+message RuntimeAssetsConfig {
+  string runtime = 1;                      // "gvisor" | "microvm"
+  map<string, RuntimeAsset> assets = 2;    // name -> asset
   AuthenticationConfig authentication = 3;
 }
 
@@ -112,6 +134,8 @@ message CheckpointRequest {
   //
   // For example: "gs://bucket/actors/1234/snapshots/5678/"
   string snapshot_uri_prefix = 8;
+  RuntimeAssetsConfig runtime_assets = 9;
+
 }
 
 message CheckpointResponse {
@@ -131,6 +155,8 @@ message RestoreRequest {
 
   // The object storage URI prefix of the snapshot to restore.
   string snapshot_uri_prefix = 8;
+  RuntimeAssetsConfig runtime_assets = 9;
+
 }
 
 message RestoreResponse {
