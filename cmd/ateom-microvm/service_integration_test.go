@@ -26,8 +26,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/agent-substrate/substrate/cmd/ateom-cloud-hypervisor/internal/ch"
-	"github.com/agent-substrate/substrate/cmd/ateom-cloud-hypervisor/internal/kata"
+	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/ch"
+	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/kata"
 	"github.com/agent-substrate/substrate/internal/ateompath"
 	"github.com/agent-substrate/substrate/internal/proto/ateompb"
 	"golang.org/x/sys/unix"
@@ -37,7 +37,7 @@ import (
 // CheckpointWorkload, RestoreWorkload) against kata + cloud-hypervisor, with
 // an atelet-style OCI bundle and the object-storage round trip
 // simulated by copying CheckpointStateDir -> RestoreStateDir. This proves the
-// whole ateom-cloud-hypervisor service works end-to-end (not just the helpers):
+// whole ateom-microvm service works end-to-end (not just the helpers):
 // path derivation, ensureKataCompatibleSpec (the bundle here is a minimal
 // gVisor-style spec with no linux.resources), the running map, shared-dir
 // capture/reconstruct, virtiofsd relaunch, CH restore, and teardown.
@@ -72,7 +72,7 @@ func TestServiceE2E(t *testing.T) {
 	writeMinimalGvisorStyleSpec(t, bundle) // no linux.resources -> exercises ensureKataCompatibleSpec
 	drainBundleLog(t, bundle)              // visibility into shim logs if anything fails
 
-	svc := NewService("testpod", shim, chBin, vfsdBin, "", "default", true, -1, &SaveLinkInfo{})
+	svc := NewService("testpod", shim, chBin, vfsdBin, "", "default", true, -1)
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 

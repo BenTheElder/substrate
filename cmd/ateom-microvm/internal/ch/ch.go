@@ -17,7 +17,7 @@
 // kata creates at /run/vc/vm/<id>/clh-api.sock), plus relaunching a fresh VMM
 // from a snapshot directory for restore.
 //
-// This is the snapshot/restore half of the ateom-cloud-hypervisor model: kata
+// This is the snapshot/restore half of the ateom-microvm model: kata
 // owns RUN (boot the micro-VM + run the OCI container), and ateom drives the CH
 // REST API underneath for suspend (pause+snapshot) and owns the bare-CH
 // relaunch for restore. The REST wire format and the --restore CLI form are

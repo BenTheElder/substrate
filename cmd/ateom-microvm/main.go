@@ -14,7 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Command ateom-cloud-hypervisor is the kata + cloud-hypervisor micro-VM
+// Command ateom-microvm is the kata + cloud-hypervisor micro-VM
 // implementation of the ateompb.Ateom service, a peer to cmd/ateom-gvisor.
 //
 // It runs a substrate actor as a cloud-hypervisor micro-VM (launched via the
@@ -38,7 +38,6 @@ import (
 	"github.com/agent-substrate/substrate/internal/serverboot"
 	"github.com/agent-substrate/substrate/internal/version"
 	"github.com/hashicorp/go-reap"
-	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -65,7 +64,7 @@ var (
 	showVersion = flag.Bool("version", false, "Print version and exit.")
 
 	// reapLock guards subprocess exec against the child reaper, mirroring
-	// ateom-gvisor. ateom-cloud-hypervisor will spawn the kata shim and CH
+	// ateom-gvisor. ateom-microvm will spawn the kata shim and CH
 	// processes under it in later milestones.
 	reapLock sync.RWMutex
 )
@@ -89,14 +88,11 @@ func do(ctx context.Context) error {
 	defer cancel()
 
 	serverboot.InitLogger()
-	slog.InfoContext(ctx, "ateom-cloud-hypervisor booting", slog.String("version", version.String()))
+	slog.InfoContext(ctx, "ateom-microvm booting", slog.String("version", version.String()))
 
 	tp, err := serverboot.InitTracing(ctx, serverboot.TracingOptions{
-		ServiceName: "ateom-cloud-hypervisor",
+		ServiceName: "ateom-microvm",
 		Sampler:     sdktrace.ParentBased(sdktrace.NeverSample()),
-		// The micro-VM keeps the pod network, but for the POC we have no trace
-		// collector to export to; skip the exporter like ateom-gvisor.
-		NoExporter: true,
 	})
 	if err != nil {
 		serverboot.Fatal(ctx, "Failed to initialize tracing", err)
@@ -142,18 +138,9 @@ func do(ctx context.Context) error {
 		return fmt.Errorf("while opening unix socket: %w", err)
 	}
 
-	// Networking (mirrors ateom-gvisor): scrape the pod's eth0, then create a
-	// named interior netns. RunWorkload moves eth0 into it (addrs/routes restored)
-	// and points kata at it so the micro-VM gets the pod's network.
-	eth0Link, err := netlink.LinkByName("eth0")
-	if err != nil {
-		return fmt.Errorf("while getting netlink link for eth0: %w", err)
-	}
-	eth0LinkInfo, err := scrapeLink(eth0Link)
-	if err != nil {
-		return fmt.Errorf("while scraping info from eth0: %w", err)
-	}
-	slog.InfoContext(ctx, "Scraped eth0", slog.Any("eth0", eth0LinkInfo))
+	// Networking (mirrors ateom-gvisor's veth model): create a named interior
+	// netns; each activation builds a fresh veth pair into it (see net.go) and
+	// points kata at it.
 	interiorNetNS, err := createNetNSWithoutSwitching(ateompath.AteomNetNSName(*podUID))
 	if err != nil {
 		return fmt.Errorf("while creating interior netns: %w", err)
@@ -163,10 +150,10 @@ func do(ctx context.Context) error {
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.UnaryInterceptor(ateinterceptors.ServerUnaryInterceptor),
 	)
-	ateompb.RegisterAteomServer(svr, NewService(*podUID, *shimBinary, *chBinary, *virtiofsdBinary, *kataConfig, *kataNamespace, *kataDebug, interiorNetNS, eth0LinkInfo))
+	ateompb.RegisterAteomServer(svr, NewService(*podUID, *shimBinary, *chBinary, *virtiofsdBinary, *kataConfig, *kataNamespace, *kataDebug, interiorNetNS))
 	reflection.Register(svr)
 
-	slog.InfoContext(ctx, "ateom-cloud-hypervisor serving", slog.String("socket", sockPath))
+	slog.InfoContext(ctx, "ateom-microvm serving", slog.String("socket", sockPath))
 	if err := svr.Serve(lis); err != nil {
 		return fmt.Errorf("while serving: %w", err)
 	}
@@ -239,11 +226,9 @@ type AteomService struct {
 	namespace       string
 	kataDebug       bool
 
-	// interiorNetNS holds the pod's eth0 while a workload runs (mirrors
-	// ateom-gvisor); kata is pointed at it. eth0LinkInfo is eth0's scraped
-	// addrs/routes, restored after moving the link into the interior netns.
+	// interiorNetNS hosts the per-activation actor veth peer (see net.go);
+	// kata is pointed at it.
 	interiorNetNS netns.NsHandle
-	eth0LinkInfo  *SaveLinkInfo
 
 	// running maps actor id -> the live micro-VM, kept so CheckpointWorkload can
 	// pause+snapshot+teardown the same sandbox (and RestoreWorkload can track the
@@ -254,7 +239,7 @@ type AteomService struct {
 var _ ateompb.AteomServer = (*AteomService)(nil)
 
 // NewService creates a new AteomService.
-func NewService(podUID, shimBinary, chBinary, virtiofsdBinary, kataConfig, namespace string, kataDebug bool, interiorNetNS netns.NsHandle, eth0LinkInfo *SaveLinkInfo) *AteomService {
+func NewService(podUID, shimBinary, chBinary, virtiofsdBinary, kataConfig, namespace string, kataDebug bool, interiorNetNS netns.NsHandle) *AteomService {
 	return &AteomService{
 		podUID:          podUID,
 		shimBinary:      shimBinary,
@@ -264,7 +249,6 @@ func NewService(podUID, shimBinary, chBinary, virtiofsdBinary, kataConfig, names
 		namespace:       namespace,
 		kataDebug:       kataDebug,
 		interiorNetNS:   interiorNetNS,
-		eth0LinkInfo:    eth0LinkInfo,
 		running:         map[string]*runningActor{},
 	}
 }

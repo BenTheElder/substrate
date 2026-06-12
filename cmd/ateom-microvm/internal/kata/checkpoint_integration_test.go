@@ -25,7 +25,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/agent-substrate/substrate/cmd/ateom-cloud-hypervisor/internal/ch"
+	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/ch"
 	"golang.org/x/sys/unix"
 )
 

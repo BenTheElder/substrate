@@ -20,7 +20,7 @@
 // and prints its socket address on stdout. We then speak the task v2 API
 // (Create/Start/Pause/Resume/Kill/Delete/...) directly against that socket.
 //
-// This is the RUN half of ateom-cloud-hypervisor: kata boots the cloud-
+// This is the RUN half of ateom-microvm: kata boots the cloud-
 // hypervisor micro-VM (guest kernel + rootfs + kata-agent) and runs the OCI
 // container; ateom drives CH's snapshot/restore underneath (see internal/ch),
 // against the api-socket kata exposes at CLHSocketPath(id).

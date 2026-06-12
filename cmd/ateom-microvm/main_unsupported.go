@@ -22,6 +22,6 @@ import (
 )
 
 func main() {
-	fmt.Fprintln(os.Stderr, "ateom-cloud-hypervisor is only supported on Linux")
+	fmt.Fprintln(os.Stderr, "ateom-microvm is only supported on Linux")
 	os.Exit(1)
 }
