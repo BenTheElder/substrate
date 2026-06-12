@@ -168,6 +168,44 @@ type ActorTemplateSpec struct {
 	//
 	// +required
 	Runsc RunscConfig `json:"runsc,omitempty"`
+
+	// Runtime configures a non-gVisor sandbox runtime (e.g. micro-VM). When
+	// Type=microvm, atelet fetches Assets (kata shim, cloud-hypervisor,
+	// virtiofsd, guest kernel/image, base config) instead of runsc.
+	//
+	// +optional
+	Runtime RuntimeConfig `json:"runtime,omitempty"`
+}
+
+// RuntimeAsset is one content-addressed file atelet fetches for a non-gVisor
+// runtime.
+type RuntimeAsset struct {
+	// The SHA256 hash of the asset; names the cached file and verifies integrity.
+	// +required
+	SHA256Hash string `json:"sha256Hash,omitempty"`
+
+	// A gs:// URL pointing to the asset (resolved against the authenticated
+	// client when authentication is set, else the anonymous public client).
+	// +required
+	URL string `json:"url,omitempty"`
+}
+
+// RuntimeConfig configures a non-gVisor sandbox runtime: the asset set atelet
+// fetches, keyed by name (e.g. "kata-shim", "cloud-hypervisor", "virtiofsd",
+// "kata-kernel", "kata-image", "kata-config").
+type RuntimeConfig struct {
+	// Type selects the runtime family. Empty/"gvisor" uses the runsc path.
+	// +optional
+	// +kubebuilder:validation:Enum=gvisor;microvm
+	Type string `json:"type,omitempty"`
+
+	// Assets maps an asset name to its download config.
+	// +optional
+	Assets map[string]RuntimeAsset `json:"assets,omitempty"`
+
+	// How should atelet authenticate to fetch the assets?
+	// +optional
+	Authentication AuthenticationConfig `json:"authentication,omitempty"`
 }
 
 type GCPAuthenticationConfig struct {

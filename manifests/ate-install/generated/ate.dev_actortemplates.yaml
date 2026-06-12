@@ -218,6 +218,48 @@ spec:
                         type: object
                     type: object
                 type: object
+              runtime:
+                description: |-
+                  Runtime configures a non-gVisor sandbox runtime (e.g. micro-VM). When
+                  Type=microvm, atelet fetches Assets (kata shim, cloud-hypervisor,
+                  virtiofsd, guest kernel/image, base config) instead of runsc.
+                properties:
+                  assets:
+                    additionalProperties:
+                      description: |-
+                        RuntimeAsset is one content-addressed file atelet fetches for a non-gVisor
+                        runtime.
+                      properties:
+                        sha256Hash:
+                          description: The SHA256 hash of the asset; names the cached
+                            file and verifies integrity.
+                          type: string
+                        url:
+                          description: |-
+                            A gs:// URL pointing to the asset (resolved against the authenticated
+                            client when authentication is set, else the anonymous public client).
+                          type: string
+                      required:
+                      - sha256Hash
+                      - url
+                      type: object
+                    description: Assets maps an asset name to its download config.
+                    type: object
+                  authentication:
+                    description: How should atelet authenticate to fetch the assets?
+                    properties:
+                      gcp:
+                        description: Use GCP application-default credentials.
+                        type: object
+                    type: object
+                  type:
+                    description: Type selects the runtime family. Empty/"gvisor" uses
+                      the runsc path.
+                    enum:
+                    - gvisor
+                    - microvm
+                    type: string
+                type: object
               snapshotsConfig:
                 description: Snapshots configuration for the actor.
                 properties:

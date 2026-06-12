@@ -18,6 +18,19 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// Runtime selects the sandbox runtime family for a WorkerPool. It drives the
+// worker pod shape (KVM/vhost devices, node placement); the concrete ateom
+// binary is still chosen by AteomImage.
+type Runtime string
+
+const (
+	// RuntimeGvisor is the gVisor/runsc runtime (cmd/ateom-gvisor). Default.
+	RuntimeGvisor Runtime = "gvisor"
+	// RuntimeMicroVM is the kata + cloud-hypervisor micro-VM runtime
+	// (cmd/ateom-cloud-hypervisor); needs /dev/kvm and vhost devices.
+	RuntimeMicroVM Runtime = "microvm"
+)
+
 type WorkerPoolSpec struct {
 	// Replicas is the number of worker pods to run.
 	// +required
@@ -28,6 +41,14 @@ type WorkerPoolSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	// +required
 	AteomImage string `json:"ateomImage"`
+
+	// Runtime selects the sandbox runtime family, which drives the worker pod
+	// shape (KVM/vhost device mounts and node placement). The concrete binary is
+	// still selected by AteomImage. Defaults to gvisor.
+	// +optional
+	// +kubebuilder:validation:Enum=gvisor;microvm
+	// +kubebuilder:default=gvisor
+	Runtime Runtime `json:"runtime,omitempty"`
 }
 
 type WorkerPoolStatus struct {
