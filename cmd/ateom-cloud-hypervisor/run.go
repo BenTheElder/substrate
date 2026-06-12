@@ -400,9 +400,11 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 	if err := client.WaitReady(ctx, 10*time.Second); err != nil {
 		return nil, fmt.Errorf("while waiting for CH api-socket: %w", err)
 	}
+	tPause := time.Now()
 	if err := client.Pause(ctx); err != nil {
 		return nil, fmt.Errorf("while pausing guest: %w", err)
 	}
+	dPause := time.Since(tPause)
 
 	checkpointDir := ateompath.CheckpointStateDir(ns, name, id)
 	// Start from a clean dir so CH's snapshot files are the only contents.
@@ -418,6 +420,7 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 	// kata-shim-owned actor it lives in the shim's mount namespace (nsenter);
 	// for a restored (ateom-owned) actor we built it ourselves in our own
 	// namespace (ReconstructSharedDir), so tar it directly.
+	tCapture := time.Now()
 	if ra != nil && ra.shim != nil {
 		if err := ra.shim.CaptureSharedDir(ctx, filepath.Join(checkpointDir, sharedDirTar)); err != nil {
 			return nil, fmt.Errorf("while capturing virtio-fs shared dir: %w", err)
@@ -429,11 +432,14 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 	} else {
 		slog.WarnContext(ctx, "No shared dir found for actor; skipping shared-dir capture", slog.String("id", id))
 	}
+	dCapture := time.Since(tCapture)
 
 	slog.InfoContext(ctx, "Snapshotting guest", slog.String("id", id), slog.String("dir", checkpointDir))
+	tSnapshot := time.Now()
 	if err := client.Snapshot(ctx, checkpointDir); err != nil {
 		return nil, fmt.Errorf("while snapshotting guest: %w", err)
 	}
+	dSnapshot := time.Since(tSnapshot)
 
 	// Report exactly the files we wrote so atelet ships precisely the CH snapshot
 	// (config.json + state.json + memory-ranges + shared-dir.tar), not gVisor's
@@ -445,7 +451,9 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 
 	// Tear down: the actor returns to "available". Best-effort; the snapshot is
 	// already on disk for atelet to ship.
+	tTeardown := time.Now()
 	s.teardownActor(ctx, id, ra, client)
+	dTeardown := time.Since(tTeardown)
 	delete(s.running, id)
 
 	// Return eth0 to the pod netns so the next actor can claim it (mirrors gVisor).
@@ -453,7 +461,9 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 		slog.WarnContext(ctx, "Failed to return eth0 to pod netns after checkpoint", slog.Any("err", err))
 	}
 
-	slog.InfoContext(ctx, "Actor checkpointed", slog.String("id", id), slog.Any("snapshot_files", snapshotFiles))
+	slog.InfoContext(ctx, "Actor checkpointed", slog.String("id", id), slog.Any("snapshot_files", snapshotFiles),
+		slog.Duration("pause", dPause), slog.Duration("capture", dCapture),
+		slog.Duration("snapshot", dSnapshot), slog.Duration("teardown", dTeardown))
 	return &ateompb.CheckpointWorkloadResponse{SnapshotFiles: snapshotFiles}, nil
 }
 
@@ -478,11 +488,13 @@ func listFiles(dir string) ([]string, error) {
 // be nil (e.g. ateom restarted and lost in-memory state).
 func (s *AteomService) teardownActor(ctx context.Context, id string, ra *runningActor, client *ch.Client) {
 	if client != nil {
+		tShutdown := time.Now()
 		shutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		if err := client.Shutdown(shutCtx); err != nil {
 			slog.WarnContext(ctx, "CH shutdown failed (continuing teardown)", slog.Any("err", err))
 		}
 		cancel()
+		slog.InfoContext(ctx, "CH API shutdown done", slog.Duration("took", time.Since(tShutdown)))
 	}
 	if ra == nil {
 		return
