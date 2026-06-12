@@ -49,6 +49,13 @@ kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
 - role: control-plane
+  # TEMPORARY (micro-VM demo): always bind-mount /dev/kvm into the node so kata +
+  # cloud-hypervisor worker pods can use KVM. NOTE: this makes cluster creation
+  # fail if the host lacks /dev/kvm. TODO: probe for /dev/kvm and only emit this
+  # mount when present (so gVisor-only environments still work).
+  extraMounts:
+  - hostPath: /dev/kvm
+    containerPath: /dev/kvm
 # cmd/podcertcontroller depends on ClusterTrustBundle & PodCertificateRequest.
 # They are not enabled by default as of Kubernetes v1.36
 # https://github.com/kubernetes/kubernetes/blob/master/test/compatibility_lifecycle/reference/versioned_feature_list.yaml
@@ -70,6 +77,15 @@ echo "Creating kind cluster '${KIND_CLUSTER_NAME}'..."
 echo "Enabling Proxy ARP on kind nodes..."
 for node in $("${ROOT}"/hack/kind.sh get nodes --name "${KIND_CLUSTER_NAME}"); do
   docker exec "${node}" sysctl net.ipv4.conf.all.proxy_arp=1
+done
+
+# 2.6 TEMPORARY (micro-VM demo): make /dev/kvm usable inside the node and label
+# nodes so micro-VM WorkerPools (nodeSelector ate.dev/runtime=microvm) schedule.
+# TODO: gate this on /dev/kvm being present so gVisor-only clusters still work.
+echo "Preparing kind nodes for micro-VM (kata + cloud-hypervisor) runtime..."
+for node in $("${ROOT}"/hack/kind.sh get nodes --name "${KIND_CLUSTER_NAME}"); do
+  docker exec "${node}" chmod 666 /dev/kvm
+  kubectl label node "${node}" ate.dev/runtime=microvm --overwrite
 done
 
 # 3. Add the registry config to the nodes
