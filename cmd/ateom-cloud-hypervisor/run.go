@@ -109,6 +109,12 @@ func (s *AteomService) resolveRuntime(actorDir string, paths map[string]string) 
 		if err != nil {
 			return r, fmt.Errorf("reading base kata config %q: %w", base, err)
 		}
+		// TODO: make guest VM memory size a first-class ActorTemplate field and
+		// rewrite default_memory here (like the asset paths) instead of requiring
+		// per-size configuration.toml asset variants. Suspend/resume latency
+		// scales directly with guest memory (CH's snapshot scans/writes the whole
+		// memfd): on GKE pd-balanced disks, a 512MiB guest measured ~3.4s suspend
+		// / ~1.6s resume vs ~18s / ~4.4s at kata's stock default_memory=2048.
 		rendered, err := kata.RenderConfig(baseBytes, kata.ConfigAssets{
 			Kernel: kernel, Image: image, Hypervisor: r.ch, Virtiofsd: r.virtiofsd,
 		})
