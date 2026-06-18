@@ -295,6 +295,16 @@ func ensureKataCompatibleSpec(bundle, id, netnsPath string) error {
 		}
 	}
 
+	// Request the virtio-fs overlay rootfs from the patched kata shim: serve the
+	// container rootfs READ-ONLY over virtio-fs and overlay it with a guest-tmpfs
+	// upper, so the root is writable but writes live in guest RAM (captured by the
+	// CH memory snapshot) and the virtio-fs base is never written. See the kata
+	// branch ateom-virtiofs-overlay-rootfs (shareRootFilesystemWithVirtiofsOverlay).
+	if spec.Annotations == nil {
+		spec.Annotations = map[string]string{}
+	}
+	spec.Annotations["io.katacontainers.fs-opt.virtiofs-overlay-rw"] = "true"
+
 	// Point the network namespace at our interior netns (which holds the pod's
 	// eth0); kata finds eth0 there and wires it to the VM's virtio-net.
 	netnsSet := false
