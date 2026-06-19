@@ -284,6 +284,15 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	err = ac.StartOverlayWorkload(wlCtx, id, ovlID, spec)
 	wlCancel()
 	if err != nil {
+		// Diagnostic: dump the guest layout via the kata debug console so we can
+		// see why the overlay storages didn't resolve. Best-effort.
+		dump := kata.DebugConsoleDump(ctx, vsockPath,
+			"echo '== /run/kata-containers =='; ls -la /run/kata-containers/ 2>&1; "+
+				"echo '== shared/containers =='; ls -la /run/kata-containers/shared/containers/ 2>&1; "+
+				"echo '== carrier "+id+" =='; ls -la /run/kata-containers/"+id+"/ 2>&1; "+
+				"echo '== carrier rootfs =='; ls /run/kata-containers/"+id+"/rootfs/ 2>&1 | head; "+
+				"echo '== mounts(kata) =='; grep kata-containers /proc/mounts 2>&1")
+		slog.ErrorContext(ctx, "overlay workload failed; guest debug-console dump", slog.String("dump", dump))
 		return nil, fmt.Errorf("while starting overlay workload via agent: %w", err)
 	}
 

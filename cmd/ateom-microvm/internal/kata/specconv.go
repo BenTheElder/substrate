@@ -51,6 +51,9 @@ func (a *AgentClient) StartOverlayWorkload(ctx context.Context, sandboxID, conta
 	// lazily auto-mounted virtio-fs submount which is not reliably visible to a
 	// *separate* container's storage on all platforms (resolves on amd64,
 	// ENOENTs on arm64/kind). The resolved bind is stable + eager on both.
+	// Lower = the carrier's resolved rootfs (the eager bind the agent's
+	// setup_bundle makes at /run/kata-containers/<sandboxID>/rootfs from the RO
+	// virtio-fs base). Eager + stable on both amd64 and arm64.
 	sharedBase := "/run/kata-containers/" + sandboxID + "/rootfs"
 	base := "/run/kata-containers/" + containerID
 	lower := base + "/lower"
@@ -163,9 +166,17 @@ func SpecToAgentPB(s *specs.Spec) *agentpb.Spec {
 			ReadonlyPaths: s.Linux.ReadonlyPaths,
 		}
 		for _, ns := range s.Linux.Namespaces {
-			l.Namespaces = append(l.Namespaces, &agentpb.LinuxNamespace{
-				Type: string(ns.Type), Path: ns.Path,
-			})
+			// Mirror the kata shim (kata_agent.go constrainGRPCSpec): the
+			// network/cgroup/time namespaces are handled on the host / unsupported
+			// in the guest agent, so DROP them (dropping the network ns makes the
+			// container share the guest sandbox network = eth0/actor IP). Every
+			// other namespace's host Path MUST be emptied, else the agent tries to
+			// join a host namespace path inside the guest and fails ENOENT.
+			switch ns.Type {
+			case specs.NetworkNamespace, specs.CgroupNamespace, specs.TimeNamespace:
+				continue
+			}
+			l.Namespaces = append(l.Namespaces, &agentpb.LinuxNamespace{Type: string(ns.Type)})
 		}
 		if r := s.Linux.Resources; r != nil {
 			res := &agentpb.LinuxResources{}

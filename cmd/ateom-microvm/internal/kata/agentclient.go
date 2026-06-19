@@ -32,6 +32,51 @@ import (
 // agentVsockPort is the guest port the kata-agent's ttrpc server listens on.
 const agentVsockPort = 1024
 
+// debugConsoleVsockPort is the guest port kata's debug console listens on when
+// debug_console_enabled=true. It's a raw shell over the hybrid vsock.
+const debugConsoleVsockPort = 1026
+
+// DebugConsoleDump connects to the guest's kata debug console (vsock 1026) and
+// runs cmd, returning its combined output. Diagnostic only (requires
+// debug_console_enabled=true in the kata config). Best-effort: returns the error
+// text on failure rather than failing the caller.
+func DebugConsoleDump(ctx context.Context, vsockPath, cmd string) string {
+	d := net.Dialer{}
+	dctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	conn, err := d.DialContext(dctx, "unix", vsockPath)
+	if err != nil {
+		return "debug-console dial: " + err.Error()
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(8 * time.Second))
+	if _, err := fmt.Fprintf(conn, "CONNECT %d\n", debugConsoleVsockPort); err != nil {
+		return "debug-console CONNECT: " + err.Error()
+	}
+	br := bufio.NewReader(conn)
+	if _, err := br.ReadString('\n'); err != nil { // the "OK <n>" line
+		return "debug-console CONNECT reply: " + err.Error()
+	}
+	// Run the command bracketed by a sentinel so we can read a bounded response.
+	if _, err := fmt.Fprintf(conn, "{ %s ; } 2>&1; echo __ATE_END__\n", cmd); err != nil {
+		return "debug-console write: " + err.Error()
+	}
+	var out strings.Builder
+	for {
+		line, err := br.ReadString('\n')
+		if line != "" {
+			if strings.Contains(line, "__ATE_END__") {
+				break
+			}
+			out.WriteString(line)
+		}
+		if err != nil {
+			break
+		}
+	}
+	return out.String()
+}
+
 // AgentClient is a thin ttrpc client for the kata-agent RPCs ateom drives
 // directly. Resurrected + expanded from tag ateom-chv-pre-rebase (which only
 // mirrored UpdateInterface/UpdateRoutes for post-restore re-IP): this version
