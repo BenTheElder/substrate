@@ -44,7 +44,14 @@ import (
 // mount point, which the agent's setup_bundle then uses as the container root.
 func (a *AgentClient) StartOverlayWorkload(ctx context.Context, sandboxID, containerID string, spec *specs.Spec) error {
 	const createDir = "io.katacontainers.volume.overlayfs.create_directory"
-	sharedBase := "/run/kata-containers/shared/containers/" + sandboxID + "/rootfs"
+	// Lower = the carrier's RESOLVED rootfs, i.e. the eager bind the agent's
+	// setup_bundle makes at /run/kata-containers/<sandboxID>/rootfs from the
+	// (RO) virtio-fs base. We deliberately do NOT point at the kata shared-dir
+	// submount (/run/kata-containers/shared/containers/<id>/rootfs): that is a
+	// lazily auto-mounted virtio-fs submount which is not reliably visible to a
+	// *separate* container's storage on all platforms (resolves on amd64,
+	// ENOENTs on arm64/kind). The resolved bind is stable + eager on both.
+	sharedBase := "/run/kata-containers/" + sandboxID + "/rootfs"
 	base := "/run/kata-containers/" + containerID
 	lower := base + "/lower"
 	ovlRoot := base + "/rootfs"
