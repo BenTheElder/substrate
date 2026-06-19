@@ -40,8 +40,9 @@ spec:
     arm64:
       kata-shim:
         url: "gs://${BUCKET_NAME}/kata-assets/containerd-shim-kata-v2"
-        # PATCHED shim: virtio-fs overlay rootfs (kata branch ateom-virtiofs-overlay-rootfs).
-        sha256: "197f93c00501126f057fe041b2cf906caad77dd0a53d6d7e9c68501b67a618ce"
+        # STOCK kata 3.31.0 shim: ateom assembles the virtio-fs overlay rootfs
+        # itself over the agent ttrpc ("be your own hook scheduler") — no patch.
+        sha256: "3ec6dc6aa1aa326d5bdfac9d6c9dae8d34642f4ef3adddfe06c27564e640c36a"
       cloud-hypervisor:
         url: "gs://${BUCKET_NAME}/kata-assets/cloud-hypervisor"
         sha256: "bf004ddc1a148f47caa87ac49a783b8dbd6bf9bc27abe522ed197df7b982d3b1"
@@ -65,6 +66,8 @@ kind: WorkerPool
 metadata:
   name: counter-microvm
   namespace: ate-demo-counter-microvm
+  labels:
+    workload: counter-microvm
 spec:
   replicas: 2
   sandboxClass: microvm
@@ -84,8 +87,8 @@ spec:
   - name: counter
     image: ko://github.com/agent-substrate/substrate/demos/counter
     command: ["/ko-app/counter"]
-  workerPoolRef:
-    namespace: ate-demo-counter-microvm
-    name: counter-microvm
+  workerSelector:
+    matchLabels:
+      workload: counter-microvm
   snapshotsConfig:
     location: gs://${BUCKET_NAME}/ate-demo-counter-microvm/
