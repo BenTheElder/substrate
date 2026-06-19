@@ -46,6 +46,12 @@ import (
 type runningActor struct {
 	containerName string
 
+	// ovlContainerID is the kata-agent container id of the ateom-created overlay
+	// workload (RunWorkload's "be your own hook scheduler" path); empty otherwise.
+	// The workload lives in the VM RAM, so checkpoint/restore (CH-level) need not
+	// reference it — kept for clarity/forward-compat (e.g. an explicit stop).
+	ovlContainerID string
+
 	// kata-shim-owned
 	shim *kata.Shim
 
@@ -178,7 +184,8 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	}()
 
 	bundle := ateompath.OCIBundlePath(ns, name, id, containerName)
-	if err := ensureKataCompatibleSpec(bundle, id, ateompath.AteomNetNSPath(s.podUID)); err != nil {
+	spec, err := ensureKataCompatibleSpec(bundle, id, ateompath.AteomNetNSPath(s.podUID))
+	if err != nil {
 		return nil, fmt.Errorf("while preparing kata OCI spec: %w", err)
 	}
 
@@ -213,11 +220,14 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 		return nil, fmt.Errorf("while bootstrapping kata shim: %w", err)
 	}
 	// On any failure after Bootstrap, tear the shim down so the pod isn't wedged.
+	// Kill the shim FIRST (don't call its graceful Shutdown/CleanupAction, which
+	// drive kata's container-stop → can nil-deref on the dying VM), then let
+	// CleanupSandboxState sweep the orphaned CH/virtiofsd + host state. Same
+	// ordering as teardownActor.
 	defer func() {
 		if retErr != nil {
-			_ = shim.Shutdown(ctx, true)
 			_ = shim.Close()
-			_ = shim.CleanupAction(ctx)
+			kata.CleanupSandboxState(id)
 		}
 	}()
 
@@ -238,6 +248,10 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	if err := os.MkdirAll(rootfsDir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating rootfs mount target: %w", err)
 	}
+	// Create the "carrier": the shim boots the VM (+agent+virtiofsd) and shares
+	// the RO base over virtio-fs at /run/kata-containers/shared/containers/<id>/
+	// rootfs. It is created but NOT started — the carrier exists only to boot the
+	// sandbox + serve the base; the actual workload is created by ateom below.
 	if _, err := shim.Create(ctx, kata.CreateOptions{
 		Rootfs: []*ctrtypes.Mount{{
 			Type:    "bind",
@@ -245,17 +259,52 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 			Options: []string{"bind", "rw"},
 		}},
 	}); err != nil {
-		return nil, fmt.Errorf("while creating container/VM: %w", err)
+		return nil, fmt.Errorf("while creating carrier/VM: %w", err)
 	}
 	slog.InfoContext(ctx, "Micro-VM created", slog.String("clh_socket", kata.CLHSocketPath(id)))
 
-	if _, err := shim.Start(ctx); err != nil {
-		return nil, fmt.Errorf("while starting container: %w", err)
+	// "Be your own hook scheduler": drive the STOCK kata-agent over ttrpc to
+	// assemble the overlay rootfs (RO virtio-fs base + guest-tmpfs upper) and
+	// start the actual workload — no patched shim. The workload joins the
+	// carrier's sandbox (same guest eth0 = actor IP) and lives in the VM RAM, so
+	// CH snapshot/restore captures it like any shim-created container.
+	ovlID := id + "-ovl"
+	vsockPath := kata.VsockSocketPath(id)
+	if !waitForFile(vsockPath, 10*time.Second) {
+		return nil, fmt.Errorf("kata-agent vsock socket %q did not appear", vsockPath)
+	}
+	dialCtx, dialCancel := context.WithTimeout(ctx, 20*time.Second)
+	ac, err := kata.DialAgent(dialCtx, vsockPath)
+	dialCancel()
+	if err != nil {
+		return nil, fmt.Errorf("while dialing kata-agent ttrpc: %w", err)
+	}
+	defer ac.Close()
+	wlCtx, wlCancel := context.WithTimeout(ctx, 30*time.Second)
+	err = ac.StartOverlayWorkload(wlCtx, id, ovlID, spec)
+	wlCancel()
+	if err != nil {
+		return nil, fmt.Errorf("while starting overlay workload via agent: %w", err)
 	}
 
-	s.running[id] = &runningActor{shim: shim, containerName: containerName}
-	slog.InfoContext(ctx, "Actor started", slog.String("id", id))
+	s.running[id] = &runningActor{shim: shim, containerName: containerName, ovlContainerID: ovlID}
+	slog.InfoContext(ctx, "Actor started", slog.String("id", id), slog.String("workload", ovlID))
 	return &ateompb.RunWorkloadResponse{}, nil
+}
+
+// waitForFile polls for path to exist, up to d. Used to wait for the kata-agent
+// hybrid-vsock socket the shim creates during VM boot before dialing it.
+func waitForFile(path string, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // ensureKataCompatibleSpec augments the bundle's config.json with the fields
@@ -263,15 +312,15 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 // Without linux.resources, kata's ContainerConfig nil-derefs and the shim
 // crashes. This shaper is a bridge; a future atelet change should emit
 // runtime-appropriate specs so it can retire.
-func ensureKataCompatibleSpec(bundle, id, netnsPath string) error {
+func ensureKataCompatibleSpec(bundle, id, netnsPath string) (*specs.Spec, error) {
 	specPath := filepath.Join(bundle, "config.json")
 	b, err := os.ReadFile(specPath)
 	if err != nil {
-		return fmt.Errorf("reading %q: %w", specPath, err)
+		return nil, fmt.Errorf("reading %q: %w", specPath, err)
 	}
 	var spec specs.Spec
 	if err := json.Unmarshal(b, &spec); err != nil {
-		return fmt.Errorf("parsing %q: %w", specPath, err)
+		return nil, fmt.Errorf("parsing %q: %w", specPath, err)
 	}
 
 	if spec.Linux == nil {
@@ -295,15 +344,10 @@ func ensureKataCompatibleSpec(bundle, id, netnsPath string) error {
 		}
 	}
 
-	// Request the virtio-fs overlay rootfs from the patched kata shim: serve the
-	// container rootfs READ-ONLY over virtio-fs and overlay it with a guest-tmpfs
-	// upper, so the root is writable but writes live in guest RAM (captured by the
-	// CH memory snapshot) and the virtio-fs base is never written. See the kata
-	// branch ateom-virtiofs-overlay-rootfs (shareRootFilesystemWithVirtiofsOverlay).
-	if spec.Annotations == nil {
-		spec.Annotations = map[string]string{}
-	}
-	spec.Annotations["io.katacontainers.fs-opt.virtiofs-overlay-rw"] = "true"
+	// NB: no virtio-fs-overlay annotation here. With the STOCK shim, this spec is
+	// for the "carrier" container that only boots the VM + shares the RO base over
+	// virtio-fs. ateom assembles the actual overlay rootfs itself by driving the
+	// kata-agent CreateContainer over ttrpc (see RunWorkload) — no patched shim.
 
 	// Point the network namespace at our interior netns (which holds the pod's
 	// eth0); kata finds eth0 there and wires it to the VM's virtio-net.
@@ -328,12 +372,12 @@ func ensureKataCompatibleSpec(bundle, id, netnsPath string) error {
 
 	out, err := json.MarshalIndent(&spec, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshaling spec: %w", err)
+		return nil, fmt.Errorf("marshaling spec: %w", err)
 	}
 	if err := os.WriteFile(specPath, out, 0o600); err != nil {
-		return fmt.Errorf("writing %q: %w", specPath, err)
+		return nil, fmt.Errorf("writing %q: %w", specPath, err)
 	}
-	return nil
+	return &spec, nil
 }
 
 // defaultKataMounts mirrors the mount set `ctr run --runtime io.containerd.kata.v2`

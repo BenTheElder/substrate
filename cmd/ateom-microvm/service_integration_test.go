@@ -30,6 +30,7 @@ import (
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/kata"
 	"github.com/agent-substrate/substrate/internal/ateompath"
 	"github.com/agent-substrate/substrate/internal/proto/ateompb"
+	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
 )
 
@@ -72,7 +73,16 @@ func TestServiceE2E(t *testing.T) {
 	writeMinimalGvisorStyleSpec(t, bundle) // no linux.resources -> exercises ensureKataCompatibleSpec
 	drainBundleLog(t, bundle)              // visibility into shim logs if anything fails
 
-	svc := NewService("testpod", shim, chBin, vfsdBin, "", "default", true, -1)
+	// The real service (main.go) creates the interior netns at boot and hands its
+	// handle to NewService; the bare test must do the same (passing -1 yields
+	// "bad file descriptor" in setupActorNetwork).
+	podUID := "testpod"
+	_ = netns.DeleteNamed(ateompath.AteomNetNSName(podUID)) // clear any stale netns from a crashed run
+	interiorNetNS, err := createNetNSWithoutSwitching(ateompath.AteomNetNSName(podUID))
+	if err != nil {
+		t.Fatalf("creating interior netns: %v", err)
+	}
+	svc := NewService(podUID, shim, chBin, vfsdBin, "", "default", true, interiorNetNS)
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
@@ -83,6 +93,8 @@ func TestServiceE2E(t *testing.T) {
 		_ = os.RemoveAll(ateompath.ActorPath(ns, name, id))
 		_ = os.RemoveAll(kata.VMDir(id))
 		_ = os.RemoveAll(kata.SharedDir(id))
+		_ = interiorNetNS.Close()
+		_ = netns.DeleteNamed(ateompath.AteomNetNSName(podUID))
 	})
 
 	// --- RunWorkload. ---
