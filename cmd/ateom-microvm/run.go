@@ -489,10 +489,23 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 	// from virtio-fs (unlike dropping the virtio-fs read cache, which is). Must run
 	// while the guest is running (before Pause). Best-effort.
 	ovlUpper := "/run/kata-containers/" + id + "-ovl/fs"
-	wipeOut := kata.DebugConsoleDump(ctx, kata.VsockSocketPath(id),
-		"rm -rf "+ovlUpper+"/* "+ovlUpper+"/.[!.]* 2>/dev/null; sync; echo reset-ok")
-	slog.InfoContext(ctx, "Reset overlay upper to golden", slog.String("id", id),
-		slog.String("console", strings.TrimSpace(wipeOut)))
+	// Count entries before/after so the log proves the wipe actually cleared the
+	// upper (upper_before=N>0, upper_after=0). The $-vars are evaluated by the guest
+	// shell; DebugConsoleDump ignores the PTY's echo of this command line.
+	wipeCmd := "b=$(ls -A " + ovlUpper + " 2>/dev/null | wc -l); " +
+		"rm -rf " + ovlUpper + "/* " + ovlUpper + "/.[!.]* 2>/dev/null; sync; " +
+		"a=$(ls -A " + ovlUpper + " 2>/dev/null | wc -l); echo upper_before=$b upper_after=$a"
+	wipeOut := kata.DebugConsoleDump(ctx, kata.VsockSocketPath(id), wipeCmd)
+	if strings.Contains(wipeOut, "upper_after=0") {
+		slog.InfoContext(ctx, "Reset overlay upper to golden", slog.String("id", id),
+			slog.String("console", strings.TrimSpace(wipeOut)))
+	} else {
+		// No "upper_after=0" in the output => the wipe didn't confirm empty (debug
+		// console hiccup, or writes remain). Surface it; the rootfs writes may
+		// persist this checkpoint. Best-effort: continue to snapshot regardless.
+		slog.WarnContext(ctx, "Reset-to-golden did NOT confirm empty upper; continuing",
+			slog.String("id", id), slog.String("console", strings.TrimSpace(wipeOut)))
+	}
 
 	// gVisor-parity snapshot shrink: free guest memory BEFORE pausing (the balloon
 	// only hands pages over while the guest runs) so the sparse snapshot drops them.

@@ -57,16 +57,22 @@ func DebugConsoleDump(ctx context.Context, vsockPath, cmd string) string {
 	if _, err := br.ReadString('\n'); err != nil { // the "OK <n>" line
 		return "debug-console CONNECT reply: " + err.Error()
 	}
-	// Run the command bracketed by a sentinel so we can read a bounded response.
-	if _, err := fmt.Fprintf(conn, "{ %s ; } 2>&1; echo __ATE_END__\n", cmd); err != nil {
+	// The kata debug console is an INTERACTIVE shell on a PTY (console.rs spawns
+	// /bin/bash|/bin/sh), so it ECHOES the command line back before running it. We
+	// must not let the echo trip the end sentinel: write the sentinel split by ''
+	// (which the shell strips) so the echoed command contains "__ATE''_END__" (no
+	// match) while the shell's OUTPUT is "__ATE_END__" (match). Read until the
+	// output sentinel (or EOF/deadline).
+	if _, err := fmt.Fprintf(conn, "{ %s ; } 2>&1; echo __ATE''_END__\n", cmd); err != nil {
 		return "debug-console write: " + err.Error()
 	}
+	const sentinel = "__ATE_END__"
 	var out strings.Builder
 	for {
 		line, err := br.ReadString('\n')
 		if line != "" {
-			if strings.Contains(line, "__ATE_END__") {
-				break
+			if strings.Contains(line, sentinel) {
+				break // the shell's echo of the sentinel line (output), not its command echo
 			}
 			out.WriteString(line)
 		}
