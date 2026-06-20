@@ -85,27 +85,21 @@ func LaunchVMM(ctx context.Context, o LaunchVMMOptions) (*exec.Cmd, *Client, err
 // (the only way CH accepts net FDs on restore; mirrors ch-remote's
 // send_with_fds). The VM comes back paused; call Resume after.
 //
-// memoryRestoreMode "ondemand" requests userfaultfd demand-paging
-// (memory_restore_mode=ondemand, prefault=false) for a fast, size-independent
-// resume; "" or "copy" leaves CH's eager default. CH's RestoreConfig ignores
-// unknown JSON fields, so on a build that doesn't support memory_restore_mode the
-// request still restores (eager) rather than failing.
-func (c *Client) RestoreWithNetFDs(ctx context.Context, sourceDir string, nets []RestoredNet, memoryRestoreMode string) error {
+// NOTE on ondemand (userfaultfd) restore: it cannot be combined with this net-FD
+// path. memory_restore_mode is only accepted on the CLI `--restore` form (CH's
+// REST RestoreConfig denies the unknown field -> HTTP 400), while net_fds can ONLY
+// be passed over the REST api-socket via SCM_RIGHTS. So fd-backed restores use
+// CH's eager (copy) memory restore; ondemand would need a CH API that accepts both
+// net_fds and memory_restore_mode (follow-on).
+func (c *Client) RestoreWithNetFDs(ctx context.Context, sourceDir string, nets []RestoredNet) error {
 	type restoredNetConfig struct {
 		ID     string `json:"id"`
 		NumFDs int    `json:"num_fds"`
 	}
 	cfg := struct {
-		SourceURL         string              `json:"source_url"`
-		Prefault          *bool               `json:"prefault,omitempty"`
-		MemoryRestoreMode string              `json:"memory_restore_mode,omitempty"`
-		NetFDs            []restoredNetConfig `json:"net_fds,omitempty"`
+		SourceURL string              `json:"source_url"`
+		NetFDs    []restoredNetConfig `json:"net_fds,omitempty"`
 	}{SourceURL: SnapshotURL(sourceDir)}
-	if memoryRestoreMode == "ondemand" {
-		no := false
-		cfg.Prefault = &no
-		cfg.MemoryRestoreMode = "ondemand"
-	}
 	var fds []int
 	for _, n := range nets {
 		cfg.NetFDs = append(cfg.NetFDs, restoredNetConfig{ID: n.ID, NumFDs: len(n.FDs)})

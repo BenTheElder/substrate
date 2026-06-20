@@ -482,12 +482,12 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 	// have been created with reclaim_guest_freed_memory=true. Best-effort — an actor
 	// without a balloon (or a transient hiccup) must NOT fail the checkpoint.
 	tReclaim := time.Now()
-	if floorR, rerr := client.ReclaimBeforeSnapshot(ctx, reclaimMargin); rerr != nil {
+	if usable, rerr := client.ReclaimBeforeSnapshot(ctx, reclaimMargin); rerr != nil {
 		slog.WarnContext(ctx, "Pre-snapshot memory reclaim skipped/failed; snapshotting anyway",
 			slog.String("id", id), slog.Any("err", rerr))
 	} else {
 		slog.InfoContext(ctx, "Pre-snapshot memory reclaim done",
-			slog.String("id", id), slog.Int64("floor_bytes", floorR),
+			slog.String("id", id), slog.Int64("usable_bytes", usable),
 			slog.Duration("reclaim", time.Since(tReclaim)))
 	}
 
@@ -751,9 +751,10 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 			_ = chCmd.Process.Kill()
 		}
 	}()
-	// ondemand (userfaultfd) restore: fast, size-independent resume. CH ignores
-	// the field on builds that don't support it (falls back to eager copy).
-	if err := client.RestoreWithNetFDs(ctx, restoreDir, restoredNets, "ondemand"); err != nil {
+	// Eager (copy) memory restore: ondemand can't be combined with the net-FD
+	// path (memory_restore_mode is CLI-only; net_fds are REST-only). See
+	// RestoreWithNetFDs.
+	if err := client.RestoreWithNetFDs(ctx, restoreDir, restoredNets); err != nil {
 		return nil, fmt.Errorf("while restoring VM with net FDs: %w", err)
 	}
 

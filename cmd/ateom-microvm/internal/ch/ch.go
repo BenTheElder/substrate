@@ -152,22 +152,25 @@ func (c *Client) MemoryActualSize(ctx context.Context) (int64, error) {
 	return info.MemoryActualSize, nil
 }
 
-// ReclaimBeforeSnapshot frees guest memory before a snapshot so the sparse image
-// shrinks toward the live working set (gVisor-parity), driving the virtio-balloon
-// entirely host-side (no in-guest cooperation):
-//  1. inflate toward total RAM; the guest balloon driver (NORETRY alloc) self-
-//     limits at the resident set R — poll memory_actual_size until it stabilizes.
-//  2. deflate to leave a resume margin: memory_actual_size -> R + margin. The
-//     freed pages were already punched out of the memfd (they stay holes), so the
-//     snapshot stays ~R, but the restored guest keeps R+margin usable — reclaiming
-//     all the way to R leaves it too tight to vm.resume.
+// ReclaimBeforeSnapshot frees GUEST-FREE memory before a snapshot so the sparse
+// image shrinks, driving the virtio-balloon host-side (no in-guest cooperation).
 //
-// margin is the resume headroom (bytes); total RAM is read from vm.info. The guest
-// MUST be running (not paused) so the balloon can hand pages over. Bench-validated
-// (inflate->deflate-to-margin): the snapshot reaches ~floor and the restored guest
-// resumes reliably. Best-effort: callers should snapshot regardless of the error.
-// Returns the discovered resident floor R (for logging).
-func (c *Client) ReclaimBeforeSnapshot(ctx context.Context, margin int64) (reclaimedTo int64, err error) {
+// It inflates the balloon GENTLY — only far enough to claim genuinely-free pages
+// while leaving a large usable headroom (keepFree) — and deliberately does NOT
+// chase the resident floor. Reaching the floor requires inflating until the guest
+// kernel evicts reclaimable memory, and for a virtio-fs rootfs that evicts page
+// cache the guest re-faults on resume *before virtio-fs reconnects*, panicking the
+// restored guest (observed: filemap_fault -> kernel panic -> reboot). Freeing the
+// page cache *gracefully* in-guest (drop_caches) to reach the floor is the
+// deferred follow-on. The gentle host-side inflate never pressures the guest, so
+// restore stays reliable, and the balloon's free-page-reporting still excludes the
+// claimed free pages from the snapshot.
+//
+// keepFree (usable RAM to leave) = max(totalRAM/2, margin). The balloon's NORETRY
+// allocation only takes free pages, so this never evicts in-use memory. The guest
+// MUST be running so the balloon can hand pages over. Best-effort: callers should
+// snapshot regardless of the error. Returns the resulting usable size.
+func (c *Client) ReclaimBeforeSnapshot(ctx context.Context, margin int64) (usable int64, err error) {
 	info, err := c.vmInfo(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("reading vm.info: %w", err)
@@ -176,21 +179,19 @@ func (c *Client) ReclaimBeforeSnapshot(ctx context.Context, margin int64) (recla
 	if totalRAM <= 0 {
 		return 0, fmt.Errorf("vm.info reported non-positive memory size %d", totalRAM)
 	}
-	if err := c.BalloonResize(ctx, totalRAM); err != nil {
+	keepFree := totalRAM / 2
+	if keepFree < margin {
+		keepFree = margin
+	}
+	balloon := totalRAM - keepFree
+	if balloon < 0 {
+		balloon = 0
+	}
+	if err := c.BalloonResize(ctx, balloon); err != nil {
 		return 0, fmt.Errorf("balloon inflate: %w", err)
 	}
-	r, err := c.pollBalloonStable(ctx, 20*time.Second)
-	if err != nil {
-		return 0, fmt.Errorf("polling balloon: %w", err)
-	}
-	newBalloon := totalRAM - r - margin
-	if newBalloon < 0 {
-		newBalloon = 0
-	}
-	if err := c.BalloonResize(ctx, newBalloon); err != nil {
-		return r, fmt.Errorf("balloon deflate-to-margin: %w", err)
-	}
-	return r, nil
+	// Let the balloon settle (it self-limits below the target if less is free).
+	return c.pollBalloonStable(ctx, 20*time.Second)
 }
 
 // pollBalloonStable polls memory_actual_size until it stops changing (3 stable
