@@ -130,6 +130,9 @@ func (s *AteomService) resolveRuntime(actorDir string, paths map[string]string) 
 		if err != nil {
 			return r, fmt.Errorf("enabling reclaim_guest_freed_memory: %w", err)
 		}
+		// Enable the guest debug console (vsock 1026) so CheckpointWorkload can run
+		// the in-guest reset-to-golden step (wipe the overlay tmpfs upper).
+		rendered = kata.EnableDebugConsole(rendered)
 		if s.kataDebug {
 			// Verbose kata: hypervisor/agent/runtime debug on, guest console (with
 			// the kata-agent's logs) forwarded into the shim log -> pod logs.
@@ -475,6 +478,21 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 	if err := client.WaitReady(ctx, 10*time.Second); err != nil {
 		return nil, fmt.Errorf("while waiting for CH api-socket: %w", err)
 	}
+
+	// Reset-to-golden (gVisor semantics, the default): wipe the overlay tmpfs upper
+	// in the guest so the actor's rootfs writes do NOT persist across
+	// checkpoint/restore — on resume the rootfs is the golden image again. The
+	// upper is at /run/kata-containers/<id>-ovl/fs in the guest PID-1 mount ns
+	// (deterministic from id; not in the container's ns), reached via the kata
+	// debug console (vsock 1026). This frees tmpfs pages (then claimed by the
+	// reclaim below) and is restore-safe: deleted upper files are not re-faulted
+	// from virtio-fs (unlike dropping the virtio-fs read cache, which is). Must run
+	// while the guest is running (before Pause). Best-effort.
+	ovlUpper := "/run/kata-containers/" + id + "-ovl/fs"
+	wipeOut := kata.DebugConsoleDump(ctx, kata.VsockSocketPath(id),
+		"rm -rf "+ovlUpper+"/* "+ovlUpper+"/.[!.]* 2>/dev/null; sync; echo reset-ok")
+	slog.InfoContext(ctx, "Reset overlay upper to golden", slog.String("id", id),
+		slog.String("console", strings.TrimSpace(wipeOut)))
 
 	// gVisor-parity snapshot shrink: free guest memory BEFORE pausing (the balloon
 	// only hands pages over while the guest runs) so the sparse snapshot drops them.

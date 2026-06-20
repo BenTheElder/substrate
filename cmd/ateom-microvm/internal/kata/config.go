@@ -109,6 +109,35 @@ func EnableReclaimGuestFreedMemory(base []byte) ([]byte, error) {
 	return nil, fmt.Errorf("EnableReclaimGuestFreedMemory: neither reclaim_guest_freed_memory key nor [hypervisor.clh] section found in config")
 }
 
+// EnableDebugConsole adds the kernel params so the guest kata-agent spawns a root
+// debug shell on vsock port 1026, WITHOUT the verbose debug logging EnableDebug
+// also turns on. ateom dials that console (kata.DebugConsoleDump) to run the
+// in-guest reset-to-golden step (wipe the overlay tmpfs upper) at checkpoint.
+//
+// BOTH params are required: `agent.debug_console` enables the console, and
+// `agent.debug_console_vport=1026` makes the agent bind it on the vsock port
+// DebugConsoleDump connects to — the agent's console only binds a vsock port when
+// the vport is >0 (console.rs `if port > 0`; default 0 = no vsock listener, which
+// the kata RUNTIME normally avoids by injecting the vport itself). Idempotent.
+func EnableDebugConsole(base []byte) []byte {
+	reKP := regexp.MustCompile(`(?m)^(\s*kernel_params\s*=\s*")([^"]*)(".*)$`)
+	return reKP.ReplaceAllFunc(base, func(line []byte) []byte {
+		m := reKP.FindSubmatch(line)
+		if m == nil {
+			return line
+		}
+		existing := string(m[2])
+		if regexpContains(existing, "agent.debug_console_vport") {
+			return line
+		}
+		val := "agent.debug_console agent.debug_console_vport=1026"
+		if existing != "" {
+			val = existing + " " + val
+		}
+		return []byte(string(m[1]) + val + string(m[3]))
+	})
+}
+
 // RenderConfig returns base (a kata configuration.toml) with the asset-path
 // fields rewritten to point at a.* . The base config carries all the
 // version-matched kata settings; we only override where the assets live, so the
