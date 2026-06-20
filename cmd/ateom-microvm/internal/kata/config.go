@@ -89,6 +89,26 @@ func regexpContains(s, sub string) bool {
 	return regexp.MustCompile(regexp.QuoteMeta(sub)).MatchString(s)
 }
 
+// EnableReclaimGuestFreedMemory sets `reclaim_guest_freed_memory = true` in the
+// clh hypervisor config, which makes kata create the CH guest with a virtio-balloon
+// + free-page-reporting (clh.go NewBalloonConfig(0)+SetFreePageReporting(true)).
+// ateom then drives that balloon (vm.resize) before snapshot to free guest pages
+// so the sparse image shrinks toward the live working set (gVisor-parity). It
+// flips an existing (commented or `= false`) line, or inserts the key under
+// [hypervisor.clh] if absent. Errors only if neither the key nor the section is
+// found (so we fail loudly rather than silently ship a balloon-less config).
+func EnableReclaimGuestFreedMemory(base []byte) ([]byte, error) {
+	re := regexp.MustCompile(`(?m)^(\s*)#?\s*reclaim_guest_freed_memory\s*=\s*(?:true|false)\s*$`)
+	if re.Match(base) {
+		return re.ReplaceAll(base, []byte("${1}reclaim_guest_freed_memory = true")), nil
+	}
+	sec := regexp.MustCompile(`(?m)^(\[hypervisor\.clh\]\s*)$`)
+	if sec.Match(base) {
+		return sec.ReplaceAll(base, []byte("${1}\nreclaim_guest_freed_memory = true")), nil
+	}
+	return nil, fmt.Errorf("EnableReclaimGuestFreedMemory: neither reclaim_guest_freed_memory key nor [hypervisor.clh] section found in config")
+}
+
 // RenderConfig returns base (a kata configuration.toml) with the asset-path
 // fields rewritten to point at a.* . The base config carries all the
 // version-matched kata settings; we only override where the assets live, so the

@@ -124,6 +124,12 @@ func (s *AteomService) resolveRuntime(actorDir string, paths map[string]string) 
 		if err != nil {
 			return r, fmt.Errorf("rendering kata config: %w", err)
 		}
+		// Add the CH virtio-balloon + free-page-reporting so CheckpointWorkload can
+		// free guest pages before snapshot (gVisor-parity snapshot shrink).
+		rendered, err = kata.EnableReclaimGuestFreedMemory(rendered)
+		if err != nil {
+			return r, fmt.Errorf("enabling reclaim_guest_freed_memory: %w", err)
+		}
 		if s.kataDebug {
 			// Verbose kata: hypervisor/agent/runtime debug on, guest console (with
 			// the kata-agent's logs) forwarded into the shim log -> pod logs.
@@ -434,6 +440,12 @@ func defaultKataResources() *specs.LinuxResources {
 	}
 }
 
+// reclaimMargin is the resume headroom (bytes) the pre-snapshot balloon reclaim
+// leaves below the guest's resident floor. Reclaiming all the way to the floor
+// leaves the restored guest too tight to vm.resume; a generous margin is ~free
+// (the snapshot size plateaus at the floor regardless). Bench-validated at 256MiB.
+const reclaimMargin = 256 << 20
+
 // CheckpointWorkload suspends the actor and writes a portable CH snapshot.
 //
 // Contract with atelet (mirrors ateom-gvisor): after we return, atelet uploads
@@ -463,6 +475,22 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 	if err := client.WaitReady(ctx, 10*time.Second); err != nil {
 		return nil, fmt.Errorf("while waiting for CH api-socket: %w", err)
 	}
+
+	// gVisor-parity snapshot shrink: free guest memory BEFORE pausing (the balloon
+	// only hands pages over while the guest runs) so the sparse snapshot drops them.
+	// Host-side balloon inflate->deflate-to-margin via the CH api; needs the VM to
+	// have been created with reclaim_guest_freed_memory=true. Best-effort — an actor
+	// without a balloon (or a transient hiccup) must NOT fail the checkpoint.
+	tReclaim := time.Now()
+	if floorR, rerr := client.ReclaimBeforeSnapshot(ctx, reclaimMargin); rerr != nil {
+		slog.WarnContext(ctx, "Pre-snapshot memory reclaim skipped/failed; snapshotting anyway",
+			slog.String("id", id), slog.Any("err", rerr))
+	} else {
+		slog.InfoContext(ctx, "Pre-snapshot memory reclaim done",
+			slog.String("id", id), slog.Int64("floor_bytes", floorR),
+			slog.Duration("reclaim", time.Since(tReclaim)))
+	}
+
 	tPause := time.Now()
 	if err := client.Pause(ctx); err != nil {
 		return nil, fmt.Errorf("while pausing guest: %w", err)
@@ -723,13 +751,24 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 			_ = chCmd.Process.Kill()
 		}
 	}()
-	if err := client.RestoreWithNetFDs(ctx, restoreDir, restoredNets); err != nil {
+	// ondemand (userfaultfd) restore: fast, size-independent resume. CH ignores
+	// the field on builds that don't support it (falls back to eager copy).
+	if err := client.RestoreWithNetFDs(ctx, restoreDir, restoredNets, "ondemand"); err != nil {
 		return nil, fmt.Errorf("while restoring VM with net FDs: %w", err)
 	}
 
 	// 5. Resume (restore comes back paused).
 	if err := client.Resume(ctx); err != nil {
 		return nil, fmt.Errorf("while resuming restored guest: %w", err)
+	}
+
+	// The snapshot carries the balloon inflated (deflate-to-margin from the
+	// pre-snapshot reclaim). Deflate it fully so the restored actor regains all its
+	// RAM. Best-effort — a balloon-less snapshot just no-ops here.
+	if _, err := client.MemoryActualSize(ctx); err == nil {
+		if derr := client.BalloonResize(ctx, 0); derr != nil {
+			slog.WarnContext(ctx, "Post-restore balloon deflate failed", slog.String("id", id), slog.Any("err", derr))
+		}
 	}
 
 	s.running[id] = &runningActor{chCmd: chCmd, vfsdCmd: vfsdCmd, apiSocket: apiSocket}

@@ -112,6 +112,118 @@ func (c *Client) Shutdown(ctx context.Context) error {
 	return c.api.put(ctx, "/api/v1/vmm.shutdown", nil)
 }
 
+// BalloonResize sets the virtio-balloon target size (bytes) via vm.resize. The VM
+// must have been created with a balloon device (kata's
+// reclaim_guest_freed_memory=true). Inflating (size>0) makes the guest hand free
+// pages to the VMM, which punches them out of the memfd guest RAM so a subsequent
+// sparse snapshot skips them; deflating (toward 0) returns capacity to the guest.
+func (c *Client) BalloonResize(ctx context.Context, sizeBytes int64) error {
+	return c.api.put(ctx, "/api/v1/vm.resize", vmResize{DesiredBalloon: &sizeBytes})
+}
+
+// vmInfo is the subset of /api/v1/vm.info we read: the configured guest RAM
+// (config.memory.size) and the current usable RAM (memory_actual_size = total
+// minus the inflated balloon).
+type vmInfo struct {
+	Config struct {
+		Memory struct {
+			Size int64 `json:"size"`
+		} `json:"memory"`
+	} `json:"config"`
+	MemoryActualSize int64 `json:"memory_actual_size"`
+}
+
+func (c *Client) vmInfo(ctx context.Context) (*vmInfo, error) {
+	var info vmInfo
+	if err := c.api.getJSON(ctx, "/api/v1/vm.info", &info); err != nil {
+		return nil, err
+	}
+	return &info, nil
+}
+
+// MemoryActualSize returns vm.info's memory_actual_size: the guest RAM currently
+// usable = total RAM minus the inflated balloon. Used to discover the resident
+// floor while inflating and to size the deflate-to-margin step.
+func (c *Client) MemoryActualSize(ctx context.Context) (int64, error) {
+	info, err := c.vmInfo(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return info.MemoryActualSize, nil
+}
+
+// ReclaimBeforeSnapshot frees guest memory before a snapshot so the sparse image
+// shrinks toward the live working set (gVisor-parity), driving the virtio-balloon
+// entirely host-side (no in-guest cooperation):
+//  1. inflate toward total RAM; the guest balloon driver (NORETRY alloc) self-
+//     limits at the resident set R — poll memory_actual_size until it stabilizes.
+//  2. deflate to leave a resume margin: memory_actual_size -> R + margin. The
+//     freed pages were already punched out of the memfd (they stay holes), so the
+//     snapshot stays ~R, but the restored guest keeps R+margin usable — reclaiming
+//     all the way to R leaves it too tight to vm.resume.
+//
+// margin is the resume headroom (bytes); total RAM is read from vm.info. The guest
+// MUST be running (not paused) so the balloon can hand pages over. Bench-validated
+// (inflate->deflate-to-margin): the snapshot reaches ~floor and the restored guest
+// resumes reliably. Best-effort: callers should snapshot regardless of the error.
+// Returns the discovered resident floor R (for logging).
+func (c *Client) ReclaimBeforeSnapshot(ctx context.Context, margin int64) (reclaimedTo int64, err error) {
+	info, err := c.vmInfo(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("reading vm.info: %w", err)
+	}
+	totalRAM := info.Config.Memory.Size
+	if totalRAM <= 0 {
+		return 0, fmt.Errorf("vm.info reported non-positive memory size %d", totalRAM)
+	}
+	if err := c.BalloonResize(ctx, totalRAM); err != nil {
+		return 0, fmt.Errorf("balloon inflate: %w", err)
+	}
+	r, err := c.pollBalloonStable(ctx, 20*time.Second)
+	if err != nil {
+		return 0, fmt.Errorf("polling balloon: %w", err)
+	}
+	newBalloon := totalRAM - r - margin
+	if newBalloon < 0 {
+		newBalloon = 0
+	}
+	if err := c.BalloonResize(ctx, newBalloon); err != nil {
+		return r, fmt.Errorf("balloon deflate-to-margin: %w", err)
+	}
+	return r, nil
+}
+
+// pollBalloonStable polls memory_actual_size until it stops changing (3 stable
+// reads, 100ms apart) or the deadline passes, returning the settled value.
+func (c *Client) pollBalloonStable(ctx context.Context, deadline time.Duration) (int64, error) {
+	end := time.Now().Add(deadline)
+	var last int64 = -1
+	stable := 0
+	for {
+		if v, err := c.MemoryActualSize(ctx); err == nil {
+			if v == last {
+				stable++
+				if stable >= 3 {
+					return v, nil
+				}
+			} else {
+				stable, last = 0, v
+			}
+		}
+		if !time.Now().Before(end) {
+			if last >= 0 {
+				return last, nil
+			}
+			return 0, fmt.Errorf("balloon never reported memory_actual_size")
+		}
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
 // SnapshotURL returns the file:// URL cloud-hypervisor expects for a snapshot
 // destination or restore source directory.
 func SnapshotURL(dir string) string { return "file://" + dir }
