@@ -154,3 +154,50 @@ func (a *AgentClient) StartContainer(ctx context.Context, containerID string) er
 	}
 	return nil
 }
+
+// CreateSandbox establishes the agent's sandbox context (sandbox id, hostname,
+// sandbox pidns) before any container is created. The kata shim normally issues
+// this once at VM boot; on the ateom-owned-boot path (no shim) ateom must call it
+// itself so the agent has a sandbox to attach containers to. Storages is empty —
+// the actor rootfs arrives as a per-container "blk" storage, not a sandbox mount.
+// Mirrors grpc.AgentService/CreateSandbox (returns google.protobuf.Empty).
+func (a *AgentClient) CreateSandbox(ctx context.Context, req *agentpb.CreateSandboxRequest) error {
+	if err := a.client.Call(ctx, "grpc.AgentService", "CreateSandbox", req, &emptypb.Empty{}); err != nil {
+		return fmt.Errorf("agent CreateSandbox: %w", err)
+	}
+	return nil
+}
+
+// UpdateInterface configures a guest network interface (the kata shim's job; on
+// the owned-boot path ateom does it). The agent matches the link by HwAddr, then
+// applies the name/IP/MTU. Mirrors grpc.AgentService/UpdateInterface (returns the
+// resulting Interface).
+func (a *AgentClient) UpdateInterface(ctx context.Context, iface *agentpb.Interface) error {
+	req := &agentpb.UpdateInterfaceRequest{Interface: iface}
+	if err := a.client.Call(ctx, "grpc.AgentService", "UpdateInterface", req, &agentpb.Interface{}); err != nil {
+		return fmt.Errorf("agent UpdateInterface: %w", err)
+	}
+	return nil
+}
+
+// UpdateRoutes replaces the guest's route table with routes (the agent flushes
+// and re-adds). Pass the connected (scope-link) route AND the default route so
+// the gateway stays reachable. Mirrors grpc.AgentService/UpdateRoutes.
+func (a *AgentClient) UpdateRoutes(ctx context.Context, routes []*agentpb.Route) error {
+	req := &agentpb.UpdateRoutesRequest{Routes: &agentpb.Routes{Routes: routes}}
+	if err := a.client.Call(ctx, "grpc.AgentService", "UpdateRoutes", req, &agentpb.Routes{}); err != nil {
+		return fmt.Errorf("agent UpdateRoutes: %w", err)
+	}
+	return nil
+}
+
+// AddARPNeighbors installs static ARP entries in the guest — used to pin the
+// gateway (169.254.17.1) to its FIXED MAC so a restored guest's frozen neighbor
+// entry stays valid across pods. Mirrors grpc.AgentService/AddARPNeighbors.
+func (a *AgentClient) AddARPNeighbors(ctx context.Context, neighbors []*agentpb.ARPNeighbor) error {
+	req := &agentpb.AddARPNeighborsRequest{Neighbors: &agentpb.ARPNeighbors{ARPNeighbors: neighbors}}
+	if err := a.client.Call(ctx, "grpc.AgentService", "AddARPNeighbors", req, &emptypb.Empty{}); err != nil {
+		return fmt.Errorf("agent AddARPNeighbors: %w", err)
+	}
+	return nil
+}

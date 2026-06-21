@@ -25,6 +25,11 @@ baseImageOverrides:
   # virtio-fs shared dir) and execs the fetched cloud-hypervisor/virtiofsd
   # (Rust, glibc-linked) binaries. debian-slim provides util-linux (nsenter),
   # tar, and glibc — NOT distroless/static. Kata/CH assets are fetched at runtime.
+  # NOTE (virtio-blk-rootfs / owned-boot path): building the actor's ext4 rootfs
+  # disk needs mkfs.ext4 (e2fsprogs), which debian:stable-slim does NOT include.
+  # Proper fix: publish an ateom-base (debian-slim + e2fsprogs) image and point
+  # this override at it, or ship a static mke2fs as a fetched asset. For local
+  # kind testing this override is set to <registry>/ateom-base at build time.
   # TODO: investigate replacing the nsenter + tar shell-out with in-process Go
   # (setns(2) + archive/tar) so this can drop back to a minimal/distroless base
   # (glibc would still be needed for the Rust CH/virtiofsd binaries).

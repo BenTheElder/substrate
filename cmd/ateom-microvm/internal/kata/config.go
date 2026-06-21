@@ -17,6 +17,7 @@ package kata
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 )
 
 // ConfigAssets are the runtime-fetched asset paths to splice into a kata
@@ -136,6 +137,51 @@ func EnableDebugConsole(base []byte) []byte {
 		}
 		return []byte(string(m[1]) + val + string(m[3]))
 	})
+}
+
+// ConfigKernelParams returns the value of `kernel_params = "..."` from a kata
+// configuration.toml (empty if absent). On the owned-boot path ateom appends
+// these (the kata-agent params: agent.log, agent.debug_console, systemd target,
+// etc.) to the CH payload cmdline, since there's no kata shim to inject them.
+func ConfigKernelParams(base []byte) string {
+	re := regexp.MustCompile(`(?m)^\s*kernel_params\s*=\s*"([^"]*)".*$`)
+	if m := re.FindSubmatch(base); m != nil {
+		return string(m[1])
+	}
+	return ""
+}
+
+// ConfigMemoryMiB returns `default_memory = N` (MiB) from a kata config, or def
+// if absent/unparseable.
+func ConfigMemoryMiB(base []byte, def int) int {
+	if v, ok := configInt(base, "default_memory"); ok {
+		return v
+	}
+	return def
+}
+
+// ConfigVCPUs returns `default_vcpus = N` from a kata config, or def if
+// absent/unparseable. (kata also accepts -1 = all host CPUs; the owned-boot path
+// doesn't, so a non-positive value falls back to def.)
+func ConfigVCPUs(base []byte, def int) int {
+	if v, ok := configInt(base, "default_vcpus"); ok && v > 0 {
+		return v
+	}
+	return def
+}
+
+// configInt extracts an integer-valued top-level TOML key (`key = N`).
+func configInt(base []byte, key string) (int, bool) {
+	re := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(key) + `\s*=\s*(-?\d+)`)
+	m := re.FindSubmatch(base)
+	if m == nil {
+		return 0, false
+	}
+	n, err := strconv.Atoi(string(m[1]))
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // RenderConfig returns base (a kata configuration.toml) with the asset-path
