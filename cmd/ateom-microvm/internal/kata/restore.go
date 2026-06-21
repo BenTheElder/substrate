@@ -115,26 +115,6 @@ func (s *Shim) CaptureSharedDir(ctx context.Context, destTar string) error {
 	return nil
 }
 
-// CaptureSharedDirLocal tars the shared dir for id from the CURRENT mount
-// namespace into destTar. Use for ateom-owned (restored) actors, whose shared
-// dir was built by ReconstructSharedDir in ateom's own namespace (no shim to
-// nsenter). The guest must be paused first.
-func CaptureSharedDirLocal(ctx context.Context, id, destTar string) error {
-	f, err := os.Create(destTar)
-	if err != nil {
-		return fmt.Errorf("creating %q: %w", destTar, err)
-	}
-	defer f.Close()
-	cmd := exec.CommandContext(ctx, "tar", "-C", SharedDir(id), "-cf", "-", ".")
-	cmd.Stdout = f
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("capturing local shared dir: %w (%s)", err, strings.TrimSpace(stderr.String()))
-	}
-	return nil
-}
-
 // ReconstructSharedDir extracts a CaptureSharedDir tar into the shared dir for
 // id (a plain host directory; find-paths re-opens by relative path so this need
 // not be a real overlay mount).
@@ -151,6 +131,43 @@ func ReconstructSharedDir(ctx context.Context, srcTar, id string) error {
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("reconstructing shared dir: %w (%s)", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// ReconstructSharedDirFromImage rebuilds the virtio-fs shared dir for a restored
+// actor from the LOCAL OCI image rootfs (atelet unpacks the image to the bundle at
+// restore, same as at Run) — instead of from a per-checkpoint shared-dir.tar.
+//
+// The RO base is the golden image; reset-to-golden wipes the overlay upper, so the
+// base is byte-identical every checkpoint and the tar was pure redundancy. This
+// makes the snapshot MEMORY-ONLY (config/state/memory-ranges), mirroring gVisor
+// ateom (rootfs comes from the image at restore, not the snapshot).
+//
+// virtiofsd find-paths re-opens files by their frozen relative path, which is
+// <sourceID>/rootfs/... (sourceID = the FROZEN base id the guest is pinned to — the
+// golden cold-run id, recovered from the snapshot's base-id file, NOT from
+// config.json whose socket paths get rewritten per-restore). bundleRootfs is the
+// atelet-populated OCI bundle rootfs (the image).
+func ReconstructSharedDirFromImage(ctx context.Context, bundleRootfs, restoreID, sourceID string) error {
+	if sourceID == "" {
+		return fmt.Errorf("ReconstructSharedDirFromImage: empty sourceID")
+	}
+	root := SharedDir(restoreID)
+	if err := os.RemoveAll(root); err != nil {
+		return fmt.Errorf("clearing shared dir %q: %w", root, err)
+	}
+	dst := filepath.Join(root, sourceID, "rootfs")
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return fmt.Errorf("creating shared dir %q: %w", dst, err)
+	}
+	// cp -a preserves modes/owners/symlinks; trailing /. copies the contents of
+	// the image rootfs into the find-paths location.
+	cmd := exec.CommandContext(ctx, "cp", "-a", bundleRootfs+"/.", dst+"/")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("copying image rootfs %q -> %q: %w (%s)", bundleRootfs, dst, err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
 }

@@ -46,6 +46,14 @@ import (
 type runningActor struct {
 	containerName string
 
+	// baseID is the FROZEN base sandbox id the guest's virtio-fs find-paths are
+	// pinned to (<baseID>/rootfs) — the id the RO base was first shared under,
+	// invariant across restores. For a cold (shim-owned) actor this is the actor's
+	// own id; for a restored actor it is the id read from the snapshot's base-id
+	// file (the golden id, propagated). CheckpointWorkload writes it back into the
+	// next snapshot's base-id file so the chain survives suspend->resume->suspend.
+	baseID string
+
 	// ovlContainerID is the kata-agent container id of the ateom-created overlay
 	// workload (RunWorkload's "be your own hook scheduler" path); empty otherwise.
 	// The workload lives in the VM RAM, so checkpoint/restore (CH-level) need not
@@ -63,9 +71,16 @@ type runningActor struct {
 	apiSocket string
 }
 
-// sharedDirTar is the file name (under the checkpoint/restore dir) holding the
-// captured virtio-fs shared-dir contents shipped alongside the CH snapshot.
-const sharedDirTar = "shared-dir.tar"
+// baseIDFile is a tiny snapshot file (under the checkpoint/restore dir) holding
+// the FROZEN base sandbox id — the id the guest's virtio-fs find-paths are pinned
+// to (<baseID>/rootfs). It is the id the RO base was FIRST shared under (the golden
+// actor's cold-run id) and is INVARIANT across every restore of that actor's
+// lineage: the guest memory keeps referencing <baseID>/rootfs, while the snapshot
+// config.json's socket paths get rewritten to the current actor id on each restore.
+// RestoreWorkload reads this to lay the reconstructed-from-image base at the path
+// the guest expects. (The config.json socket id is the WRONG source — it equals the
+// current id, not the frozen golden id, for any restored-then-checkpointed actor.)
+const baseIDFile = "base-id"
 
 // Asset names in RunWorkloadRequest.runtime_asset_paths (set by atelet's
 // fetchRuntimeAssets, keyed by the ActorTemplate runtime asset names).
@@ -305,7 +320,7 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 		return nil, fmt.Errorf("while starting overlay workload via agent: %w", err)
 	}
 
-	s.running[id] = &runningActor{shim: shim, containerName: containerName, ovlContainerID: ovlID}
+	s.running[id] = &runningActor{shim: shim, containerName: containerName, ovlContainerID: ovlID, baseID: id}
 	slog.InfoContext(ctx, "Actor started", slog.String("id", id), slog.String("workload", ovlID))
 	return &ateompb.RunWorkloadResponse{}, nil
 }
@@ -537,24 +552,28 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 		return nil, fmt.Errorf("while creating checkpoint dir: %w", err)
 	}
 
-	// Capture the virtio-fs shared dir (container rootfs) BEFORE snapshot/
-	// teardown — find-paths restore re-opens these by relative path. For a
-	// kata-shim-owned actor it lives in the shim's mount namespace (nsenter);
-	// for a restored (ateom-owned) actor we built it ourselves in our own
-	// namespace (ReconstructSharedDir), so tar it directly.
-	tCapture := time.Now()
-	if ra != nil && ra.shim != nil {
-		if err := ra.shim.CaptureSharedDir(ctx, filepath.Join(checkpointDir, sharedDirTar)); err != nil {
-			return nil, fmt.Errorf("while capturing virtio-fs shared dir: %w", err)
-		}
-	} else if _, statErr := os.Stat(kata.SharedDir(id)); statErr == nil {
-		if err := kata.CaptureSharedDirLocal(ctx, id, filepath.Join(checkpointDir, sharedDirTar)); err != nil {
-			return nil, fmt.Errorf("while capturing local shared dir: %w", err)
-		}
-	} else {
-		slog.WarnContext(ctx, "No shared dir found for actor; skipping shared-dir capture", slog.String("id", id))
+	// Record the FROZEN base id (the id the guest's virtio-fs find-paths are pinned
+	// to, <baseID>/rootfs). For a cold (shim-owned) actor this is its own id; for a
+	// restored actor it is the golden id propagated via ra.baseID (set from the
+	// snapshot we restored from). RestoreWorkload reads this to lay the
+	// reconstructed-from-image base at the path the guest expects. We can NOT derive
+	// it from config.json (its socket paths get rewritten to the current id on every
+	// restore, losing the invariant golden id).
+	baseID := id
+	if ra != nil && ra.baseID != "" {
+		baseID = ra.baseID
 	}
-	dCapture := time.Since(tCapture)
+	if err := os.WriteFile(filepath.Join(checkpointDir, baseIDFile), []byte(baseID), 0o600); err != nil {
+		return nil, fmt.Errorf("while writing %s: %w", baseIDFile, err)
+	}
+
+	// NB: we deliberately do NOT capture the virtio-fs shared dir (the RO base) —
+	// it is the golden OCI image, identical every checkpoint (reset-to-golden wipes
+	// the upper), and atelet re-unpacks the image to the bundle at restore. So the
+	// snapshot is MEMORY-ONLY (config/state/memory-ranges); RestoreWorkload
+	// reconstructs the base from the local image (ReconstructSharedDirFromImage),
+	// mirroring gVisor ateom. This drops the per-checkpoint shared-dir.tar from the
+	// captured/uploaded/downloaded set + the nsenter+tar capture.
 
 	slog.InfoContext(ctx, "Snapshotting guest", slog.String("id", id), slog.String("dir", checkpointDir))
 	tSnapshot := time.Now()
@@ -564,8 +583,8 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 	dSnapshot := time.Since(tSnapshot)
 
 	// Report exactly the files we wrote so atelet ships precisely the CH snapshot
-	// (config.json + state.json + memory-ranges + shared-dir.tar), not gVisor's
-	// fixed set.
+	// (config.json + state.json + memory-ranges + base-id), not gVisor's fixed set.
+	// Memory-only: the RO base is reconstructed from the OCI image at restore.
 	snapshotFiles, err := listFiles(checkpointDir)
 	if err != nil {
 		return nil, fmt.Errorf("while listing snapshot files: %w", err)
@@ -584,7 +603,7 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 	}
 
 	slog.InfoContext(ctx, "Actor checkpointed", slog.String("id", id), slog.Any("snapshot_files", snapshotFiles),
-		slog.Duration("pause", dPause), slog.Duration("capture", dCapture),
+		slog.Duration("pause", dPause),
 		slog.Duration("snapshot", dSnapshot), slog.Duration("teardown", dTeardown))
 	return &ateompb.CheckpointWorkloadResponse{SnapshotFiles: snapshotFiles}, nil
 }
@@ -654,12 +673,13 @@ func (s *AteomService) teardownActor(ctx context.Context, id string, ra *running
 // cloud-hypervisor directly from the downloaded snapshot — bypassing the kata
 // shim — and resuming.
 //
-// Contract with atelet: the snapshot dir (config.json + state.json +
-// memory-ranges + shared-dir.tar) has been downloaded to RestoreStateDir.
+// Contract with atelet: the memory-only snapshot dir (config.json + state.json +
+// memory-ranges + base-id) has been downloaded to RestoreStateDir.
 //
 // Steps:
-//  1. Reconstruct the virtio-fs shared dir (container rootfs) from shared-dir.tar
-//     so find-paths can re-open the inodes the snapshot references.
+//  1. Reconstruct the virtio-fs shared dir (the RO base) from the LOCAL OCI image
+//     (atelet re-unpacks it to the bundle at restore) at the frozen <baseID>/rootfs
+//     layout the snapshot references, so find-paths can re-open the inodes.
 //  2. Start virtiofsd on the vhost-user socket the snapshot expects.
 //  3. Relaunch CH with --restore source_url=file://<dir> (ch.Restore), which
 //     reconnects to virtiofsd, recreates vsock, and reloads guest RAM (paused).
@@ -688,20 +708,41 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	// (stale virtiofsd holding the vhost-user socket, etc.).
 	kata.CleanupSandboxState(id)
 
-	// The snapshot was taken under the SOURCE actor's id (e.g. the golden
-	// actor); its config.json references that id's socket paths. Rewrite them to
-	// this actor's VMDir so the sockets we create are the ones CH reopens.
+	// The snapshot's config.json references the source actor's socket paths.
+	// Rewrite them to this actor's VMDir so the sockets we create are the ones CH
+	// reopens. (The frozen base id for the shared-dir layout comes from the base-id
+	// file below, NOT these socket paths — they were rewritten to the current id on
+	// the prior restore and so don't carry the invariant golden id.)
 	if err := rewriteSnapshotSocketPaths(restoreDir, id); err != nil {
 		return nil, fmt.Errorf("while rewriting snapshot socket paths: %w", err)
 	}
 
-	// 1. Reconstruct the virtio-fs shared dir from the shipped tar.
-	tarPath := filepath.Join(restoreDir, sharedDirTar)
-	if _, err := os.Stat(tarPath); err != nil {
-		return nil, fmt.Errorf("missing shared-dir tar %q: %w", tarPath, err)
+	// The guest's virtio-fs find-paths are frozen to <baseID>/rootfs, where baseID
+	// is the id the RO base was FIRST shared under (the golden cold-run id) — it is
+	// invariant across this actor's whole restore lineage. CheckpointWorkload records
+	// it in the base-id snapshot file; read it back to lay the base where the guest
+	// expects it.
+	srcBytes, err := os.ReadFile(filepath.Join(restoreDir, baseIDFile))
+	if err != nil {
+		return nil, fmt.Errorf("while reading snapshot %s: %w", baseIDFile, err)
 	}
-	if err := kata.ReconstructSharedDir(ctx, tarPath, id); err != nil {
-		return nil, fmt.Errorf("while reconstructing shared dir: %w", err)
+	srcID := strings.TrimSpace(string(srcBytes))
+	if srcID == "" {
+		return nil, fmt.Errorf("empty %s in snapshot", baseIDFile)
+	}
+
+	// 1. Reconstruct the virtio-fs shared dir (the RO base) from the LOCAL OCI
+	// image — atelet unpacks the image to the bundle rootfs at restore (same as at
+	// Run), and reset-to-golden means the base is always the golden image. This
+	// makes the snapshot memory-only (no per-checkpoint shared-dir.tar), mirroring
+	// gVisor ateom (rootfs from the image at restore).
+	containers := req.GetSpec().GetContainers()
+	if len(containers) != 1 {
+		return nil, status.Errorf(codes.Unimplemented, "ateom-microvm supports exactly one container, got %d", len(containers))
+	}
+	bundleRootfs := filepath.Join(ateompath.OCIBundlePath(ns, name, id, containers[0].GetName()), "rootfs")
+	if err := kata.ReconstructSharedDirFromImage(ctx, bundleRootfs, id, srcID); err != nil {
+		return nil, fmt.Errorf("while reconstructing shared dir from image: %w", err)
 	}
 
 	// kata's per-sandbox runtime dir holds the sockets the snapshot references.
@@ -803,15 +844,18 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		}
 	}
 
-	s.running[id] = &runningActor{chCmd: chCmd, vfsdCmd: vfsdCmd, apiSocket: apiSocket}
+	s.running[id] = &runningActor{chCmd: chCmd, vfsdCmd: vfsdCmd, apiSocket: apiSocket, baseID: srcID}
 	slog.InfoContext(ctx, "Actor restored", slog.String("id", id))
 	return &ateompb.RestoreWorkloadResponse{}, nil
 }
 
-// rewriteSnapshotSocketPaths updates a CH snapshot config.json's per-sandbox
-// socket paths (virtio-fs vhost-user socket, hybrid-vsock socket) from the
-// source actor's VMDir to the restoring actor's VMDir. Disk/kernel paths are
-// content-addressed static files and identical on every node.
+// rewriteSnapshotSocketPaths repoints the snapshot config.json's per-sandbox
+// socket paths (virtio-fs vhost-user socket, hybrid-vsock socket) from the source
+// actor's VMDir to the restoring actor's VMDir, so the sockets we create are the
+// ones CH reopens. Disk/kernel paths are content-addressed static files and
+// identical on every node. (The frozen base id for the shared-dir layout comes
+// from the base-id snapshot file, NOT from these socket paths — they are rewritten
+// per-restore and so do not carry the invariant golden id.)
 func rewriteSnapshotSocketPaths(snapshotDir, id string) error {
 	cfgPath := filepath.Join(snapshotDir, "config.json")
 	b, err := os.ReadFile(cfgPath)
@@ -836,7 +880,10 @@ func rewriteSnapshotSocketPaths(snapshotDir, id string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(cfgPath, out, 0o600)
+	if err := os.WriteFile(cfgPath, out, 0o600); err != nil {
+		return err
+	}
+	return nil
 }
 
 // slogWriter adapts an io.Writer to slog at info level, for the kata shim's
