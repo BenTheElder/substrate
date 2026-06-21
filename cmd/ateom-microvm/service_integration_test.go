@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -255,6 +256,127 @@ func TestServiceRunBlkRootfs(t *testing.T) {
 	dump := kata.DebugConsoleDump(ctx, kata.VsockSocketPath(id),
 		"echo '== vdb =='; blkid /dev/vdb 2>&1; echo '== rootfs mount =='; grep vdb /proc/mounts 2>&1; echo '== ip =='; ip -4 addr show eth0 2>&1")
 	t.Logf("[guest] %s", dump)
+}
+
+// TestServiceCheckpointRestoreBlkRootfs proves Phase 2: the owned-boot actor
+// snapshots MEMORY-ONLY (no shared-dir.tar, no balloon) and restores with in-RAM
+// continuity. It writes a sentinel into guest tmpfs (/run = RAM), checkpoints,
+// ships the snapshot dir, restores on a fresh CH process, and reads the sentinel
+// back — if RAM continuity holds it survives. Same gating/env as
+// TestServiceRunBlkRootfs.
+func TestServiceCheckpointRestoreBlkRootfs(t *testing.T) {
+	if os.Getenv("KATA_INTEGRATION") != "1" {
+		t.Skip("set KATA_INTEGRATION=1 to run (requires kata + /dev/kvm + root + e2fsprogs)")
+	}
+	rootfsSrc := os.Getenv("KATA_ROOTFS_SRC")
+	kernel, image, cfg := os.Getenv("KATA_KERNEL"), os.Getenv("KATA_IMAGE"), os.Getenv("KATA_CONFIG")
+	if rootfsSrc == "" || kernel == "" || image == "" || cfg == "" {
+		t.Fatal("KATA_ROOTFS_SRC, KATA_KERNEL, KATA_IMAGE, KATA_CONFIG are required")
+	}
+	shim := envOrTest("KATA_SHIM", "/opt/kata/bin/containerd-shim-kata-v2")
+	chBin := envOrTest("KATA_CH", "/usr/local/bin/cloud-hypervisor")
+	vfsdBin := envOrTest("KATA_VIRTIOFSD", "/usr/local/bin/virtiofsd-patched")
+	t.Setenv("ATEOM_VIRTIO_BLK_ROOTFS", "1")
+
+	ns, name := "default", "e2e-blkcr"
+	id := fmt.Sprintf("ateomchv-blkcr-%d", os.Getpid())
+	container := "app"
+
+	bundle := ateompath.OCIBundlePath(ns, name, id, container)
+	rootfs := filepath.Join(bundle, "rootfs")
+	if err := os.MkdirAll(rootfs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("cp", "-a", rootfsSrc+"/.", rootfs+"/").CombinedOutput(); err != nil {
+		t.Fatalf("copying rootfs: %v: %s", err, out)
+	}
+	writeMinimalGvisorStyleSpec(t, bundle)
+
+	podUID := "testpod-blkcr"
+	_ = netns.DeleteNamed(ateompath.AteomNetNSName(podUID))
+	interiorNetNS, err := createNetNSWithoutSwitching(ateompath.AteomNetNSName(podUID))
+	if err != nil {
+		t.Fatalf("creating interior netns: %v", err)
+	}
+	svc := NewService(podUID, shim, chBin, vfsdBin, "", "default", true, interiorNetNS)
+	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
+	defer cancel()
+	t.Cleanup(func() {
+		cctx, c := context.WithTimeout(context.Background(), 20*time.Second)
+		svc.teardownActor(cctx, id, svc.running[id], nil)
+		c()
+		_ = os.RemoveAll(ateompath.ActorPath(ns, name, id))
+		_ = os.RemoveAll(kata.VMDir(id))
+		_ = interiorNetNS.Close()
+		_ = netns.DeleteNamed(ateompath.AteomNetNSName(podUID))
+	})
+
+	assets := map[string]string{assetKernel: kernel, assetImage: image, assetConfig: cfg, assetCH: chBin}
+	if _, err := svc.RunWorkload(ctx, &ateompb.RunWorkloadRequest{
+		ActorTemplateNamespace: ns, ActorTemplateName: name, ActorId: id,
+		Spec:              &ateompb.WorkloadSpec{Containers: []*ateompb.Container{{Name: container}}},
+		RuntimeAssetPaths: assets,
+	}); err != nil {
+		t.Fatalf("RunWorkload: %v", err)
+	}
+	t.Log("RunWorkload OK")
+
+	// Write an in-RAM (tmpfs /run) sentinel via the guest debug console.
+	const sentinel = "BLKROOT_CONTINUITY_OK_4242"
+	vsock := kata.VsockSocketPath(id)
+	_ = kata.DebugConsoleDump(ctx, vsock, "echo "+sentinel+" > /run/blkroot-sentinel; sync; echo wrote")
+	if got := kata.DebugConsoleDump(ctx, vsock, "cat /run/blkroot-sentinel"); !strings.Contains(got, sentinel) {
+		t.Fatalf("sentinel not readable pre-checkpoint: %q", got)
+	}
+	t.Log("wrote in-RAM sentinel")
+
+	// CheckpointWorkload — memory-only, no balloon/wipe.
+	if _, err := svc.CheckpointWorkload(ctx, &ateompb.CheckpointWorkloadRequest{
+		ActorTemplateNamespace: ns, ActorTemplateName: name, ActorId: id,
+		Spec: &ateompb.WorkloadSpec{Containers: []*ateompb.Container{{Name: container}}},
+	}); err != nil {
+		t.Fatalf("CheckpointWorkload: %v", err)
+	}
+	checkpointDir := ateompath.CheckpointStateDir(ns, name, id)
+	for _, f := range []string{"config.json", "state.json", "memory-ranges", "base-id"} {
+		if _, err := os.Stat(filepath.Join(checkpointDir, f)); err != nil {
+			t.Fatalf("checkpoint missing %q: %v", f, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(checkpointDir, "shared-dir.tar")); err == nil {
+		t.Error("snapshot has shared-dir.tar — owned-boot must be MEMORY-ONLY (no virtio-fs base)")
+	}
+	t.Log("CheckpointWorkload OK (memory-only: config/state/memory-ranges/base-id, no shared-dir.tar)")
+
+	// Ship snapshot dir -> restore dir (simulating atelet object-storage round trip).
+	restoreDir := ateompath.RestoreStateDir(ns, name, id)
+	if err := os.MkdirAll(restoreDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("cp", "-a", checkpointDir+"/.", restoreDir+"/").CombinedOutput(); err != nil {
+		t.Fatalf("shipping snapshot: %v: %s", err, out)
+	}
+
+	// RestoreWorkload — reopen /dev/vdb, no virtiofsd/reconstruct.
+	if _, err := svc.RestoreWorkload(ctx, &ateompb.RestoreWorkloadRequest{
+		ActorTemplateNamespace: ns, ActorTemplateName: name, ActorId: id,
+		Spec:              &ateompb.WorkloadSpec{Containers: []*ateompb.Container{{Name: container}}},
+		RuntimeAssetPaths: assets,
+	}); err != nil {
+		t.Fatalf("RestoreWorkload: %v", err)
+	}
+	client := ch.NewClient(filepath.Join(kata.VMDir(id), "clh-api-restore.sock"))
+	if err := client.WaitReady(ctx, 10*time.Second); err != nil {
+		t.Fatalf("restored CH not ready: %v", err)
+	}
+	t.Log("RestoreWorkload OK")
+
+	// In-RAM continuity: the sentinel written before checkpoint must survive.
+	got := kata.DebugConsoleDump(ctx, vsock, "cat /run/blkroot-sentinel")
+	if !strings.Contains(got, sentinel) {
+		t.Fatalf("RAM continuity FAILED: sentinel gone after restore: %q", got)
+	}
+	t.Logf("Phase 2 OK: memory-only snapshot + restore with in-RAM continuity (sentinel survived): %q", strings.TrimSpace(got))
 }
 
 func lastLines(s string, n int) string {

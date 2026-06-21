@@ -102,6 +102,16 @@ const (
 // rootfs is a few MiB. TODO: size dynamically from the bundle rootfs + slack.
 const actorRootfsSizeMiB = 512
 
+// actorRootfsDiskName is the actor's writable rootfs disk file under the actor
+// dir; it is the /dev/vdb backing path recorded in the snapshot config.json and
+// reopened verbatim on restore.
+const actorRootfsDiskName = "actor-rootfs.ext4"
+
+// blkRootfsMode reports whether the worker runs the ateom-owned-boot virtio-blk
+// rootfs path (ateom boots CH itself; actor rootfs on a writable /dev/vdb). It
+// gates Run/Checkpoint/Restore so the proven kata-shim path stays the default.
+func blkRootfsMode() bool { return os.Getenv("ATEOM_VIRTIO_BLK_ROOTFS") != "" }
+
 // resolvedRuntime holds the concrete binary/config paths for a request, taken
 // from fetched runtime assets when present, else the process flags.
 type resolvedRuntime struct {
@@ -193,7 +203,7 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	// rootfs, so rootfs writes land off guest RAM -> memory-only snapshot, no
 	// balloon. Gated by env so the proven shim path stays the default until this
 	// path is validated end-to-end on a cluster.
-	if os.Getenv("ATEOM_VIRTIO_BLK_ROOTFS") != "" {
+	if blkRootfsMode() {
 		return s.runWorkloadBlkRootfs(ctx, req)
 	}
 
@@ -400,7 +410,7 @@ func (s *AteomService) runWorkloadBlkRootfs(ctx context.Context, req *ateompb.Ru
 
 	// Build the actor's writable rootfs as a raw ext4 virtio-blk disk from the
 	// atelet-populated OCI bundle rootfs. This becomes /dev/vdb.
-	diskPath := filepath.Join(actorDir, "actor-rootfs.ext4")
+	diskPath := filepath.Join(actorDir, actorRootfsDiskName)
 	if err := kata.BuildExt4Image(ctx, filepath.Join(bundle, "rootfs"), diskPath, actorRootfsSizeMiB); err != nil {
 		return nil, fmt.Errorf("while building actor rootfs disk: %w", err)
 	}
@@ -783,47 +793,55 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 		return nil, fmt.Errorf("while waiting for CH api-socket: %w", err)
 	}
 
-	// Reset-to-golden (gVisor semantics, the default): wipe the overlay tmpfs upper
-	// in the guest so the actor's rootfs writes do NOT persist across
-	// checkpoint/restore — on resume the rootfs is the golden image again. The
-	// upper is at /run/kata-containers/<id>-ovl/fs in the guest PID-1 mount ns
-	// (deterministic from id; not in the container's ns), reached via the kata
-	// debug console (vsock 1026). This frees tmpfs pages (then claimed by the
-	// reclaim below) and is restore-safe: deleted upper files are not re-faulted
-	// from virtio-fs (unlike dropping the virtio-fs read cache, which is). Must run
-	// while the guest is running (before Pause). Best-effort.
-	ovlUpper := "/run/kata-containers/" + id + "-ovl/fs"
-	// Count entries before/after so the log proves the wipe actually cleared the
-	// upper (upper_before=N>0, upper_after=0). The $-vars are evaluated by the guest
-	// shell; DebugConsoleDump ignores the PTY's echo of this command line.
-	wipeCmd := "b=$(ls -A " + ovlUpper + " 2>/dev/null | wc -l); " +
-		"rm -rf " + ovlUpper + "/* " + ovlUpper + "/.[!.]* 2>/dev/null; sync; " +
-		"a=$(ls -A " + ovlUpper + " 2>/dev/null | wc -l); echo upper_before=$b upper_after=$a"
-	wipeOut := kata.DebugConsoleDump(ctx, kata.VsockSocketPath(id), wipeCmd)
-	if strings.Contains(wipeOut, "upper_after=0") {
-		slog.InfoContext(ctx, "Reset overlay upper to golden", slog.String("id", id),
-			slog.String("console", strings.TrimSpace(wipeOut)))
-	} else {
-		// No "upper_after=0" in the output => the wipe didn't confirm empty (debug
-		// console hiccup, or writes remain). Surface it; the rootfs writes may
-		// persist this checkpoint. Best-effort: continue to snapshot regardless.
-		slog.WarnContext(ctx, "Reset-to-golden did NOT confirm empty upper; continuing",
-			slog.String("id", id), slog.String("console", strings.TrimSpace(wipeOut)))
-	}
+	// The owned-boot / virtio-blk-rootfs path is the whole reason this approach
+	// exists: the actor's rootfs writes are on the host-backed /dev/vdb (NOT guest
+	// RAM), so there is no overlay tmpfs upper to wipe and no balloon to inflate —
+	// the snapshot is naturally memory-only and small. Skip both steps; just
+	// pause+snapshot below. (Reset-to-golden happens at restore by recreating the
+	// disk — Phase 3 — not by an in-guest wipe.)
+	if !blkRootfsMode() {
+		// Reset-to-golden (gVisor semantics, the default): wipe the overlay tmpfs upper
+		// in the guest so the actor's rootfs writes do NOT persist across
+		// checkpoint/restore — on resume the rootfs is the golden image again. The
+		// upper is at /run/kata-containers/<id>-ovl/fs in the guest PID-1 mount ns
+		// (deterministic from id; not in the container's ns), reached via the kata
+		// debug console (vsock 1026). This frees tmpfs pages (then claimed by the
+		// reclaim below) and is restore-safe: deleted upper files are not re-faulted
+		// from virtio-fs (unlike dropping the virtio-fs read cache, which is). Must run
+		// while the guest is running (before Pause). Best-effort.
+		ovlUpper := "/run/kata-containers/" + id + "-ovl/fs"
+		// Count entries before/after so the log proves the wipe actually cleared the
+		// upper (upper_before=N>0, upper_after=0). The $-vars are evaluated by the guest
+		// shell; DebugConsoleDump ignores the PTY's echo of this command line.
+		wipeCmd := "b=$(ls -A " + ovlUpper + " 2>/dev/null | wc -l); " +
+			"rm -rf " + ovlUpper + "/* " + ovlUpper + "/.[!.]* 2>/dev/null; sync; " +
+			"a=$(ls -A " + ovlUpper + " 2>/dev/null | wc -l); echo upper_before=$b upper_after=$a"
+		wipeOut := kata.DebugConsoleDump(ctx, kata.VsockSocketPath(id), wipeCmd)
+		if strings.Contains(wipeOut, "upper_after=0") {
+			slog.InfoContext(ctx, "Reset overlay upper to golden", slog.String("id", id),
+				slog.String("console", strings.TrimSpace(wipeOut)))
+		} else {
+			// No "upper_after=0" in the output => the wipe didn't confirm empty (debug
+			// console hiccup, or writes remain). Surface it; the rootfs writes may
+			// persist this checkpoint. Best-effort: continue to snapshot regardless.
+			slog.WarnContext(ctx, "Reset-to-golden did NOT confirm empty upper; continuing",
+				slog.String("id", id), slog.String("console", strings.TrimSpace(wipeOut)))
+		}
 
-	// gVisor-parity snapshot shrink: free guest memory BEFORE pausing (the balloon
-	// only hands pages over while the guest runs) so the sparse snapshot drops them.
-	// Host-side balloon inflate->deflate-to-margin via the CH api; needs the VM to
-	// have been created with reclaim_guest_freed_memory=true. Best-effort — an actor
-	// without a balloon (or a transient hiccup) must NOT fail the checkpoint.
-	tReclaim := time.Now()
-	if usable, rerr := client.ReclaimBeforeSnapshot(ctx, reclaimMargin); rerr != nil {
-		slog.WarnContext(ctx, "Pre-snapshot memory reclaim skipped/failed; snapshotting anyway",
-			slog.String("id", id), slog.Any("err", rerr))
-	} else {
-		slog.InfoContext(ctx, "Pre-snapshot memory reclaim done",
-			slog.String("id", id), slog.Int64("usable_bytes", usable),
-			slog.Duration("reclaim", time.Since(tReclaim)))
+		// gVisor-parity snapshot shrink: free guest memory BEFORE pausing (the balloon
+		// only hands pages over while the guest runs) so the sparse snapshot drops them.
+		// Host-side balloon inflate->deflate-to-margin via the CH api; needs the VM to
+		// have been created with reclaim_guest_freed_memory=true. Best-effort — an actor
+		// without a balloon (or a transient hiccup) must NOT fail the checkpoint.
+		tReclaim := time.Now()
+		if usable, rerr := client.ReclaimBeforeSnapshot(ctx, reclaimMargin); rerr != nil {
+			slog.WarnContext(ctx, "Pre-snapshot memory reclaim skipped/failed; snapshotting anyway",
+				slog.String("id", id), slog.Any("err", rerr))
+		} else {
+			slog.InfoContext(ctx, "Pre-snapshot memory reclaim done",
+				slog.String("id", id), slog.Int64("usable_bytes", usable),
+				slog.Duration("reclaim", time.Since(tReclaim)))
+		}
 	}
 
 	tPause := time.Now()
@@ -978,6 +996,10 @@ func (s *AteomService) teardownActor(ctx context.Context, id string, ra *running
 // paths (present on any kata node) and per-sandbox sockets under VMDir(id); this
 // POC restores under the same id, so those paths line up. ateom then owns the CH.
 func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.RestoreWorkloadRequest) (resp *ateompb.RestoreWorkloadResponse, retErr error) {
+	if blkRootfsMode() {
+		return s.restoreWorkloadBlkRootfs(ctx, req)
+	}
+
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
@@ -1159,6 +1181,119 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		slog.Duration("restore_ch", dRestoreCH), // CH memory reload (RestoreWithNetFDs)
 		slog.Duration("resume", dResume),
 		slog.Duration("total", time.Since(tStart)))
+	return &ateompb.RestoreWorkloadResponse{}, nil
+}
+
+// restoreWorkloadBlkRootfs restores an ateom-owned-boot actor. It is much simpler
+// than the shim/virtio-fs restore: there is NO virtiofsd and NO shared-dir to
+// reconstruct — the rootfs is the writable /dev/vdb disk, which CH reopens from
+// the path recorded in the snapshot config.json. Steps: rewrite the vsock socket
+// path to this actor's VMDir, ensure the /dev/vdb backing file is present, rebuild
+// the tap (the snapshot's virtio-net is fd-backed → fresh net_fds), relaunch CH
+// with --restore, and resume. Guest RAM (incl. the actor's in-memory state and
+// frozen network config) comes back from the memory-only snapshot.
+//
+// Phase 2 (continuity) reopens the SAME disk file left by the original run on this
+// node; Phase 3 (reset-to-golden) will recreate it from the golden image first.
+func (s *AteomService) restoreWorkloadBlkRootfs(ctx context.Context, req *ateompb.RestoreWorkloadRequest) (resp *ateompb.RestoreWorkloadResponse, retErr error) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	ns := req.GetActorTemplateNamespace()
+	name := req.GetActorTemplateName()
+	id := req.GetActorId()
+	restoreDir := ateompath.RestoreStateDir(ns, name, id)
+	tStart := time.Now()
+
+	rr, err := s.resolveRuntime(ateompath.ActorPath(ns, name, id), req.GetRuntimeAssetPaths())
+	if err != nil {
+		return nil, fmt.Errorf("while resolving runtime assets: %w", err)
+	}
+	kata.CleanupSandboxState(id)
+
+	// Repoint the snapshot's vsock socket to this actor's VMDir (the disk + kernel
+	// paths are content-addressed/per-actor and already line up on the same node).
+	if err := rewriteSnapshotSocketPaths(restoreDir, id); err != nil {
+		return nil, fmt.Errorf("while rewriting snapshot socket paths: %w", err)
+	}
+	srcID := id
+	if b, rerr := os.ReadFile(filepath.Join(restoreDir, baseIDFile)); rerr == nil {
+		if v := strings.TrimSpace(string(b)); v != "" {
+			srcID = v
+		}
+	}
+	if err := os.MkdirAll(kata.VMDir(id), 0o700); err != nil {
+		return nil, fmt.Errorf("while creating VM dir: %w", err)
+	}
+
+	// The /dev/vdb backing file must exist at the path the snapshot references
+	// (the actor dir). Phase 2: it persists from the original run on this node.
+	// TODO(Phase 3): recreate it from the golden OCI image here (reset-to-golden).
+	diskPath := filepath.Join(ateompath.ActorPath(ns, name, id), actorRootfsDiskName)
+	if _, err := os.Stat(diskPath); err != nil {
+		return nil, fmt.Errorf("actor rootfs disk %q missing for restore: %w", diskPath, err)
+	}
+
+	// Networking: rebuild the per-activation veth + tap; the snapshot's virtio-net
+	// is fd-backed, so CH needs fresh tap FDs (net_fds) on restore.
+	if err := s.setupActorNetwork(ctx); err != nil {
+		return nil, fmt.Errorf("while setting up actor network: %w", err)
+	}
+	defer func() {
+		if retErr != nil {
+			if cleanupErr := s.cleanupActorNetwork(ctx); cleanupErr != nil {
+				slog.WarnContext(ctx, "Failed to clean up actor network after Restore failure", slog.Any("err", cleanupErr))
+			}
+		}
+	}()
+	netDevs, err := ch.SnapshotNetDevices(restoreDir)
+	if err != nil {
+		return nil, fmt.Errorf("while reading snapshot net devices: %w", err)
+	}
+	var restoredNets []ch.RestoredNet
+	var tapFiles []*os.File
+	defer func() {
+		for _, f := range tapFiles {
+			_ = f.Close()
+		}
+	}()
+	for i, nd := range netDevs {
+		files, terr := s.setupRestoreTap(ctx, fmt.Sprintf("tap%d_kata", i), nd.QueuePairs)
+		if terr != nil {
+			return nil, fmt.Errorf("while building restore tap for %s: %w", nd.ID, terr)
+		}
+		tapFiles = append(tapFiles, files...)
+		rn := ch.RestoredNet{ID: nd.ID}
+		for _, f := range files {
+			rn.FDs = append(rn.FDs, int(f.Fd()))
+		}
+		restoredNets = append(restoredNets, rn)
+	}
+
+	// Relaunch CH and restore with the tap FDs attached (SCM_RIGHTS). CH reopens
+	// /dev/vda (image) + /dev/vdb (actor rootfs) from the snapshot config paths.
+	apiSocket := filepath.Join(kata.VMDir(id), "clh-api-restore.sock")
+	chCmd, client, err := ch.LaunchVMM(ctx, ch.LaunchVMMOptions{
+		Binary: rr.ch, APISocket: apiSocket, Stdout: slogWriter{ctx}, Stderr: slogWriter{ctx},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("while launching VMM for restore: %w", err)
+	}
+	defer func() {
+		if retErr != nil && chCmd.Process != nil {
+			_ = chCmd.Process.Kill()
+		}
+	}()
+	if err := client.RestoreWithNetFDs(ctx, restoreDir, restoredNets); err != nil {
+		return nil, fmt.Errorf("while restoring VM with net FDs: %w", err)
+	}
+	if err := client.Resume(ctx); err != nil {
+		return nil, fmt.Errorf("while resuming restored guest: %w", err)
+	}
+
+	s.running[id] = &runningActor{chCmd: chCmd, apiSocket: apiSocket, baseID: srcID}
+	slog.InfoContext(ctx, "Actor restored (owned-boot, virtio-blk rootfs)",
+		slog.String("id", id), slog.Duration("total", time.Since(tStart)))
 	return &ateompb.RestoreWorkloadResponse{}, nil
 }
 
