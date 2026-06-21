@@ -154,6 +154,131 @@ func TestServiceE2E(t *testing.T) {
 	t.Log("E2E OK: actor ran, checkpointed to 'storage', and restored live on a fresh CH process")
 }
 
+// TestServiceRunBlkRootfs drives ONLY the owned-boot cold-run path
+// (runWorkloadBlkRootfs): ateom boots cloud-hypervisor itself and gives the actor
+// a writable boot-time virtio-blk rootfs (/dev/vdb). It's the fast Phase-1
+// iteration loop — no checkpoint/restore (those are Phase 2). Unlike TestServiceE2E
+// it MUST pass the guest kernel + image + base-config asset paths (owned-boot
+// builds the CH vm.create itself instead of letting the shim read configuration.toml).
+//
+// Gated behind KATA_INTEGRATION=1. Required env:
+//
+//	KATA_ROOTFS_SRC=<dir>   a populated actor rootfs (becomes /dev/vdb)
+//	KATA_KERNEL=<path>      guest kernel (vmlinux.container)
+//	KATA_IMAGE=<path>       guest OS image (kata-containers.img, /dev/vda)
+//	KATA_CONFIG=<path>      a stock kata clh configuration.toml (for kernel_params + sizing)
+//
+// Optional: KATA_CH / KATA_VIRTIOFSD (defaults provided). Run as root on a host
+// with kata + /dev/kvm + mkfs.ext4 (e2fsprogs):
+//
+//	sudo KATA_INTEGRATION=1 KATA_ROOTFS_SRC=/tmp/bb/rootfs KATA_KERNEL=... KATA_IMAGE=... \
+//	  KATA_CONFIG=... ./ateom-microvm.test -test.v -test.run BlkRootfs
+func TestServiceRunBlkRootfs(t *testing.T) {
+	if os.Getenv("KATA_INTEGRATION") != "1" {
+		t.Skip("set KATA_INTEGRATION=1 to run (requires kata + /dev/kvm + root + e2fsprogs)")
+	}
+	rootfsSrc := os.Getenv("KATA_ROOTFS_SRC")
+	if rootfsSrc == "" {
+		t.Fatal("KATA_ROOTFS_SRC is required")
+	}
+	kernel, image, cfg := os.Getenv("KATA_KERNEL"), os.Getenv("KATA_IMAGE"), os.Getenv("KATA_CONFIG")
+	if kernel == "" || image == "" || cfg == "" {
+		t.Fatal("KATA_KERNEL, KATA_IMAGE, and KATA_CONFIG are required for the owned-boot path")
+	}
+	shim := envOrTest("KATA_SHIM", "/opt/kata/bin/containerd-shim-kata-v2")
+	chBin := envOrTest("KATA_CH", "/usr/local/bin/cloud-hypervisor")
+	vfsdBin := envOrTest("KATA_VIRTIOFSD", "/usr/local/bin/virtiofsd-patched")
+
+	// Select the owned-boot path in RunWorkload.
+	t.Setenv("ATEOM_VIRTIO_BLK_ROOTFS", "1")
+
+	ns, name := "default", "e2e-blk"
+	id := fmt.Sprintf("ateomchv-blk-%d", os.Getpid())
+	container := "app"
+
+	bundle := ateompath.OCIBundlePath(ns, name, id, container)
+	rootfs := filepath.Join(bundle, "rootfs")
+	if err := os.MkdirAll(rootfs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("cp", "-a", rootfsSrc+"/.", rootfs+"/").CombinedOutput(); err != nil {
+		t.Fatalf("copying rootfs: %v: %s", err, out)
+	}
+	writeMinimalGvisorStyleSpec(t, bundle)
+
+	podUID := "testpod-blk"
+	_ = netns.DeleteNamed(ateompath.AteomNetNSName(podUID))
+	interiorNetNS, err := createNetNSWithoutSwitching(ateompath.AteomNetNSName(podUID))
+	if err != nil {
+		t.Fatalf("creating interior netns: %v", err)
+	}
+	svc := NewService(podUID, shim, chBin, vfsdBin, "", "default", true, interiorNetNS)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	t.Cleanup(func() {
+		cctx, c := context.WithTimeout(context.Background(), 20*time.Second)
+		svc.teardownActor(cctx, id, svc.running[id], nil)
+		c()
+		_ = os.RemoveAll(ateompath.ActorPath(ns, name, id))
+		_ = os.RemoveAll(kata.VMDir(id))
+		_ = interiorNetNS.Close()
+		_ = netns.DeleteNamed(ateompath.AteomNetNSName(podUID))
+	})
+
+	if _, err := svc.RunWorkload(ctx, &ateompb.RunWorkloadRequest{
+		ActorTemplateNamespace: ns, ActorTemplateName: name, ActorId: id,
+		Spec: &ateompb.WorkloadSpec{Containers: []*ateompb.Container{{Name: container}}},
+		RuntimeAssetPaths: map[string]string{
+			assetKernel: kernel,
+			assetImage:  image,
+			assetConfig: cfg,
+			assetCH:     chBin,
+		},
+	}); err != nil {
+		// Best-effort: dump the guest serial console (captured to VMDir/serial.log)
+		// so a boot failure shows the kernel/agent output.
+		if b, rerr := os.ReadFile(filepath.Join(kata.VMDir(id), "serial.log")); rerr == nil {
+			t.Logf("[serial.log tail]\n%s", lastLines(string(b), 60))
+		}
+		t.Fatalf("RunWorkload (owned-boot): %v", err)
+	}
+	t.Log("RunWorkload OK (owned-boot: CH booted by ateom, actor rootfs on /dev/vdb)")
+
+	// Liveness: the ateom-owned CH must be up and the VM Running.
+	client := ch.NewClient(filepath.Join(kata.VMDir(id), "clh-api.sock"))
+	if err := client.WaitReady(ctx, 10*time.Second); err != nil {
+		t.Fatalf("owned CH not ready: %v", err)
+	}
+	// Confirm the actor's rootfs really came from /dev/vdb (a marker visible via
+	// the guest debug console — the actor's own files live on the blk disk).
+	dump := kata.DebugConsoleDump(ctx, kata.VsockSocketPath(id),
+		"echo '== vdb =='; blkid /dev/vdb 2>&1; echo '== rootfs mount =='; grep vdb /proc/mounts 2>&1; echo '== ip =='; ip -4 addr show eth0 2>&1")
+	t.Logf("[guest] %s", dump)
+}
+
+func lastLines(s string, n int) string {
+	lines := []string{}
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' {
+			lines = append(lines, s[start:i])
+			start = i + 1
+		}
+	}
+	if start < len(s) {
+		lines = append(lines, s[start:])
+	}
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	out := ""
+	for _, l := range lines {
+		out += l + "\n"
+	}
+	return out
+}
+
 func envOrTest(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
