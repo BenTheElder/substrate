@@ -374,9 +374,51 @@ func TestServiceCheckpointRestoreBlkRootfs(t *testing.T) {
 	// In-RAM continuity: the sentinel written before checkpoint must survive.
 	got := kata.DebugConsoleDump(ctx, vsock, "cat /run/blkroot-sentinel")
 	if !strings.Contains(got, sentinel) {
-		t.Fatalf("RAM continuity FAILED: sentinel gone after restore: %q", got)
+		t.Fatalf("RAM continuity FAILED: sentinel gone after restore #1: %q", got)
 	}
-	t.Logf("Phase 2 OK: memory-only snapshot + restore with in-RAM continuity (sentinel survived): %q", strings.TrimSpace(got))
+	t.Logf("cycle1 OK: memory-only snapshot + restore, in-RAM continuity (%q)", strings.TrimSpace(got))
+
+	// --- SECOND cycle: checkpoint-AFTER-restore. This is the OnDemand diff-snapshot
+	// case — CH writes only the faulted delta and CheckpointWorkload overlays it onto
+	// the restore source to rebuild a COMPLETE snapshot. If the merge is wrong the
+	// snapshot is incomplete and restore #2 boots a corrupt guest (sentinel gone /
+	// unreachable). Write a SECOND sentinel first so we also prove pages dirtied in
+	// THIS activation are captured by the merge. ---
+	const sentinel2 = "BLKROOT_CYCLE2_OK_8888"
+	_ = kata.DebugConsoleDump(ctx, vsock, "echo "+sentinel2+" > /run/blkroot-sentinel2; sync")
+	if _, err := svc.CheckpointWorkload(ctx, &ateompb.CheckpointWorkloadRequest{
+		ActorTemplateNamespace: ns, ActorTemplateName: name, ActorId: id,
+		Spec: &ateompb.WorkloadSpec{Containers: []*ateompb.Container{{Name: container}}},
+	}); err != nil {
+		t.Fatalf("CheckpointWorkload #2 (merge): %v", err)
+	}
+	// Ship the merged snapshot (overwrites restoreDir AFTER the merge read it).
+	if out, err := exec.Command("cp", "-a", checkpointDir+"/.", restoreDir+"/").CombinedOutput(); err != nil {
+		t.Fatalf("shipping snapshot #2: %v: %s", err, out)
+	}
+	if _, err := svc.RestoreWorkload(ctx, &ateompb.RestoreWorkloadRequest{
+		ActorTemplateNamespace: ns, ActorTemplateName: name, ActorId: id,
+		Spec:              &ateompb.WorkloadSpec{Containers: []*ateompb.Container{{Name: container}}},
+		RuntimeAssetPaths: assets,
+	}); err != nil {
+		t.Fatalf("RestoreWorkload #2: %v", err)
+	}
+	client2 := ch.NewClient(filepath.Join(kata.VMDir(id), "clh-api-restore.sock"))
+	if err := client2.WaitReady(ctx, 10*time.Second); err != nil {
+		t.Fatalf("restored CH #2 not ready: %v", err)
+	}
+	// BOTH sentinels must survive: sentinel (from cycle 1, an un-faulted source page
+	// recovered by the overlay) AND sentinel2 (dirtied this cycle, in CH's delta).
+	g1 := kata.DebugConsoleDump(ctx, vsock, "cat /run/blkroot-sentinel")
+	g2 := kata.DebugConsoleDump(ctx, vsock, "cat /run/blkroot-sentinel2")
+	if !strings.Contains(g1, sentinel) {
+		t.Fatalf("merge INCOMPLETE: cycle-1 sentinel lost after restore #2 (un-faulted source page dropped): %q", g1)
+	}
+	if !strings.Contains(g2, sentinel2) {
+		t.Fatalf("merge lost the cycle-2 delta: sentinel2 gone after restore #2: %q", g2)
+	}
+	t.Logf("Phase 2+OnDemand-merge OK: 2-cycle suspend/resume, both sentinels survived (%q | %q)",
+		strings.TrimSpace(g1), strings.TrimSpace(g2))
 }
 
 // TestServiceResetToGoldenBlkRootfs proves Phase 3: reset-to-golden. From the

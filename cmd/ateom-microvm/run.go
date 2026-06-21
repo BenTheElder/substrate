@@ -72,6 +72,14 @@ type runningActor struct {
 	// apiSocket is the CH api-socket for an ateom-owned (restored) VMM; empty
 	// for kata-shim-owned actors (use kata.CLHSocketPath then).
 	apiSocket string
+
+	// restoreSourceDir is the snapshot dir this actor was OnDemand-restored from
+	// (the base CH is demand-paging from). Set only on the owned-boot virtio-blk
+	// path when restored via OnDemand. CheckpointWorkload overlays CH's new (sparse,
+	// faulted-only) snapshot onto this base to produce a COMPLETE snapshot (CH's
+	// OnDemand snapshot alone drops the un-faulted pages). Empty for cold-run actors
+	// (their snapshot is already complete) and for the eager/shim paths.
+	restoreSourceDir string
 }
 
 // baseIDFile is a tiny snapshot file (under the checkpoint/restore dir) holding
@@ -916,6 +924,23 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 	}
 	dSnapshot := time.Since(tSnapshot)
 
+	// Diff-snapshot completion for an OnDemand-restored actor: CH's snapshot here is
+	// sparse — only the pages faulted in since the OnDemand restore — so on its own
+	// it's INCOMPLETE (the un-faulted pages were being demand-paged from the restore
+	// source). Overlay it onto that source to rebuild a COMPLETE memory-ranges, so the
+	// snapshot is self-contained and re-restorable. (A cold-run actor has no restore
+	// source and its snapshot is already complete — no merge.)
+	if ra != nil && ra.restoreSourceDir != "" {
+		base := filepath.Join(ra.restoreSourceDir, "memory-ranges")
+		delta := filepath.Join(checkpointDir, "memory-ranges")
+		tMerge := time.Now()
+		if err := ch.MergeSparseOverlay(ctx, base, delta, delta); err != nil {
+			return nil, fmt.Errorf("while merging OnDemand delta onto restore source: %w", err)
+		}
+		slog.InfoContext(ctx, "Merged OnDemand delta onto restore source (complete snapshot)",
+			slog.String("id", id), slog.Duration("merge", time.Since(tMerge)))
+	}
+
 	// reset-to-golden support (owned-boot): save the actor's /dev/vdb AS-OF this
 	// (paused, consistent) snapshot as a verbatim golden template, so future
 	// restores can recreate the disk byte-identical to what the snapshot's guest RAM
@@ -1347,25 +1372,21 @@ func (s *AteomService) restoreWorkloadBlkRootfs(ctx context.Context, req *ateomp
 			_ = chCmd.Process.Kill()
 		}
 	}()
-	// Eager (Copy) memory restore. OnDemand (userfaultfd) was measured DRAMATICALLY
-	// faster in-cluster — restore ~75ms vs ~1.8s, and suspend-after-restore ~8ms vs
-	// ~3.5s (it keeps the memfd sparse, sidestepping the eager-copy densification).
-	// BUT it BREAKS the suspend/resume chain: CH's snapshot of an OnDemand-restored
-	// guest writes only the faulted-in pages — the un-faulted pages it was
-	// demand-paging from the source are LOST — so the new snapshot is INCOMPLETE
-	// (measured 558KB–2.4MB vs the complete 36MB) and the next restore boots a
-	// corrupt, unreachable guest. Complete snapshots need either eager restore
-	// (densified → slow suspend) or, to also shrink/speed the suspend, a guest-aware
-	// balloon reclaim before snapshot (free pages only → stays complete). Keep eager
-	// here for correctness; balloon-reclaim-on-blk is the perf follow-up.
-	if err := client.RestoreWithNetFDs(ctx, restoreDir, restoredNets, ""); err != nil {
+	// OnDemand (userfaultfd) memory restore: ~75ms vs ~1.8s eager, and it keeps the
+	// memfd SPARSE so the next suspend isn't the eager-copy-densified full-RAM scan.
+	// CH's OnDemand snapshot alone would be INCOMPLETE (it writes only faulted pages,
+	// dropping the un-faulted ones it demand-pages from this source) — so
+	// CheckpointWorkload overlays CH's delta onto this source (restoreSourceDir) to
+	// rebuild a complete snapshot. CH demand-pages from restoreDir for the VM's whole
+	// lifetime, so it must persist until teardown (atelet keeps it until reset).
+	if err := client.RestoreWithNetFDs(ctx, restoreDir, restoredNets, "OnDemand"); err != nil {
 		return nil, fmt.Errorf("while restoring VM with net FDs: %w", err)
 	}
 	if err := client.Resume(ctx); err != nil {
 		return nil, fmt.Errorf("while resuming restored guest: %w", err)
 	}
 
-	s.running[id] = &runningActor{chCmd: chCmd, apiSocket: apiSocket, baseID: srcID}
+	s.running[id] = &runningActor{chCmd: chCmd, apiSocket: apiSocket, baseID: srcID, restoreSourceDir: restoreDir}
 	slog.InfoContext(ctx, "Actor restored (owned-boot, virtio-blk rootfs)",
 		slog.String("id", id), slog.Duration("total", time.Since(tStart)))
 	return &ateompb.RestoreWorkloadResponse{}, nil
