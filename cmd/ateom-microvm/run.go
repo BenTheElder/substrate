@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -437,12 +438,22 @@ func (s *AteomService) runWorkloadBlkRootfs(ctx context.Context, req *ateompb.Ru
 		}
 	}()
 
-	// Kernel cmdline: kata's clh root params for the guest image (/dev/vda1) + base
-	// params + agent params (kernel_params from the config) + a serial console
+	// Kernel cmdline: replicate kata's clh boot cmdline (verified against a live
+	// kata snapshot's payload.cmdline). Beyond the root/clh base params it MUST
+	// include systemd.unit=kata-containers.target (else systemd boots the default
+	// target and powers off — the guest exits ~6s in) and mask systemd-networkd
+	// (the agent owns eth0). The console is ARCH-SPECIFIC: ttyAMA0 (PL011) on
+	// arm64, ttyS0 (8250) on amd64 — wrong console => "unable to open an initial
+	// console". The config's kernel_params (agent.* etc.) are appended. Serial is
 	// captured to a file for boot debugging.
 	serialLog := filepath.Join(kata.VMDir(id), "serial.log")
+	console := "ttyS0"
+	if runtime.GOARCH == "arm64" {
+		console = "ttyAMA0"
+	}
 	cmdline := "root=/dev/vda1 rootflags=data=ordered,errors=remount-ro ro rootfstype=ext4 " +
-		"panic=1 no_timer_check noreplace-smp console=ttyS0,115200n8"
+		"panic=1 no_timer_check noreplace-smp console=" + console + ",115200n8 " +
+		"systemd.unit=kata-containers.target systemd.mask=systemd-networkd.service systemd.mask=systemd-networkd.socket"
 	if kparams != "" {
 		cmdline += " " + kparams
 	}
@@ -487,15 +498,19 @@ func (s *AteomService) runWorkloadBlkRootfs(ctx context.Context, req *ateompb.Ru
 	}
 	slog.InfoContext(ctx, "Micro-VM booted (owned-boot)", slog.String("id", id), slog.String("api", apiSocket))
 
-	// Dial the kata-agent over hybrid-vsock.
+	// Dial the kata-agent over hybrid-vsock. The agent only starts listening once
+	// the guest's init reaches kata-containers.target — well after CH creates the
+	// vsock socket file — so poll the CONNECT until it answers (as the kata shim
+	// does), rather than dialing once.
 	vsockPath := kata.VsockSocketPath(id)
 	if !waitForFile(vsockPath, 15*time.Second) {
 		return nil, fmt.Errorf("kata-agent vsock socket %q did not appear", vsockPath)
 	}
-	dialCtx, dialCancel := context.WithTimeout(ctx, 20*time.Second)
-	ac, err := kata.DialAgent(dialCtx, vsockPath)
-	dialCancel()
+	ac, err := dialAgentRetry(ctx, vsockPath, 60*time.Second)
 	if err != nil {
+		if b, rerr := os.ReadFile(serialLog); rerr == nil {
+			slog.ErrorContext(ctx, "agent dial failed; guest serial tail", slog.String("serial", tailString(string(b), 3000)))
+		}
 		return nil, fmt.Errorf("while dialing kata-agent: %w", err)
 	}
 	defer ac.Close()
@@ -534,6 +549,39 @@ func (s *AteomService) runWorkloadBlkRootfs(ctx context.Context, req *ateompb.Ru
 	s.running[id] = &runningActor{chCmd: chCmd, apiSocket: apiSocket, containerName: containerName, ovlContainerID: id, baseID: id}
 	slog.InfoContext(ctx, "Actor started (owned-boot, virtio-blk rootfs)", slog.String("id", id))
 	return &ateompb.RunWorkloadResponse{}, nil
+}
+
+// dialAgentRetry polls DialAgent until the kata-agent answers the hybrid-vsock
+// CONNECT (the socket file exists at boot, but the agent only listens once the
+// guest reaches kata-containers.target) or timeout elapses.
+func dialAgentRetry(ctx context.Context, vsockPath string, timeout time.Duration) (*kata.AgentClient, error) {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		dctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		ac, err := kata.DialAgent(dctx, vsockPath)
+		cancel()
+		if err == nil {
+			return ac, nil
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			return nil, lastErr
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+// tailString returns the last n bytes of s (for logging a serial-console tail).
+func tailString(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
 }
 
 // configureGuestNetwork replicates the kata shim's guest network setup over the
