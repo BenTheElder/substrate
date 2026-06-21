@@ -68,6 +68,18 @@ const (
 	// MAC would blackhole guest egress until that entry expires. A constant
 	// gateway MAC keeps the frozen entry valid on every pod.
 	hostVethMAC = "02:a8:1e:00:00:01"
+
+	// actorGuestMAC is the FIXED MAC for the guest's eth0 (the CH virtio-net) on
+	// the ateom-owned-boot path. Fixed for the same reason as hostVethMAC: a cold
+	// boot freezes this MAC into the guest+snapshot, and restore re-adds the
+	// virtio-net under the same MAC (SnapshotNetDevices reads it back), so the
+	// guest's frozen interface config stays valid across pods. Distinct from the
+	// gateway MAC (…:01).
+	actorGuestMAC = "02:a8:1e:00:00:02"
+
+	// actorVethSubnet is the point-to-point /30 the actor veth lives on; the guest
+	// needs the connected (scope-link) route to it so the gateway is reachable.
+	actorVethSubnet = "169.254.17.0/30"
 )
 
 // setupActorNetwork builds a fresh point-to-point network between the worker
@@ -560,4 +572,18 @@ func (s *AteomService) setupRestoreTap(ctx context.Context, name string, queuePa
 		return nil, err
 	}
 	return fds, nil
+}
+
+// actorVethMTU reads the MTU of the actor veth (eth0 in the interior netns) so the
+// owned-boot path can configure the guest eth0 with a matching MTU via the agent
+// (UpdateInterface). Defaults to 1500 if the link can't be read.
+func (s *AteomService) actorVethMTU(ctx context.Context) int {
+	mtu := 1500
+	_ = netNSDo(ctx, s.interiorNetNS, func(ctx context.Context) error {
+		if l, err := netlink.LinkByName(actorVethName); err == nil {
+			mtu = l.Attrs().MTU
+		}
+		return nil
+	})
+	return mtu
 }

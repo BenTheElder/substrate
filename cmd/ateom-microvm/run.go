@@ -29,10 +29,12 @@ import (
 
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/ch"
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/kata"
+	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/kata/agentpb"
 	"github.com/agent-substrate/substrate/internal/ateompath"
 	"github.com/agent-substrate/substrate/internal/proto/ateompb"
 	ctrtypes "github.com/containerd/containerd/api/types"
 	"github.com/opencontainers/runtime-spec/specs-go"
+	"golang.org/x/sys/unix"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -92,6 +94,12 @@ const (
 	assetImage     = "kata-image"
 	assetConfig    = "kata-config"
 )
+
+// actorRootfsSizeMiB is the size of the actor's writable virtio-blk rootfs disk
+// (/dev/vdb) on the owned-boot path. The image is sparse + ext4 metadata is the
+// only eagerly-written part, so an oversized value is cheap; a busybox/counter
+// rootfs is a few MiB. TODO: size dynamically from the bundle rootfs + slack.
+const actorRootfsSizeMiB = 512
 
 // resolvedRuntime holds the concrete binary/config paths for a request, taken
 // from fetched runtime assets when present, else the process flags.
@@ -179,6 +187,15 @@ func (s *AteomService) resolveRuntime(actorDir string, paths map[string]string) 
 // Proven end-to-end by TestKataLifecycle: boot + run + pause + resume of a
 // busybox container in a CH micro-VM, no containerd.
 func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkloadRequest) (resp *ateompb.RunWorkloadResponse, retErr error) {
+	// virtio-blk-rootfs experiment: ateom owns the CH boot itself (no kata shim)
+	// and gives the actor a writable boot-time virtio-blk disk (/dev/vdb) as its
+	// rootfs, so rootfs writes land off guest RAM -> memory-only snapshot, no
+	// balloon. Gated by env so the proven shim path stays the default until this
+	// path is validated end-to-end on a cluster.
+	if os.Getenv("ATEOM_VIRTIO_BLK_ROOTFS") != "" {
+		return s.runWorkloadBlkRootfs(ctx, req)
+	}
+
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
@@ -323,6 +340,230 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	s.running[id] = &runningActor{shim: shim, containerName: containerName, ovlContainerID: ovlID, baseID: id}
 	slog.InfoContext(ctx, "Actor started", slog.String("id", id), slog.String("workload", ovlID))
 	return &ateompb.RunWorkloadResponse{}, nil
+}
+
+// runWorkloadBlkRootfs is the ateom-owned-boot path (gated by ATEOM_VIRTIO_BLK_ROOTFS):
+// ateom boots cloud-hypervisor itself — no kata shim — and gives the actor a
+// writable boot-time virtio-blk disk (/dev/vdb, built from the OCI bundle rootfs)
+// as its container rootfs. Rootfs writes land on that host-backed disk (off guest
+// RAM), so the CH snapshot is memory-only with no balloon and no virtiofsd
+// find-paths. It replicates the kata clh boot (vm.create kernel+image, add-net,
+// vm.boot) and the shim's post-boot work (agent CreateSandbox + guest network
+// config) before driving the agent to start the blk-rootfs container.
+func (s *AteomService) runWorkloadBlkRootfs(ctx context.Context, req *ateompb.RunWorkloadRequest) (resp *ateompb.RunWorkloadResponse, retErr error) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	ns := req.GetActorTemplateNamespace()
+	name := req.GetActorTemplateName()
+	id := req.GetActorId()
+
+	containers := req.GetSpec().GetContainers()
+	if len(containers) != 1 {
+		return nil, status.Errorf(codes.Unimplemented, "ateom-microvm supports exactly one container, got %d", len(containers))
+	}
+	containerName := containers[0].GetName()
+
+	// Owned-boot builds the CH vm.create itself, so it needs the guest kernel +
+	// image paths directly. resolveRuntime still renders the config (for the agent
+	// kernel_params + mem/vcpu sizing) and resolves the CH binary.
+	paths := req.GetRuntimeAssetPaths()
+	kernel, image := paths[assetKernel], paths[assetImage]
+	if kernel == "" || image == "" {
+		return nil, fmt.Errorf("owned-boot requires %q and %q asset paths", assetKernel, assetImage)
+	}
+	actorDir := ateompath.ActorPath(ns, name, id)
+	rr, err := s.resolveRuntime(actorDir, paths)
+	if err != nil {
+		return nil, fmt.Errorf("while resolving runtime assets: %w", err)
+	}
+
+	// Networking (host side): per-activation veth into the interior netns. The
+	// tap + TC mirror is built below (after the VM exists) so its FDs are fresh.
+	if err := s.setupActorNetwork(ctx); err != nil {
+		return nil, fmt.Errorf("while setting up actor network: %w", err)
+	}
+	defer func() {
+		if retErr != nil {
+			if cleanupErr := s.cleanupActorNetwork(ctx); cleanupErr != nil {
+				slog.WarnContext(ctx, "Failed to clean up actor network after Run failure", slog.Any("err", cleanupErr))
+			}
+		}
+	}()
+
+	bundle := ateompath.OCIBundlePath(ns, name, id, containerName)
+	spec, err := ensureKataCompatibleSpec(bundle, id, ateompath.AteomNetNSPath(s.podUID))
+	if err != nil {
+		return nil, fmt.Errorf("while preparing kata OCI spec: %w", err)
+	}
+
+	// Build the actor's writable rootfs as a raw ext4 virtio-blk disk from the
+	// atelet-populated OCI bundle rootfs. This becomes /dev/vdb.
+	diskPath := filepath.Join(actorDir, "actor-rootfs.ext4")
+	if err := kata.BuildExt4Image(ctx, filepath.Join(bundle, "rootfs"), diskPath, actorRootfsSizeMiB); err != nil {
+		return nil, fmt.Errorf("while building actor rootfs disk: %w", err)
+	}
+
+	// Sizing + agent params from the rendered kata config.
+	var cfgBytes []byte
+	if rr.configFile != "" {
+		cfgBytes, _ = os.ReadFile(rr.configFile)
+	}
+	memMiB := kata.ConfigMemoryMiB(cfgBytes, 2048)
+	vcpus := kata.ConfigVCPUs(cfgBytes, 1)
+	kparams := kata.ConfigKernelParams(cfgBytes)
+
+	// Clean stale per-sandbox state + create the runtime dir for the sockets.
+	kata.CleanupSandboxState(id)
+	if err := os.MkdirAll(kata.VMDir(id), 0o700); err != nil {
+		return nil, fmt.Errorf("while creating VM dir: %w", err)
+	}
+
+	// Launch a bare VMM (CH + api-socket); ateom owns this process for teardown.
+	apiSocket := filepath.Join(kata.VMDir(id), "clh-api.sock")
+	chCmd, client, err := ch.LaunchVMM(ctx, ch.LaunchVMMOptions{
+		Binary:    rr.ch,
+		APISocket: apiSocket,
+		Stdout:    slogWriter{ctx},
+		Stderr:    slogWriter{ctx},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("while launching VMM: %w", err)
+	}
+	defer func() {
+		if retErr != nil && chCmd.Process != nil {
+			_ = chCmd.Process.Kill()
+			_, _ = chCmd.Process.Wait()
+		}
+	}()
+
+	// Kernel cmdline: kata's clh root params for the guest image (/dev/vda1) + base
+	// params + agent params (kernel_params from the config) + a serial console
+	// captured to a file for boot debugging.
+	serialLog := filepath.Join(kata.VMDir(id), "serial.log")
+	cmdline := "root=/dev/vda1 rootflags=data=ordered,errors=remount-ro ro rootfstype=ext4 " +
+		"panic=1 no_timer_check noreplace-smp console=ttyS0,115200n8"
+	if kparams != "" {
+		cmdline += " " + kparams
+	}
+	cfg := ch.VmConfig{
+		Cpus:    ch.CpusConfig{BootVcpus: int32(vcpus), MaxVcpus: int32(vcpus)},
+		Memory:  ch.MemoryConfig{Size: int64(memMiB) * 1024 * 1024, Shared: true},
+		Payload: ch.PayloadConfig{Kernel: kernel, Cmdline: cmdline},
+		Disks: []ch.DiskConfig{
+			{Path: image, Readonly: true, ImageType: "Raw", NumQueues: int32(vcpus), QueueSize: 1024},
+			{Path: diskPath, Readonly: false, ImageType: "Raw", NumQueues: int32(vcpus), QueueSize: 1024},
+		},
+		Rng:    &ch.RngConfig{Src: "/dev/urandom"},
+		Serial: &ch.ConsoleConfig{Mode: "File", File: serialLog},
+		Vsock:  &ch.VsockConfig{Cid: 3, Socket: kata.VsockSocketPath(id)},
+	}
+	if err := client.CreateVM(ctx, cfg); err != nil {
+		return nil, fmt.Errorf("while creating VM: %w", err)
+	}
+
+	// Network device: build the tap + TC mirror against the actor veth and add a
+	// virtio-net to the created (pre-boot) VM with the tap FDs (SCM_RIGHTS).
+	tapFiles, err := s.setupRestoreTap(ctx, "tap0_kata", 1)
+	if err != nil {
+		return nil, fmt.Errorf("while building tap: %w", err)
+	}
+	defer func() {
+		for _, f := range tapFiles {
+			_ = f.Close() // CH dups adopted FDs; ours always close.
+		}
+	}()
+	var fds []int
+	for _, f := range tapFiles {
+		fds = append(fds, int(f.Fd()))
+	}
+	if err := client.AddNetWithFDs(ctx, actorGuestMAC, 2*len(tapFiles), fds); err != nil {
+		return nil, fmt.Errorf("while adding net device: %w", err)
+	}
+
+	// Boot.
+	if err := client.BootVM(ctx); err != nil {
+		return nil, fmt.Errorf("while booting VM: %w", err)
+	}
+	slog.InfoContext(ctx, "Micro-VM booted (owned-boot)", slog.String("id", id), slog.String("api", apiSocket))
+
+	// Dial the kata-agent over hybrid-vsock.
+	vsockPath := kata.VsockSocketPath(id)
+	if !waitForFile(vsockPath, 15*time.Second) {
+		return nil, fmt.Errorf("kata-agent vsock socket %q did not appear", vsockPath)
+	}
+	dialCtx, dialCancel := context.WithTimeout(ctx, 20*time.Second)
+	ac, err := kata.DialAgent(dialCtx, vsockPath)
+	dialCancel()
+	if err != nil {
+		return nil, fmt.Errorf("while dialing kata-agent: %w", err)
+	}
+	defer ac.Close()
+
+	// Establish the agent sandbox (the shim normally does this at boot).
+	sbCtx, sbCancel := context.WithTimeout(ctx, 20*time.Second)
+	err = ac.CreateSandbox(sbCtx, &agentpb.CreateSandboxRequest{Hostname: spec.Hostname, SandboxId: id})
+	sbCancel()
+	if err != nil {
+		return nil, fmt.Errorf("while creating agent sandbox: %w", err)
+	}
+
+	// Configure guest networking (the shim's job): eth0 IP/MAC/MTU, routes, ARP.
+	mtu := uint64(s.actorVethMTU(ctx))
+	netCtx, netCancel := context.WithTimeout(ctx, 20*time.Second)
+	err = s.configureGuestNetwork(netCtx, ac, mtu)
+	netCancel()
+	if err != nil {
+		dump := kata.DebugConsoleDump(ctx, vsockPath, "ip addr 2>&1; echo '== route =='; ip route 2>&1; echo '== neigh =='; ip neigh 2>&1")
+		slog.ErrorContext(ctx, "guest network config failed; dump", slog.String("dump", dump))
+		return nil, fmt.Errorf("while configuring guest network: %w", err)
+	}
+
+	// Start the actor with its rootfs on /dev/vdb (single blk storage).
+	wlCtx, wlCancel := context.WithTimeout(ctx, 30*time.Second)
+	err = ac.StartBlkWorkload(wlCtx, id, "/dev/vdb", spec)
+	wlCancel()
+	if err != nil {
+		dump := kata.DebugConsoleDump(ctx, vsockPath,
+			"echo '== /dev/vdb =='; ls -l /dev/vdb 2>&1; blkid /dev/vdb 2>&1; "+
+				"echo '== mounts =='; grep kata /proc/mounts 2>&1")
+		slog.ErrorContext(ctx, "blk workload failed; dump", slog.String("dump", dump))
+		return nil, fmt.Errorf("while starting blk workload: %w", err)
+	}
+
+	s.running[id] = &runningActor{chCmd: chCmd, apiSocket: apiSocket, containerName: containerName, ovlContainerID: id, baseID: id}
+	slog.InfoContext(ctx, "Actor started (owned-boot, virtio-blk rootfs)", slog.String("id", id))
+	return &ateompb.RunWorkloadResponse{}, nil
+}
+
+// configureGuestNetwork replicates the kata shim's guest network setup over the
+// agent: configure eth0 (IP/MAC/MTU), install the connected + default routes, and
+// pin the gateway's ARP entry to its fixed MAC (so a restored guest's frozen
+// neighbor entry stays valid).
+func (s *AteomService) configureGuestNetwork(ctx context.Context, ac *kata.AgentClient, mtu uint64) error {
+	if err := ac.UpdateInterface(ctx, &agentpb.Interface{
+		Device: actorVethName,
+		Name:   actorVethName,
+		HwAddr: actorGuestMAC,
+		Mtu:    mtu,
+		IPAddresses: []*agentpb.IPAddress{
+			{Family: agentpb.IPFamily_v4, Address: actorVethIP, Mask: "30"},
+		},
+	}); err != nil {
+		return err
+	}
+	if err := ac.UpdateRoutes(ctx, []*agentpb.Route{
+		{Dest: actorVethSubnet, Device: actorVethName, Scope: uint32(unix.RT_SCOPE_LINK), Family: agentpb.IPFamily_v4},
+		{Dest: "", Gateway: actorVethGateway, Device: actorVethName, Family: agentpb.IPFamily_v4},
+	}); err != nil {
+		return err
+	}
+	return ac.AddARPNeighbors(ctx, []*agentpb.ARPNeighbor{{
+		ToIPAddress: &agentpb.IPAddress{Family: agentpb.IPFamily_v4, Address: actorVethGateway},
+		Device:      actorVethName,
+		Lladdr:      hostVethMAC,
+		State:       0x80, // NUD_PERMANENT
+	}})
 }
 
 // waitForFile polls for path to exist, up to d. Used to wait for the kata-agent
