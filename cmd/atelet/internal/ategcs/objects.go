@@ -17,12 +17,15 @@ package ategcs
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
+	"time"
 
 	"github.com/klauspost/compress/zstd"
 	"go.opentelemetry.io/otel"
@@ -99,43 +102,67 @@ func SendLocalFileToGCSWithZstd(ctx context.Context, client ObjectStorage, gsURL
 	return nil
 }
 
+// compressResult reports the compress goroutine's outcome to the uploader.
+type compressResult struct {
+	inBytes int64         // uncompressed bytes read from the source
+	dur     time.Duration // compress wall-clock (to last byte compressed)
+	err     error
+}
+
+// sendToGCSWithZstd zstd-compresses content and uploads it to gsURL, STREAMING the
+// compressed bytes straight into the GCS upload via an io.Pipe so compression and
+// upload OVERLAP (no compress-fully-to-temp-then-upload serialization, no temp file).
+//
+// The snapshot memory-ranges is the large object here (the whole guest RAM image,
+// mostly zero where the balloon punched holes), and it is on the SUSPEND critical
+// path, so we compress with SpeedFastest across all CPUs — high-ratio levels scan
+// the multi-GiB image far slower for little size gain on near-zero data, and the
+// decoder auto-detects the level so restore + older snapshots are unaffected.
+//
+// Logs the compress wall-clock vs the total: total≈compress => compress-bound;
+// total>>compress => upload-bound.
 func sendToGCSWithZstd(ctx context.Context, client ObjectStorage, gsURL string, content io.Reader) (err error) {
 	bucket, object, err := parseGCSURL(gsURL)
 	if err != nil {
 		return fmt.Errorf("while parsing URL: %w", err)
 	}
 
-	// Create a temporary file to store compressed data
-	tmpFile, err := os.CreateTemp("", "substrate-upload-compress-")
-	if err != nil {
-		return fmt.Errorf("while creating temp compress file: %w", err)
-	}
-	defer os.Remove(tmpFile.Name())
-	defer tmpFile.Close()
+	tStart := time.Now()
+	pr, pw := io.Pipe()
+	resCh := make(chan compressResult, 1)
+	go func() {
+		t0 := time.Now()
+		zw, zerr := zstd.NewWriter(pw,
+			zstd.WithEncoderLevel(zstd.SpeedFastest),
+			zstd.WithEncoderConcurrency(runtime.GOMAXPROCS(0)))
+		if zerr != nil {
+			_ = pw.CloseWithError(zerr)
+			resCh <- compressResult{err: zerr}
+			return
+		}
+		n, cerr := io.Copy(zw, content)
+		if cerr == nil {
+			cerr = zw.Close()
+		} else {
+			_ = zw.Close()
+		}
+		// CloseWithError(nil) == Close() => normal EOF for the reader (uploader).
+		_ = pw.CloseWithError(cerr)
+		resCh <- compressResult{inBytes: n, dur: time.Since(t0), err: cerr}
+	}()
 
-	zwc, err := zstd.NewWriter(tmpFile)
-	if err != nil {
-		return fmt.Errorf("while creating zstd writer: %w", err)
+	putErr := client.PutObject(ctx, bucket, object, pr)
+	if putErr != nil {
+		// Unblock the compress goroutine if the uploader stopped reading.
+		_ = pr.CloseWithError(putErr)
 	}
-
-	_, err = io.Copy(zwc, content)
-	if err != nil {
-		zwc.Close()
-		return fmt.Errorf("while compressing data to temp file: %w", err)
+	res := <-resCh
+	if err := errors.Join(res.err, putErr); err != nil {
+		return fmt.Errorf("while streaming compressed object %q: %w", object, err)
 	}
-	if err := zwc.Close(); err != nil {
-		return fmt.Errorf("while closing zstd writer: %w", err)
-	}
-
-	// Seek back to the beginning of the temp file
-	if _, err := tmpFile.Seek(0, 0); err != nil {
-		return fmt.Errorf("while seeking temp file: %w", err)
-	}
-
-	// Upload the seekable temp file
-	if err := client.PutObject(ctx, bucket, object, tmpFile); err != nil {
-		return fmt.Errorf("while putting object: %w", err)
-	}
+	slog.InfoContext(ctx, "Streamed zstd upload",
+		slog.String("object", object), slog.Int64("in_bytes", res.inBytes),
+		slog.Duration("compress", res.dur), slog.Duration("total", time.Since(tStart)))
 	return nil
 }
 
