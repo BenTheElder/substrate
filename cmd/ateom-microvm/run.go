@@ -1271,20 +1271,32 @@ func (s *AteomService) restoreWorkloadBlkRootfs(ctx context.Context, req *ateomp
 		return nil, fmt.Errorf("while creating VM dir: %w", err)
 	}
 
-	// The /dev/vdb backing file must exist at the path the snapshot references (the
-	// actor dir). reset-to-golden (Phase 3): if a golden template exists, recreate
-	// the disk from it verbatim — byte-identical to the golden snapshot's disk (so
-	// the guest's frozen ext4 cache stays consistent) while discarding the actor's
-	// later rootfs writes. Otherwise reopen the live disk (Phase 2 continuity).
+	// Recreate the /dev/vdb backing file the snapshot references (the actor dir),
+	// reset-to-golden. Two ways, both byte-consistent with the golden snapshot's
+	// guest ext4 cache:
+	//   - same-node: a verbatim golden template (copyDiskFile) — guaranteed identical.
+	//   - cross-node: rebuild from the OCI image atelet unpacked to the bundle at
+	//     restore (mkfs.ext4 -d is LAYOUT-deterministic for identical inputs, so the
+	//     data blocks land at the same offsets the guest cache expects; only the
+	//     superblock UUID/timestamps differ, which are cached in RAM and not re-read).
+	// Either way the actor's prior rootfs writes are discarded (gVisor semantics).
+	containers := req.GetSpec().GetContainers()
+	if len(containers) != 1 {
+		return nil, status.Errorf(codes.Unimplemented, "ateom-microvm supports exactly one container, got %d", len(containers))
+	}
 	actorDir := ateompath.ActorPath(ns, name, id)
 	diskPath := filepath.Join(actorDir, actorRootfsDiskName)
 	if tmpl := filepath.Join(actorDir, goldenRootfsDiskName); !fileMissing(tmpl) {
 		if err := copyDiskFile(ctx, tmpl, diskPath); err != nil {
-			return nil, fmt.Errorf("while resetting rootfs disk to golden: %w", err)
+			return nil, fmt.Errorf("while resetting rootfs disk to golden (template): %w", err)
 		}
-		slog.InfoContext(ctx, "Reset actor rootfs disk to golden", slog.String("id", id))
-	} else if _, err := os.Stat(diskPath); err != nil {
-		return nil, fmt.Errorf("actor rootfs disk %q missing and no golden template: %w", diskPath, err)
+		slog.InfoContext(ctx, "Reset actor rootfs disk to golden (template)", slog.String("id", id))
+	} else {
+		bundleRootfs := filepath.Join(ateompath.OCIBundlePath(ns, name, id, containers[0].GetName()), "rootfs")
+		if err := kata.BuildExt4Image(ctx, bundleRootfs, diskPath, actorRootfsSizeMiB); err != nil {
+			return nil, fmt.Errorf("while reconstructing rootfs disk from image: %w", err)
+		}
+		slog.InfoContext(ctx, "Reconstructed actor rootfs disk from image", slog.String("id", id))
 	}
 
 	// Networking: rebuild the per-activation veth + tap; the snapshot's virtio-net
@@ -1376,6 +1388,15 @@ func rewriteSnapshotSocketPaths(snapshotDir, id string) error {
 	}
 	if vsock, ok := cfg["vsock"].(map[string]any); ok {
 		vsock["socket"] = kata.VsockSocketPath(id)
+	}
+	// The owned-boot path captures the guest serial console to a file under the
+	// source actor's VMDir (Serial{Mode:"File"}). On restore that path is stale
+	// (points at the golden/source pod's VMDir), so CH's CreateConsoleDevice fails
+	// (No such file or directory). Repoint it at this actor's VMDir.
+	if serial, ok := cfg["serial"].(map[string]any); ok {
+		if mode, _ := serial["mode"].(string); mode == "File" {
+			serial["file"] = filepath.Join(kata.VMDir(id), "serial.log")
+		}
 	}
 	out, err := json.Marshal(cfg)
 	if err != nil {
