@@ -148,6 +148,54 @@ func (c *Client) RestoreWithNetFDs(ctx context.Context, sourceDir string, nets [
 	return nil
 }
 
+// AddNetWithFDs hotplugs a virtio-net device into a freshly-created (pre-boot or
+// running) VM, passing the tap FDs via SCM_RIGHTS — the boot-path analog of
+// RestoreWithNetFDs. kata adds net this way between vm.create and vm.boot
+// (clh.go vmAddNetPut). mac may be empty (CH assigns one); numQueues should be
+// 2*queuePairs (rx+tx) and len(fds) == queuePairs.
+func (c *Client) AddNetWithFDs(ctx context.Context, mac string, numQueues int, fds []int) error {
+	cfg := struct {
+		Mac       string `json:"mac,omitempty"`
+		NumQueues int    `json:"num_queues,omitempty"`
+		NumFDs    int    `json:"num_fds,omitempty"`
+	}{Mac: mac, NumQueues: numQueues, NumFDs: len(fds)}
+	body, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	raddr, err := net.ResolveUnixAddr("unix", c.apiSocket)
+	if err != nil {
+		return err
+	}
+	conn, err := net.DialUnix("unix", nil, raddr)
+	if err != nil {
+		return fmt.Errorf("dialing api-socket: %w", err)
+	}
+	defer conn.Close()
+	if dl, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(dl)
+	} else {
+		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	}
+	req := fmt.Sprintf("PUT /api/v1/vm.add-net HTTP/1.1\r\nHost: localhost\r\nAccept: */*\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(body), body)
+	var oob []byte
+	if len(fds) > 0 {
+		oob = unix.UnixRights(fds...)
+	}
+	if _, _, err := conn.WriteMsgUnix([]byte(req), oob, nil); err != nil {
+		return fmt.Errorf("sending vm.add-net with fds: %w", err)
+	}
+	status, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("reading vm.add-net response: %w", err)
+	}
+	parts := strings.SplitN(strings.TrimSpace(status), " ", 3)
+	if len(parts) < 2 || !strings.HasPrefix(parts[1], "2") {
+		return fmt.Errorf("vm.add-net failed: %s", strings.TrimSpace(status))
+	}
+	return nil
+}
+
 // SnapshotNetDevice describes one net device found in a CH snapshot's
 // config.json. Restore must supply net_fds for every one of them.
 type SnapshotNetDevice struct {
