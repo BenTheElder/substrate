@@ -17,6 +17,7 @@ package ategcs
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -221,12 +222,85 @@ func fetchFromGCSWithZstd(ctx context.Context, client ObjectStorage, gsURL strin
 	}
 	defer zrc.Close()
 
-	_, err = io.Copy(out, zrc)
-	if err != nil {
+	// Write SPARSE when the destination is a regular file. A guest memory-ranges
+	// image is mostly zero (free / un-faulted RAM), so a plain io.Copy materializes a
+	// DENSE multi-GiB file — and writing those zeros to disk is the dominant cost of
+	// resume (the mirror of the upload bug fixed in the compress->upload streaming).
+	// Skipping zero blocks (leaving holes) cuts the write to ~the resident set, makes
+	// the on-disk file sparse like the snapshot itself (so OnDemand mmap/restore and
+	// the blk path's MergeSparseOverlay base-copy only touch real data), and is
+	// independent of guest RAM size — what matters when actors legitimately use lots
+	// of ephemeral memory. Falls back to io.Copy for non-file writers; the decoder
+	// auto-detects the zstd level (backward compatible, no format change).
+	if f, ok := out.(*os.File); ok {
+		t0 := time.Now()
+		size, written, derr := copyZstdSparse(f, zrc)
+		if derr != nil {
+			return fmt.Errorf("in sparse decompress: %w", derr)
+		}
+		slog.InfoContext(ctx, "Sparse zstd download",
+			slog.Int64("size", size), slog.Int64("written", written), slog.Duration("took", time.Since(t0)))
+		return nil
+	}
+	if _, err = io.Copy(out, zrc); err != nil {
 		return fmt.Errorf("in io.Copy: %w", err)
 	}
 
 	return nil
+}
+
+// copyZstdSparse copies src into dst skipping all-zero blocks, so dst becomes a
+// sparse file (the skipped regions are holes). Returns the logical size (total bytes
+// consumed from src) and the bytes actually written (non-zero). dst is truncated to
+// the logical size at the end so trailing zero regions become a hole and the file
+// size is exact. dst must be a fresh/truncated regular file opened for writing.
+func copyZstdSparse(dst *os.File, src io.Reader) (size int64, written int64, err error) {
+	// 64KiB blocks: a multiple of the 4KiB fs block (so skipped runs align to whole
+	// hole-able blocks) while keeping the zero-scan + WriteAt syscall count modest.
+	const block = 64 << 10
+	buf := make([]byte, block)
+	var pos int64
+	for {
+		n, rerr := io.ReadFull(src, buf)
+		if n > 0 {
+			chunk := buf[:n]
+			if !allZero(chunk) {
+				if _, werr := dst.WriteAt(chunk, pos); werr != nil {
+					return 0, 0, werr
+				}
+				written += int64(n)
+			}
+			pos += int64(n)
+		}
+		if rerr == io.EOF || rerr == io.ErrUnexpectedEOF {
+			break
+		}
+		if rerr != nil {
+			return 0, 0, rerr
+		}
+	}
+	// Materialize the exact logical size: extends past the last written byte with a
+	// hole when the tail was zero (skipped), and is a no-op otherwise.
+	if terr := dst.Truncate(pos); terr != nil {
+		return 0, 0, terr
+	}
+	return pos, written, nil
+}
+
+// allZero reports whether b is all zero bytes, checking 8 bytes at a time.
+func allZero(b []byte) bool {
+	i := 0
+	for ; i+8 <= len(b); i += 8 {
+		if binary.LittleEndian.Uint64(b[i:]) != 0 {
+			return false
+		}
+	}
+	for ; i < len(b); i++ {
+		if b[i] != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func parseGCSURL(gsURL string) (string, string, error) {
