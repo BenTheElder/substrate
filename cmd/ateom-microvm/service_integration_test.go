@@ -379,6 +379,133 @@ func TestServiceCheckpointRestoreBlkRootfs(t *testing.T) {
 	t.Logf("Phase 2 OK: memory-only snapshot + restore with in-RAM continuity (sentinel survived): %q", strings.TrimSpace(got))
 }
 
+// TestServiceResetToGoldenBlkRootfs proves Phase 3: reset-to-golden. From the
+// golden snapshot, each restore recreates /dev/vdb byte-identical to the golden
+// disk template, so an actor's rootfs writes do NOT persist into the next
+// activation, while in-RAM state from the golden snapshot DOES. Two restores from
+// the same golden snapshot: restore#1 writes a disk sentinel (runtime); restore#2
+// must NOT see it (disk reset), while the RAM sentinel survives both.
+func TestServiceResetToGoldenBlkRootfs(t *testing.T) {
+	if os.Getenv("KATA_INTEGRATION") != "1" {
+		t.Skip("set KATA_INTEGRATION=1 to run (requires kata + /dev/kvm + root + e2fsprogs)")
+	}
+	rootfsSrc := os.Getenv("KATA_ROOTFS_SRC")
+	kernel, image, cfg := os.Getenv("KATA_KERNEL"), os.Getenv("KATA_IMAGE"), os.Getenv("KATA_CONFIG")
+	if rootfsSrc == "" || kernel == "" || image == "" || cfg == "" {
+		t.Fatal("KATA_ROOTFS_SRC, KATA_KERNEL, KATA_IMAGE, KATA_CONFIG are required")
+	}
+	shim := envOrTest("KATA_SHIM", "/opt/kata/bin/containerd-shim-kata-v2")
+	chBin := envOrTest("KATA_CH", "/usr/local/bin/cloud-hypervisor")
+	vfsdBin := envOrTest("KATA_VIRTIOFSD", "/usr/local/bin/virtiofsd-patched")
+	t.Setenv("ATEOM_VIRTIO_BLK_ROOTFS", "1")
+
+	ns, name := "default", "e2e-blkrtg"
+	id := fmt.Sprintf("ateomchv-blkrtg-%d", os.Getpid())
+	container := "app"
+
+	bundle := ateompath.OCIBundlePath(ns, name, id, container)
+	if err := os.MkdirAll(filepath.Join(bundle, "rootfs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("cp", "-a", rootfsSrc+"/.", filepath.Join(bundle, "rootfs")+"/").CombinedOutput(); err != nil {
+		t.Fatalf("copying rootfs: %v: %s", err, out)
+	}
+	writeMinimalGvisorStyleSpec(t, bundle)
+
+	podUID := "testpod-blkrtg"
+	_ = netns.DeleteNamed(ateompath.AteomNetNSName(podUID))
+	interiorNetNS, err := createNetNSWithoutSwitching(ateompath.AteomNetNSName(podUID))
+	if err != nil {
+		t.Fatalf("creating interior netns: %v", err)
+	}
+	svc := NewService(podUID, shim, chBin, vfsdBin, "", "default", true, interiorNetNS)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+	t.Cleanup(func() {
+		cctx, c := context.WithTimeout(context.Background(), 20*time.Second)
+		svc.teardownActor(cctx, id, svc.running[id], nil)
+		c()
+		_ = os.RemoveAll(ateompath.ActorPath(ns, name, id))
+		_ = os.RemoveAll(kata.VMDir(id))
+		_ = interiorNetNS.Close()
+		_ = netns.DeleteNamed(ateompath.AteomNetNSName(podUID))
+	})
+
+	assets := map[string]string{assetKernel: kernel, assetImage: image, assetConfig: cfg, assetCH: chBin}
+	runReq := &ateompb.RunWorkloadRequest{
+		ActorTemplateNamespace: ns, ActorTemplateName: name, ActorId: id,
+		Spec:              &ateompb.WorkloadSpec{Containers: []*ateompb.Container{{Name: container}}},
+		RuntimeAssetPaths: assets,
+	}
+	restoreReq := &ateompb.RestoreWorkloadRequest{
+		ActorTemplateNamespace: ns, ActorTemplateName: name, ActorId: id,
+		Spec:              &ateompb.WorkloadSpec{Containers: []*ateompb.Container{{Name: container}}},
+		RuntimeAssetPaths: assets,
+	}
+	vsock := kata.VsockSocketPath(id)
+	const ramSentinel = "RAM_GOLDEN_OK_7777"
+	rootfsDir := "/run/kata-containers/" + id + "/rootfs"
+	const diskSentinel = "DISK_WRITE_SHOULD_RESET_9999"
+
+	// --- Golden: run, plant an in-RAM sentinel, checkpoint (saves golden snapshot
+	// + golden disk template), tear down. ---
+	if _, err := svc.RunWorkload(ctx, runReq); err != nil {
+		t.Fatalf("RunWorkload: %v", err)
+	}
+	_ = kata.DebugConsoleDump(ctx, vsock, "echo "+ramSentinel+" > /run/ram-sentinel; sync")
+	if _, err := svc.CheckpointWorkload(ctx, &ateompb.CheckpointWorkloadRequest{
+		ActorTemplateNamespace: ns, ActorTemplateName: name, ActorId: id,
+		Spec: &ateompb.WorkloadSpec{Containers: []*ateompb.Container{{Name: container}}},
+	}); err != nil {
+		t.Fatalf("CheckpointWorkload: %v", err)
+	}
+	// golden disk template must have been saved.
+	if _, err := os.Stat(filepath.Join(ateompath.ActorPath(ns, name, id), "golden-rootfs.ext4")); err != nil {
+		t.Fatalf("golden rootfs template not saved: %v", err)
+	}
+	checkpointDir := ateompath.CheckpointStateDir(ns, name, id)
+	restoreDir := ateompath.RestoreStateDir(ns, name, id)
+	if err := os.MkdirAll(restoreDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("cp", "-a", checkpointDir+"/.", restoreDir+"/").CombinedOutput(); err != nil {
+		t.Fatalf("shipping snapshot: %v: %s", err, out)
+	}
+	t.Log("golden checkpoint OK (snapshot + golden disk template saved)")
+
+	// --- Restore #1: disk reset from golden template; write a disk sentinel at
+	// runtime, confirm it lands, then tear down (discard). ---
+	if _, err := svc.RestoreWorkload(ctx, restoreReq); err != nil {
+		t.Fatalf("RestoreWorkload #1: %v", err)
+	}
+	if got := kata.DebugConsoleDump(ctx, vsock, "cat /run/ram-sentinel"); !strings.Contains(got, ramSentinel) {
+		t.Fatalf("restore#1 RAM continuity failed: %q", got)
+	}
+	_ = kata.DebugConsoleDump(ctx, vsock, "echo "+diskSentinel+" > "+rootfsDir+"/disk-sentinel; sync")
+	if got := kata.DebugConsoleDump(ctx, vsock, "cat "+rootfsDir+"/disk-sentinel"); !strings.Contains(got, diskSentinel) {
+		t.Fatalf("restore#1 disk sentinel did not land: %q", got)
+	}
+	t.Log("restore#1 OK: RAM sentinel present, disk sentinel written")
+	tdCtx, tdCancel := context.WithTimeout(ctx, 20*time.Second)
+	svc.teardownActor(tdCtx, id, svc.running[id], ch.NewClient(filepath.Join(kata.VMDir(id), "clh-api-restore.sock")))
+	tdCancel()
+	delete(svc.running, id)
+
+	// --- Restore #2: disk reset AGAIN from golden template — the disk sentinel
+	// from restore#1 must be GONE, while the golden RAM sentinel still survives. ---
+	if _, err := svc.RestoreWorkload(ctx, restoreReq); err != nil {
+		t.Fatalf("RestoreWorkload #2: %v", err)
+	}
+	if got := kata.DebugConsoleDump(ctx, vsock, "cat /run/ram-sentinel"); !strings.Contains(got, ramSentinel) {
+		t.Fatalf("restore#2 RAM continuity failed: %q", got)
+	}
+	got := kata.DebugConsoleDump(ctx, vsock, "cat "+rootfsDir+"/disk-sentinel 2>&1; echo END")
+	if strings.Contains(got, diskSentinel) {
+		t.Fatalf("reset-to-golden FAILED: disk sentinel persisted after restore#2: %q", got)
+	}
+	t.Logf("Phase 3 OK: reset-to-golden discarded the rootfs write (disk sentinel gone) while RAM continuity held: %q", strings.TrimSpace(got))
+}
+
 func lastLines(s string, n int) string {
 	lines := []string{}
 	start := 0

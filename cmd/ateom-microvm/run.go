@@ -107,6 +107,33 @@ const actorRootfsSizeMiB = 512
 // reopened verbatim on restore.
 const actorRootfsDiskName = "actor-rootfs.ext4"
 
+// goldenRootfsDiskName is the verbatim copy of the actor's /dev/vdb disk AS-OF the
+// golden snapshot, kept under the actor dir. reset-to-golden recreates /dev/vdb
+// from it on restore (byte-identical to what the snapshot's guest RAM/ext4 cache
+// expects), discarding the actor's later rootfs writes — gVisor semantics.
+const goldenRootfsDiskName = "golden-rootfs.ext4"
+
+// fileMissing reports whether path does not exist.
+func fileMissing(path string) bool {
+	_, err := os.Stat(path)
+	return os.IsNotExist(err)
+}
+
+// copyDiskFile copies a (sparse) disk image verbatim, preserving holes so the
+// 512MiB ext4 image doesn't materialize its empty blocks. Used to save/restore the
+// golden rootfs disk template.
+func copyDiskFile(ctx context.Context, src, dst string) error {
+	tmp := dst + ".tmp"
+	_ = os.Remove(tmp)
+	if out, err := exec.CommandContext(ctx, "cp", "--sparse=always", src, tmp).CombinedOutput(); err != nil {
+		return fmt.Errorf("cp %s -> %s: %w: %s", src, tmp, err, out)
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		return fmt.Errorf("rename %s -> %s: %w", tmp, dst, err)
+	}
+	return nil
+}
+
 // blkRootfsMode reports whether the worker runs the ateom-owned-boot virtio-blk
 // rootfs path (ateom boots CH itself; actor rootfs on a writable /dev/vdb). It
 // gates Run/Checkpoint/Restore so the proven kata-shim path stays the default.
@@ -889,6 +916,24 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 	}
 	dSnapshot := time.Since(tSnapshot)
 
+	// reset-to-golden support (owned-boot): save the actor's /dev/vdb AS-OF this
+	// (paused, consistent) snapshot as a verbatim golden template, so future
+	// restores can recreate the disk byte-identical to what the snapshot's guest RAM
+	// expects while discarding the actor's later rootfs writes. Saved once (the
+	// first/golden checkpoint) and kept; best-effort (without it, restore reopens the
+	// live disk = Phase 2 continuity). TODO: ship the template with the snapshot for
+	// cross-node restore (it's golden, shipped once per template, like the OCI base).
+	if blkRootfsMode() {
+		actorDir := ateompath.ActorPath(ns, name, id)
+		if tmpl := filepath.Join(actorDir, goldenRootfsDiskName); fileMissing(tmpl) {
+			if cerr := copyDiskFile(ctx, filepath.Join(actorDir, actorRootfsDiskName), tmpl); cerr != nil {
+				slog.WarnContext(ctx, "Failed to save golden rootfs template; restore will reopen live disk", slog.Any("err", cerr))
+			} else {
+				slog.InfoContext(ctx, "Saved golden rootfs disk template", slog.String("id", id))
+			}
+		}
+	}
+
 	// Report exactly the files we wrote so atelet ships precisely the CH snapshot
 	// (config.json + state.json + memory-ranges + base-id), not gVisor's fixed set.
 	// Memory-only: the RO base is reconstructed from the OCI image at restore.
@@ -1226,12 +1271,20 @@ func (s *AteomService) restoreWorkloadBlkRootfs(ctx context.Context, req *ateomp
 		return nil, fmt.Errorf("while creating VM dir: %w", err)
 	}
 
-	// The /dev/vdb backing file must exist at the path the snapshot references
-	// (the actor dir). Phase 2: it persists from the original run on this node.
-	// TODO(Phase 3): recreate it from the golden OCI image here (reset-to-golden).
-	diskPath := filepath.Join(ateompath.ActorPath(ns, name, id), actorRootfsDiskName)
-	if _, err := os.Stat(diskPath); err != nil {
-		return nil, fmt.Errorf("actor rootfs disk %q missing for restore: %w", diskPath, err)
+	// The /dev/vdb backing file must exist at the path the snapshot references (the
+	// actor dir). reset-to-golden (Phase 3): if a golden template exists, recreate
+	// the disk from it verbatim — byte-identical to the golden snapshot's disk (so
+	// the guest's frozen ext4 cache stays consistent) while discarding the actor's
+	// later rootfs writes. Otherwise reopen the live disk (Phase 2 continuity).
+	actorDir := ateompath.ActorPath(ns, name, id)
+	diskPath := filepath.Join(actorDir, actorRootfsDiskName)
+	if tmpl := filepath.Join(actorDir, goldenRootfsDiskName); !fileMissing(tmpl) {
+		if err := copyDiskFile(ctx, tmpl, diskPath); err != nil {
+			return nil, fmt.Errorf("while resetting rootfs disk to golden: %w", err)
+		}
+		slog.InfoContext(ctx, "Reset actor rootfs disk to golden", slog.String("id", id))
+	} else if _, err := os.Stat(diskPath); err != nil {
+		return nil, fmt.Errorf("actor rootfs disk %q missing and no golden template: %w", diskPath, err)
 	}
 
 	// Networking: rebuild the per-activation veth + tap; the snapshot's virtio-net
