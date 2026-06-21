@@ -698,6 +698,11 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 
 	restoreDir := ateompath.RestoreStateDir(ns, name, id)
 
+	// Per-step timing so we can see where the ateom-side of resume goes (the rustfs
+	// download/decompress is timed separately by atelet). Logged in one line at the end.
+	tStart := time.Now()
+	var dRecon, dNet, dVfsd, dLaunch, dRestoreCH, dResume time.Duration
+
 	// Resolve the cloud-hypervisor + virtiofsd binaries (fetched assets or flags).
 	rr, err := s.resolveRuntime(ateompath.ActorPath(ns, name, id), req.GetRuntimeAssetPaths())
 	if err != nil {
@@ -741,9 +746,11 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		return nil, status.Errorf(codes.Unimplemented, "ateom-microvm supports exactly one container, got %d", len(containers))
 	}
 	bundleRootfs := filepath.Join(ateompath.OCIBundlePath(ns, name, id, containers[0].GetName()), "rootfs")
+	tRecon := time.Now()
 	if err := kata.ReconstructSharedDirFromImage(ctx, bundleRootfs, id, srcID); err != nil {
 		return nil, fmt.Errorf("while reconstructing shared dir from image: %w", err)
 	}
+	dRecon = time.Since(tRecon)
 
 	// kata's per-sandbox runtime dir holds the sockets the snapshot references.
 	if err := os.MkdirAll(kata.VMDir(id), 0o700); err != nil {
@@ -755,6 +762,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	// fd-backed, so CH requires fresh tap FDs on restore (net_fds). The guest's
 	// frozen network config (stable actor address, gateway with a fixed MAC)
 	// remains valid as-is — no in-guest reconfiguration.
+	tNet := time.Now()
 	if err := s.setupActorNetwork(ctx); err != nil {
 		return nil, fmt.Errorf("while setting up actor network: %w", err)
 	}
@@ -789,8 +797,10 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		}
 		restoredNets = append(restoredNets, rn)
 	}
+	dNet = time.Since(tNet)
 
 	// 3. Start virtiofsd on the vhost-user socket from config.json.
+	tVfsd := time.Now()
 	vfsdCmd, err := kata.StartVirtiofsd(ctx, kata.VirtiofsdOptions{
 		Binary:     rr.virtiofsd,
 		SocketPath: kata.VirtiofsdSocketPath(id),
@@ -800,6 +810,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	if err != nil {
 		return nil, fmt.Errorf("while starting virtiofsd: %w", err)
 	}
+	dVfsd = time.Since(tVfsd)
 	defer func() {
 		if retErr != nil && vfsdCmd.Process != nil {
 			_ = vfsdCmd.Process.Kill()
@@ -809,6 +820,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	// 4. Launch a bare VMM and restore with the tap FDs attached (SCM_RIGHTS).
 	apiSocket := filepath.Join(kata.VMDir(id), "clh-api-restore.sock")
 	slog.InfoContext(ctx, "Restoring CH from snapshot", slog.String("id", id), slog.String("dir", restoreDir))
+	tLaunch := time.Now()
 	chCmd, client, err := ch.LaunchVMM(ctx, ch.LaunchVMMOptions{
 		Binary:    rr.ch,
 		APISocket: apiSocket,
@@ -818,6 +830,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	if err != nil {
 		return nil, fmt.Errorf("while launching VMM for restore: %w", err)
 	}
+	dLaunch = time.Since(tLaunch)
 	defer func() {
 		if retErr != nil && chCmd.Process != nil {
 			_ = chCmd.Process.Kill()
@@ -826,14 +839,18 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	// Eager (copy) memory restore: ondemand can't be combined with the net-FD
 	// path (memory_restore_mode is CLI-only; net_fds are REST-only). See
 	// RestoreWithNetFDs.
+	tRestoreCH := time.Now()
 	if err := client.RestoreWithNetFDs(ctx, restoreDir, restoredNets); err != nil {
 		return nil, fmt.Errorf("while restoring VM with net FDs: %w", err)
 	}
+	dRestoreCH = time.Since(tRestoreCH)
 
 	// 5. Resume (restore comes back paused).
+	tResume := time.Now()
 	if err := client.Resume(ctx); err != nil {
 		return nil, fmt.Errorf("while resuming restored guest: %w", err)
 	}
+	dResume = time.Since(tResume)
 
 	// The snapshot carries the balloon inflated (deflate-to-margin from the
 	// pre-snapshot reclaim). Deflate it fully so the restored actor regains all its
@@ -845,7 +862,14 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	}
 
 	s.running[id] = &runningActor{chCmd: chCmd, vfsdCmd: vfsdCmd, apiSocket: apiSocket, baseID: srcID}
-	slog.InfoContext(ctx, "Actor restored", slog.String("id", id))
+	slog.InfoContext(ctx, "Actor restored", slog.String("id", id),
+		slog.Duration("recon_base", dRecon), // cp -a of the RO base image into the find-paths layout
+		slog.Duration("net", dNet),          // veth + tap + TC rebuild
+		slog.Duration("virtiofsd", dVfsd),   // spawn + wait for socket
+		slog.Duration("launch_vmm", dLaunch),
+		slog.Duration("restore_ch", dRestoreCH), // CH memory reload (RestoreWithNetFDs)
+		slog.Duration("resume", dResume),
+		slog.Duration("total", time.Since(tStart)))
 	return &ateompb.RestoreWorkloadResponse{}, nil
 }
 

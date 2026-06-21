@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"cloud.google.com/go/storage"
 	"github.com/agent-substrate/substrate/cmd/atelet/internal/ategcs"
@@ -444,10 +445,16 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 
 	checkpointDir := ateompath.RestoreStateDir(ns, tmpl, actorID)
 
+	// Per-step timing so we can attribute resume latency between the rustfs
+	// download/decompress, the OCI image unpack, and ateom's own work. Logged at the end.
+	tStart := time.Now()
+	var dDownload, dBundles, dAteom time.Duration
+
 	// The snapshot is self-describing: recover the sandbox binaries that created
 	// it from the manifest stored beside the checkpoint images (the Restore
 	// request no longer carries the sandbox config).
 	var sandboxRec *sandboxAssetsRecord
+	tDownload := time.Now()
 	switch req.GetType() {
 	case ateletpb.CheckpointType_CHECKPOINT_TYPE_EXTERNAL:
 		prefix := req.GetExternalConfig().GetSnapshotUriPrefix()
@@ -480,17 +487,20 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 	default:
 		return nil, fmt.Errorf("unexpected checkpoint type: %v", req.GetType())
 	}
+	dDownload = time.Since(tDownload)
 
 	assetPaths, err := s.ensureSandboxAssets(ctx, sandboxRec)
 	if err != nil {
 		return nil, err
 	}
 
+	tBundles := time.Now()
 	if err := s.prepareOCIBundles(ctx, ns, tmpl, actorID,
 		req.GetSpec(), req.GetTargetAteomUid(),
 	); err != nil {
 		return nil, err
 	}
+	dBundles = time.Since(tBundles)
 
 	client, err := s.dialAteom(ctx, req.GetTargetAteomUid())
 	if err != nil {
@@ -499,6 +509,7 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 
 	// Tell ateom to do runsc create + runsc restore for pause container and
 	// all application containers.
+	tAteom := time.Now()
 	if _, err := client.RestoreWorkload(ctx, &ateompb.RestoreWorkloadRequest{
 		ActorTemplateNamespace: ns,
 		ActorTemplateName:      tmpl,
@@ -509,6 +520,7 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 	}); err != nil {
 		return nil, fmt.Errorf("while calling ateom.RestoreWorkload: %w", err)
 	}
+	dAteom = time.Since(tAteom)
 
 	// Record the (manifest-pinned) sandbox binaries on-node so a subsequent
 	// Checkpoint of this restored actor can re-pin the same version.
@@ -516,6 +528,11 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 		return nil, fmt.Errorf("while recording sandbox assets: %w", err)
 	}
 
+	slog.InfoContext(ctx, "Restore timing breakdown", slog.String("actor", actorID),
+		slog.Duration("download", dDownload),   // rustfs/GCS fetch + decompress (or local copy)
+		slog.Duration("oci_unpack", dBundles),  // prepareOCIBundles: unpack the OCI image to the bundle
+		slog.Duration("ateom_restore", dAteom), // ateom.RestoreWorkload (see its own breakdown)
+		slog.Duration("total", time.Since(tStart)))
 	return &ateletpb.RestoreResponse{}, nil
 }
 
