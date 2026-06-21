@@ -85,21 +85,26 @@ func LaunchVMM(ctx context.Context, o LaunchVMMOptions) (*exec.Cmd, *Client, err
 // (the only way CH accepts net FDs on restore; mirrors ch-remote's
 // send_with_fds). The VM comes back paused; call Resume after.
 //
-// NOTE on ondemand (userfaultfd) restore: it cannot be combined with this net-FD
-// path. memory_restore_mode is only accepted on the CLI `--restore` form (CH's
-// REST RestoreConfig denies the unknown field -> HTTP 400), while net_fds can ONLY
-// be passed over the REST api-socket via SCM_RIGHTS. So fd-backed restores use
-// CH's eager (copy) memory restore; ondemand would need a CH API that accepts both
-// net_fds and memory_restore_mode (follow-on).
-func (c *Client) RestoreWithNetFDs(ctx context.Context, sourceDir string, nets []RestoredNet) error {
+// memMode selects guest-RAM restore: "" / "Copy" = eager copy (CH default), or
+// "OnDemand" = userfaultfd demand-paging. OnDemand keeps the (memfd-backed) guest
+// memory SPARSE — it only faults in the pages the guest touches, instead of eager
+// copy densifying the whole memfd — so a subsequent snapshot writes just the
+// working set (fast) instead of full RAM. Confirmed on CH v52: the REST
+// RestoreConfig accepts memory_restore_mode (enum Copy|OnDemand) alongside the
+// SCM_RIGHTS net_fds, so ondemand + fd-backed net DO compose over REST (an earlier
+// note claimed memory_restore_mode was CLI-only; that was a pre-v52 limitation).
+// NOTE: with OnDemand, CH demand-pages from the snapshot's memory file for the
+// VM's whole lifetime, so sourceDir must stay present until the actor is torn down.
+func (c *Client) RestoreWithNetFDs(ctx context.Context, sourceDir string, nets []RestoredNet, memMode string) error {
 	type restoredNetConfig struct {
 		ID     string `json:"id"`
 		NumFDs int    `json:"num_fds"`
 	}
 	cfg := struct {
-		SourceURL string              `json:"source_url"`
-		NetFDs    []restoredNetConfig `json:"net_fds,omitempty"`
-	}{SourceURL: SnapshotURL(sourceDir)}
+		SourceURL         string              `json:"source_url"`
+		MemoryRestoreMode string              `json:"memory_restore_mode,omitempty"`
+		NetFDs            []restoredNetConfig `json:"net_fds,omitempty"`
+	}{SourceURL: SnapshotURL(sourceDir), MemoryRestoreMode: memMode}
 	var fds []int
 	for _, n := range nets {
 		cfg.NetFDs = append(cfg.NetFDs, restoredNetConfig{ID: n.ID, NumFDs: len(n.FDs)})

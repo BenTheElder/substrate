@@ -1192,11 +1192,9 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 			_ = chCmd.Process.Kill()
 		}
 	}()
-	// Eager (copy) memory restore: ondemand can't be combined with the net-FD
-	// path (memory_restore_mode is CLI-only; net_fds are REST-only). See
-	// RestoreWithNetFDs.
+	// Eager (copy) memory restore for the legacy virtio-fs path (unchanged).
 	tRestoreCH := time.Now()
-	if err := client.RestoreWithNetFDs(ctx, restoreDir, restoredNets); err != nil {
+	if err := client.RestoreWithNetFDs(ctx, restoreDir, restoredNets, ""); err != nil {
 		return nil, fmt.Errorf("while restoring VM with net FDs: %w", err)
 	}
 	dRestoreCH = time.Since(tRestoreCH)
@@ -1349,7 +1347,18 @@ func (s *AteomService) restoreWorkloadBlkRootfs(ctx context.Context, req *ateomp
 			_ = chCmd.Process.Kill()
 		}
 	}()
-	if err := client.RestoreWithNetFDs(ctx, restoreDir, restoredNets); err != nil {
+	// Eager (Copy) memory restore. OnDemand (userfaultfd) was measured DRAMATICALLY
+	// faster in-cluster — restore ~75ms vs ~1.8s, and suspend-after-restore ~8ms vs
+	// ~3.5s (it keeps the memfd sparse, sidestepping the eager-copy densification).
+	// BUT it BREAKS the suspend/resume chain: CH's snapshot of an OnDemand-restored
+	// guest writes only the faulted-in pages — the un-faulted pages it was
+	// demand-paging from the source are LOST — so the new snapshot is INCOMPLETE
+	// (measured 558KB–2.4MB vs the complete 36MB) and the next restore boots a
+	// corrupt, unreachable guest. Complete snapshots need either eager restore
+	// (densified → slow suspend) or, to also shrink/speed the suspend, a guest-aware
+	// balloon reclaim before snapshot (free pages only → stays complete). Keep eager
+	// here for correctness; balloon-reclaim-on-blk is the perf follow-up.
+	if err := client.RestoreWithNetFDs(ctx, restoreDir, restoredNets, ""); err != nil {
 		return nil, fmt.Errorf("while restoring VM with net FDs: %w", err)
 	}
 	if err := client.Resume(ctx); err != nil {
