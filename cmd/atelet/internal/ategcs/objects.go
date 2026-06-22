@@ -129,20 +129,37 @@ func sendToGCSWithZstd(ctx context.Context, client ObjectStorage, gsURL string, 
 	defer os.Remove(tmpFile.Name())
 	defer tmpFile.Close()
 
-	zw, err := zstd.NewWriter(tmpFile,
-		zstd.WithEncoderLevel(zstd.SpeedFastest),
-		zstd.WithEncoderConcurrency(runtime.GOMAXPROCS(0)))
-	if err != nil {
-		return fmt.Errorf("while creating zstd writer: %w", err)
-	}
 	t0 := time.Now()
-	inBytes, err := io.Copy(zw, content)
-	if err != nil {
-		zw.Close()
-		return fmt.Errorf("while compressing data to temp file: %w", err)
-	}
-	if err := zw.Close(); err != nil {
-		return fmt.Errorf("while closing zstd writer: %w", err)
+	var logical, dataBytes int64
+	sparse := false
+	if f, ok := content.(*os.File); ok {
+		// Sparse-extent format: compress ONLY the populated extents (skip the holes).
+		// The memory-ranges image is mostly holes (free guest RAM), so this cuts the
+		// compress from scanning the whole logical image to scanning the resident set.
+		// readers auto-detect this via the magic header (older plain-zstd snapshots
+		// still restore). See writeSparseZstd.
+		logical, dataBytes, err = writeSparseZstd(tmpFile, f)
+		if err != nil {
+			return fmt.Errorf("while sparse-compressing %q: %w", object, err)
+		}
+		sparse = true
+	} else {
+		// Non-file reader (no holes to exploit): plain zstd stream.
+		zw, zerr := zstd.NewWriter(tmpFile,
+			zstd.WithEncoderLevel(zstd.SpeedFastest),
+			zstd.WithEncoderConcurrency(runtime.GOMAXPROCS(0)))
+		if zerr != nil {
+			return fmt.Errorf("while creating zstd writer: %w", zerr)
+		}
+		logical, err = io.Copy(zw, content)
+		if err != nil {
+			zw.Close()
+			return fmt.Errorf("while compressing data to temp file: %w", err)
+		}
+		if err := zw.Close(); err != nil {
+			return fmt.Errorf("while closing zstd writer: %w", err)
+		}
+		dataBytes = logical
 	}
 	dCompress := time.Since(t0)
 
@@ -153,7 +170,8 @@ func sendToGCSWithZstd(ctx context.Context, client ObjectStorage, gsURL string, 
 		return fmt.Errorf("while putting object %q: %w", object, err)
 	}
 	slog.InfoContext(ctx, "Compressed zstd upload",
-		slog.String("object", object), slog.Int64("in_bytes", inBytes),
+		slog.String("object", object), slog.Bool("sparse", sparse),
+		slog.Int64("logical", logical), slog.Int64("data", dataBytes),
 		slog.Duration("compress", dCompress), slog.Duration("total", time.Since(tStart)))
 	return nil
 }
@@ -207,29 +225,46 @@ func fetchFromGCSWithZstd(ctx context.Context, client ObjectStorage, gsURL strin
 		}
 	}()
 
-	zrc, err := zstd.NewReader(rc, zstd.WithDecoderConcurrency(1))
+	// Peek the first bytes to pick the decode path: the sparse-extent format starts
+	// with sparseMagic; anything else is a plain zstd stream (older snapshots, or the
+	// non-file upload path). This keeps restore backward-compatible with snapshots
+	// written before the sparse-extent format.
+	magic := make([]byte, len(sparseMagic))
+	n, rerr := io.ReadFull(rc, magic)
+	if rerr == nil && string(magic) == sparseMagic {
+		f, ok := out.(*os.File)
+		if !ok {
+			return fmt.Errorf("sparse-extent snapshot requires a file destination, got %T", out)
+		}
+		t0 := time.Now()
+		size, derr := readSparseZstd(f, rc) // rc is positioned just after the magic
+		if derr != nil {
+			return fmt.Errorf("in sparse-extent decode: %w", derr)
+		}
+		slog.InfoContext(ctx, "Sparse-extent zstd download",
+			slog.Int64("size", size), slog.Duration("took", time.Since(t0)))
+		return nil
+	}
+	if rerr != nil && rerr != io.EOF && rerr != io.ErrUnexpectedEOF {
+		return fmt.Errorf("while reading object header: %w", rerr)
+	}
+
+	// Plain zstd stream: put back the bytes we peeked, then decompress. Write SPARSE
+	// when the destination is a file (skip zero blocks → holes) so we only write the
+	// resident set, not a dense multi-GiB image; falls back to io.Copy otherwise.
+	src := io.MultiReader(bytes.NewReader(magic[:n]), rc)
+	zrc, err := zstd.NewReader(src, zstd.WithDecoderConcurrency(1))
 	if err != nil {
 		return fmt.Errorf("in zstd.NewReader: %w", err)
 	}
 	defer zrc.Close()
-
-	// Write SPARSE when the destination is a regular file. A guest memory-ranges
-	// image is mostly zero (free / un-faulted RAM), so a plain io.Copy materializes a
-	// DENSE multi-GiB file — and writing those zeros to disk is the dominant cost of
-	// resume (the mirror of the upload bug fixed in the compress->upload streaming).
-	// Skipping zero blocks (leaving holes) cuts the write to ~the resident set, makes
-	// the on-disk file sparse like the snapshot itself (so OnDemand mmap/restore and
-	// the blk path's MergeSparseOverlay base-copy only touch real data), and is
-	// independent of guest RAM size — what matters when actors legitimately use lots
-	// of ephemeral memory. Falls back to io.Copy for non-file writers; the decoder
-	// auto-detects the zstd level (backward compatible, no format change).
 	if f, ok := out.(*os.File); ok {
 		t0 := time.Now()
 		size, written, derr := copyZstdSparse(f, zrc)
 		if derr != nil {
 			return fmt.Errorf("in sparse decompress: %w", derr)
 		}
-		slog.InfoContext(ctx, "Sparse zstd download",
+		slog.InfoContext(ctx, "Sparse zstd download (plain)",
 			slog.Int64("size", size), slog.Int64("written", written), slog.Duration("took", time.Since(t0)))
 		return nil
 	}

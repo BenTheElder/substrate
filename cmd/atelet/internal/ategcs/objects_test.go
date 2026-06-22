@@ -16,11 +16,186 @@ package ategcs
 
 import (
 	"bytes"
+	"context"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
 )
+
+// memStore is an in-memory ObjectStorage for round-trip tests.
+type memStore struct{ m map[string][]byte }
+
+func newMemStore() *memStore { return &memStore{m: map[string][]byte{}} }
+
+func (s *memStore) PutObject(_ context.Context, bucket, object string, r io.Reader) error {
+	b, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	s.m[bucket+"/"+object] = b
+	return nil
+}
+
+func (s *memStore) GetObject(_ context.Context, bucket, object string) (io.ReadCloser, error) {
+	b, ok := s.m[bucket+"/"+object]
+	if !ok {
+		return nil, fmt.Errorf("object %q/%q not found", bucket, object)
+	}
+	return io.NopCloser(bytes.NewReader(b)), nil
+}
+
+// TestSparseUploadDownloadRoundTrip drives the real upload+download entry points
+// through an in-memory store: a genuinely sparse source file (multiple data extents
+// separated by holes) must upload in the sparse-extent format (magic) and download
+// byte-exact AND sparse on disk. This is the guest memory image, so correctness is
+// non-negotiable.
+func TestSparseUploadDownloadRoundTrip(t *testing.T) {
+	const size = 8 << 20 // 8 MiB logical
+	want := make([]byte, size)
+	// Three populated extents at varied offsets/sizes (aligned + unaligned), the
+	// rest holes — mirrors scattered resident pages in free RAM.
+	fill := func(start, n int) {
+		for i := start; i < start+n; i++ {
+			want[i] = byte((i*7)%251 + 1) // never zero
+		}
+	}
+	fill(0, 4096)             // first page
+	fill(2<<20, 70000)        // interior, crosses 64KiB boundaries
+	fill(size-9000, 5000)     // near end, leaving a trailing hole
+
+	// Write the source as a genuinely sparse file (holes between the extents).
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "memory-ranges")
+	src, err := os.Create(srcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := src.Truncate(size); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range [][2]int{{0, 4096}, {2 << 20, 70000}, {size - 9000, 5000}} {
+		if _, err := src.WriteAt(want[e[0]:e[0]+e[1]], int64(e[0])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	src.Close()
+
+	store := newMemStore()
+	ctx := context.Background()
+	const gsURL = "gs://bucket/snap/memory-ranges.zstd"
+	if err := SendLocalFileToGCSWithZstd(ctx, store, gsURL, srcPath); err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	// The stored object must use the sparse-extent format (magic header).
+	stored := store.m["bucket/snap/memory-ranges.zstd"]
+	if len(stored) < len(sparseMagic) || string(stored[:len(sparseMagic)]) != sparseMagic {
+		t.Fatalf("stored object is not sparse-extent format (magic=%q)", stored[:min(len(stored), len(sparseMagic))])
+	}
+	// The compressed object must be far smaller than the logical size (holes skipped).
+	if int64(len(stored)) >= size/2 {
+		t.Errorf("stored %d bytes; expected far less than logical %d (holes not skipped)", len(stored), size)
+	}
+
+	dstPath := filepath.Join(dir, "restored")
+	if err := FetchLocalFileFromGCSWithZstd(ctx, store, gsURL, dstPath); err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	got, err := os.ReadFile(dstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("round-trip mismatch: len(got)=%d len(want)=%d", len(got), len(want))
+	}
+	if fi, err := os.Stat(dstPath); err == nil {
+		if blk := diskBlocks(fi); blk > 0 {
+			t.Logf("restored sparse: apparent=%d actual=%d", size, blk*512)
+			if blk*512 >= int64(size) {
+				t.Logf("note: restored file not sparse on this fs — correctness still holds")
+			}
+		}
+	}
+}
+
+// TestWriteSparseZstdSkipsHoles asserts the encoder feeds ONLY the populated
+// extents to zstd (not the whole logical image). Gated on the fs actually reporting
+// the source as sparse (ext4/Linux does; macOS/APFS in CI dev may not — skipped there).
+func TestWriteSparseZstdSkipsHoles(t *testing.T) {
+	const size = 8 << 20
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "memory-ranges")
+	src, err := os.Create(srcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := src.Truncate(size); err != nil {
+		t.Fatal(err)
+	}
+	data := make([]byte, 70000)
+	for i := range data {
+		data[i] = byte(i%251 + 1)
+	}
+	if _, err := src.WriteAt(data, 2<<20); err != nil { // one ~70KB extent in a sea of holes
+		t.Fatal(err)
+	}
+	if err := src.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(srcPath); err != nil {
+		t.Fatal(err)
+	} else if blk := diskBlocks(fi); blk == 0 || blk*512 >= int64(size) {
+		t.Skipf("fs did not make the source sparse (actual=%d, logical=%d) — can't assert hole-skipping here", blk*512, size)
+	}
+	if _, err := src.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	logical, dataBytes, err := writeSparseZstd(&buf, src)
+	if err != nil {
+		t.Fatalf("writeSparseZstd: %v", err)
+	}
+	if logical != size {
+		t.Errorf("logical=%d, want %d", logical, size)
+	}
+	if dataBytes >= int64(size)/2 {
+		t.Errorf("dataBytes=%d fed to zstd; expected ~70KB (holes not skipped)", dataBytes)
+	}
+	t.Logf("fed %d data bytes for a %d logical image (holes skipped)", dataBytes, size)
+}
+
+// TestPlainZstdBackwardCompatRoundTrip drives the NON-file upload path (plain zstd,
+// no magic) and confirms the download auto-detects + restores it — i.e. snapshots
+// written before the sparse-extent format still restore.
+func TestPlainZstdBackwardCompatRoundTrip(t *testing.T) {
+	want := bytes.Repeat([]byte("agent-substrate snapshot payload\n"), 4096)
+	store := newMemStore()
+	ctx := context.Background()
+	const gsURL = "gs://bucket/snap/config.json.zstd"
+	// SendBytesToGCS is uncompressed; use sendToGCSWithZstd with a non-file reader to
+	// hit the plain-zstd branch (no magic).
+	if err := sendToGCSWithZstd(ctx, store, gsURL, bytes.NewReader(want)); err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	stored := store.m["bucket/snap/config.json.zstd"]
+	if len(stored) >= len(sparseMagic) && string(stored[:len(sparseMagic)]) == sparseMagic {
+		t.Fatal("non-file upload unexpectedly used the sparse-extent format")
+	}
+	dir := t.TempDir()
+	dstPath := filepath.Join(dir, "config.json")
+	if err := FetchLocalFileFromGCSWithZstd(ctx, store, gsURL, dstPath); err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	got, err := os.ReadFile(dstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("plain round-trip mismatch: len(got)=%d len(want)=%d", len(got), len(want))
+	}
+}
 
 // diskBlocks returns the number of 512-byte blocks the file occupies on disk (for
 // the sparseness check), or 0 if unavailable on this platform/fs.
