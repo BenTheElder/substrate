@@ -453,8 +453,11 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 	// The snapshot is self-describing: recover the sandbox binaries that created
 	// it from the manifest stored beside the checkpoint images (the Restore
 	// request no longer carries the sandbox config).
+	// The snapshot is self-describing: recover the sandbox binaries that created
+	// it from the manifest stored beside the checkpoint images (the Restore
+	// request no longer carries the sandbox config). Fetch the (small) manifest
+	// first — both the checkpoint download and the OCI/asset prep below need it.
 	var sandboxRec *sandboxAssetsRecord
-	tDownload := time.Now()
 	switch req.GetType() {
 	case ateletpb.CheckpointType_CHECKPOINT_TYPE_EXTERNAL:
 		prefix := req.GetExternalConfig().GetSnapshotUriPrefix()
@@ -462,45 +465,62 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 		if err != nil {
 			return nil, fmt.Errorf("while fetching snapshot manifest: %w", err)
 		}
-		sandboxRec, err = unmarshalSandboxRecord(manifest)
-		if err != nil {
-			return nil, err
-		}
-		if err := s.downloadExternalCheckpoint(ctx, prefix, checkpointDir, sandboxRec.SnapshotFiles); err != nil {
+		if sandboxRec, err = unmarshalSandboxRecord(manifest); err != nil {
 			return nil, err
 		}
 	case ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL:
-		// TODO(dberkov): the old pause checkpoint files are not deleted after they are copied to checkpointDir. This needs to be fixed in following PR.
 		localCheckpointDir := ateompath.LocalCheckpointsDir(ns, tmpl, actorID)
 		snapshotPrefix := req.GetLocalConfig().GetSnapshotPrefix()
 		manifest, err := os.ReadFile(filepath.Join(localCheckpointDir, snapshotPrefix, sandboxManifestName))
 		if err != nil {
 			return nil, fmt.Errorf("while reading local snapshot manifest: %w", err)
 		}
-		sandboxRec, err = unmarshalSandboxRecord(manifest)
-		if err != nil {
-			return nil, err
-		}
-		if err := s.copyLocalCheckpoint(ctx, snapshotPrefix, localCheckpointDir, checkpointDir, sandboxRec.SnapshotFiles); err != nil {
+		if sandboxRec, err = unmarshalSandboxRecord(manifest); err != nil {
 			return nil, err
 		}
 	default:
 		return nil, fmt.Errorf("unexpected checkpoint type: %v", req.GetType())
 	}
-	dDownload = time.Since(tDownload)
 
-	assetPaths, err := s.ensureSandboxAssets(ctx, sandboxRec)
-	if err != nil {
+	// Download the memory snapshot and prepare the sandbox assets + OCI bundle
+	// CONCURRENTLY. They are independent — only the final ateom.RestoreWorkload
+	// needs both — so overlapping the GCS download (~0.5s warm) with the asset
+	// fetch + image unpack hides whichever leg is shorter, and on a cold node
+	// (uncached assets + image, ~2.5s unpack) that overlap is large.
+	// TODO(dberkov): the old pause checkpoint files are not deleted after they are
+	// copied to checkpointDir for the LOCAL case.
+	var assetPaths map[string]string
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		t := time.Now()
+		switch req.GetType() {
+		case ateletpb.CheckpointType_CHECKPOINT_TYPE_EXTERNAL:
+			if err := s.downloadExternalCheckpoint(gctx, req.GetExternalConfig().GetSnapshotUriPrefix(), checkpointDir, sandboxRec.SnapshotFiles); err != nil {
+				return err
+			}
+		case ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL:
+			if err := s.copyLocalCheckpoint(gctx, req.GetLocalConfig().GetSnapshotPrefix(), ateompath.LocalCheckpointsDir(ns, tmpl, actorID), checkpointDir, sandboxRec.SnapshotFiles); err != nil {
+				return err
+			}
+		}
+		dDownload = time.Since(t)
+		return nil
+	})
+	g.Go(func() error {
+		var err error
+		if assetPaths, err = s.ensureSandboxAssets(gctx, sandboxRec); err != nil {
+			return err
+		}
+		t := time.Now()
+		if err := s.prepareOCIBundles(gctx, ns, tmpl, actorID, req.GetSpec(), req.GetTargetAteomUid()); err != nil {
+			return err
+		}
+		dBundles = time.Since(t)
+		return nil
+	})
+	if err := g.Wait(); err != nil {
 		return nil, err
 	}
-
-	tBundles := time.Now()
-	if err := s.prepareOCIBundles(ctx, ns, tmpl, actorID,
-		req.GetSpec(), req.GetTargetAteomUid(),
-	); err != nil {
-		return nil, err
-	}
-	dBundles = time.Since(tBundles)
 
 	client, err := s.dialAteom(ctx, req.GetTargetAteomUid())
 	if err != nil {

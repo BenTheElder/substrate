@@ -102,25 +102,35 @@ func SendLocalFileToGCSWithZstd(ctx context.Context, client ObjectStorage, gsURL
 	return nil
 }
 
-// sendToGCSWithZstd zstd-compresses content to a temp file and uploads it to gsURL.
+// streamingPutter is an ObjectStorage whose PutObject accepts a non-seekable
+// streaming body without buffering (GCS). See gcsClient.SupportsStreamingPut.
+type streamingPutter interface{ SupportsStreamingPut() bool }
+
+// sendToGCSWithZstd zstd-compresses content and uploads it to gsURL.
 //
 // The snapshot memory-ranges is the large object here (the whole guest RAM image,
 // mostly zero) on the SUSPEND critical path, so we compress with SpeedFastest across
 // all CPUs — high-ratio levels scan the multi-GiB image far slower for little size
 // gain on near-zero data, and the decoder auto-detects the level so restore + older
-// snapshots are unaffected. That level/concurrency change is the dominant win.
+// snapshots are unaffected.
 //
-// We compress to a SEEKABLE temp file (not a streaming io.Pipe) on purpose: the
-// S3/rustfs PutObject hands the body to the AWS SDK, which needs a seekable body to
-// sign + set Content-Length on the payload — a non-seekable pipe hangs there (GCS
-// tolerates streaming, S3/rustfs does not). The overlap a pipe would buy is small
-// vs a local object store anyway. Logs compress wall-clock vs total.
+// Upload strategy depends on the backend:
+//   - Streaming backends (GCS) accept a non-seekable body, so we pipe the compressor
+//     straight into PutObject: the compress overlaps the network PUT and we never
+//     stage the ~100MiB compressed payload to a temp file.
+//   - S3/rustfs PutObject hands the body to the AWS SDK, which needs a seekable body
+//     to sign + set Content-Length (a non-seekable pipe hangs there), so we compress
+//     to a SEEKABLE temp file first.
 func sendToGCSWithZstd(ctx context.Context, client ObjectStorage, gsURL string, content io.Reader) (err error) {
 	bucket, object, err := parseGCSURL(gsURL)
 	if err != nil {
 		return fmt.Errorf("while parsing URL: %w", err)
 	}
 	tStart := time.Now()
+
+	if sp, ok := client.(streamingPutter); ok && sp.SupportsStreamingPut() {
+		return sendToGCSStreaming(ctx, client, bucket, object, content, tStart)
+	}
 
 	tmpFile, err := os.CreateTemp("", "substrate-upload-compress-")
 	if err != nil {
@@ -145,19 +155,9 @@ func sendToGCSWithZstd(ctx context.Context, client ObjectStorage, gsURL string, 
 		sparse = true
 	} else {
 		// Non-file reader (no holes to exploit): plain zstd stream.
-		zw, zerr := zstd.NewWriter(tmpFile,
-			zstd.WithEncoderLevel(zstd.SpeedFastest),
-			zstd.WithEncoderConcurrency(runtime.GOMAXPROCS(0)))
-		if zerr != nil {
-			return fmt.Errorf("while creating zstd writer: %w", zerr)
-		}
-		logical, err = io.Copy(zw, content)
+		logical, err = plainZstd(tmpFile, content)
 		if err != nil {
-			zw.Close()
 			return fmt.Errorf("while compressing data to temp file: %w", err)
-		}
-		if err := zw.Close(); err != nil {
-			return fmt.Errorf("while closing zstd writer: %w", err)
 		}
 		dataBytes = logical
 	}
@@ -174,6 +174,70 @@ func sendToGCSWithZstd(ctx context.Context, client ObjectStorage, gsURL string, 
 		slog.Int64("logical", logical), slog.Int64("data", dataBytes),
 		slog.Duration("compress", dCompress), slog.Duration("total", time.Since(tStart)))
 	return nil
+}
+
+// sendToGCSStreaming compresses content and uploads it in one overlapped pass: a
+// goroutine writes the (sparse-extent or plain) zstd stream into an io.Pipe while
+// PutObject streams the read end to the object store. No seekable temp file, and
+// the compress runs concurrently with the network PUT. Used only for streaming
+// backends (GCS); see sendToGCSWithZstd.
+func sendToGCSStreaming(ctx context.Context, client ObjectStorage, bucket, object string, content io.Reader, tStart time.Time) error {
+	type result struct {
+		logical, dataBytes int64
+		sparse             bool
+		err                error
+	}
+	pr, pw := io.Pipe()
+	ch := make(chan result, 1)
+	go func() {
+		var r result
+		if f, ok := content.(*os.File); ok {
+			r.sparse = true
+			r.logical, r.dataBytes, r.err = writeSparseZstd(pw, f)
+		} else {
+			r.logical, r.err = plainZstd(pw, content)
+			r.dataBytes = r.logical
+		}
+		// Closing the writer delivers EOF (or the compress error) to PutObject.
+		_ = pw.CloseWithError(r.err)
+		ch <- r
+	}()
+
+	putErr := client.PutObject(ctx, bucket, object, pr)
+	if putErr != nil {
+		// PutObject bailed (e.g. mid-stream); unblock the compressor goroutine so it
+		// can finish and we don't deadlock on the channel receive below.
+		_ = pr.CloseWithError(putErr)
+	}
+	r := <-ch
+	if putErr != nil {
+		return fmt.Errorf("while putting object %q: %w", object, putErr)
+	}
+	if r.err != nil {
+		return fmt.Errorf("while compressing %q: %w", object, r.err)
+	}
+	slog.InfoContext(ctx, "Compressed zstd upload",
+		slog.String("object", object), slog.Bool("sparse", r.sparse), slog.Bool("streaming", true),
+		slog.Int64("logical", r.logical), slog.Int64("data", r.dataBytes),
+		slog.Duration("total", time.Since(tStart)))
+	return nil
+}
+
+// plainZstd writes src to w as a single plain zstd stream (SpeedFastest, all
+// cores) and returns the uncompressed byte count.
+func plainZstd(w io.Writer, src io.Reader) (int64, error) {
+	zw, err := zstd.NewWriter(w,
+		zstd.WithEncoderLevel(zstd.SpeedFastest),
+		zstd.WithEncoderConcurrency(runtime.GOMAXPROCS(0)))
+	if err != nil {
+		return 0, err
+	}
+	n, err := io.Copy(zw, src)
+	if err != nil {
+		zw.Close()
+		return n, err
+	}
+	return n, zw.Close()
 }
 
 func FetchLocalFileFromGCSWithZstd(ctx context.Context, client ObjectStorage, gsURL string, localFilePath string) (err error) {

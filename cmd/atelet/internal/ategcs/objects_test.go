@@ -47,6 +47,68 @@ func (s *memStore) GetObject(_ context.Context, bucket, object string) (io.ReadC
 	return io.NopCloser(bytes.NewReader(b)), nil
 }
 
+// streamingMemStore is a memStore that advertises streaming PutObject support, so
+// sendToGCSWithZstd takes the pipe (compress∥upload overlap) path used for GCS
+// instead of staging a seekable temp file.
+type streamingMemStore struct{ *memStore }
+
+func (s *streamingMemStore) SupportsStreamingPut() bool { return true }
+
+// TestSparseUploadStreamingRoundTrip drives the STREAMING upload path (GCS-like
+// backend) end-to-end through the real entry points: the object must still be the
+// sparse-extent format (magic) and download byte-exact. This guards the pipe path
+// that overlaps compression with the upload.
+func TestSparseUploadStreamingRoundTrip(t *testing.T) {
+	const size = 8 << 20
+	want := make([]byte, size)
+	regions := [][2]int{{0, 4096}, {2 << 20, 70000}, {size - 9000, 5000}}
+	for _, e := range regions {
+		for i := e[0]; i < e[0]+e[1]; i++ {
+			want[i] = byte((i*7)%251 + 1)
+		}
+	}
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "memory-ranges")
+	src, err := os.Create(srcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := src.Truncate(size); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range regions {
+		if _, err := src.WriteAt(want[e[0]:e[0]+e[1]], int64(e[0])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	src.Close()
+
+	store := &streamingMemStore{newMemStore()}
+	ctx := context.Background()
+	const gsURL = "gs://bucket/snap/memory-ranges.zstd"
+	if err := SendLocalFileToGCSWithZstd(ctx, store, gsURL, srcPath); err != nil {
+		t.Fatalf("streaming upload: %v", err)
+	}
+	stored := store.m["bucket/snap/memory-ranges.zstd"]
+	if len(stored) < len(sparseMagic) || string(stored[:len(sparseMagic)]) != sparseMagic {
+		t.Fatalf("streaming-stored object is not sparse-extent format (magic=%q)", stored[:min(len(stored), len(sparseMagic))])
+	}
+	if int64(len(stored)) >= size/2 {
+		t.Errorf("stored %d bytes; expected far less than logical %d (holes not skipped)", len(stored), size)
+	}
+	dstPath := filepath.Join(dir, "restored")
+	if err := FetchLocalFileFromGCSWithZstd(ctx, store, gsURL, dstPath); err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	got, err := os.ReadFile(dstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("streaming round-trip mismatch: len(got)=%d len(want)=%d", len(got), len(want))
+	}
+}
+
 // TestSparseUploadDownloadRoundTrip drives the real upload+download entry points
 // through an in-memory store: a genuinely sparse source file (multiple data extents
 // separated by holes) must upload in the sparse-extent format (magic) and download
