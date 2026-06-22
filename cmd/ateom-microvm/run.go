@@ -934,10 +934,13 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 		base := filepath.Join(ra.restoreSourceDir, "memory-ranges")
 		delta := filepath.Join(checkpointDir, "memory-ranges")
 		tMerge := time.Now()
-		if err := ch.MergeSparseOverlay(ctx, base, delta, delta); err != nil {
-			return nil, fmt.Errorf("while merging OnDemand delta onto restore source: %w", err)
+		// Reuse base's on-disk working set (rename + overlay) instead of copying it —
+		// CH is paused and about to be torn down, and base is discarded after. See
+		// MergeDeltaIntoBase. (Falls back to the copying merge across filesystems.)
+		if err := ch.MergeDeltaIntoBase(ctx, base, delta); err != nil {
+			return nil, fmt.Errorf("while merging OnDemand delta into restore source: %w", err)
 		}
-		slog.InfoContext(ctx, "Merged OnDemand delta onto restore source (complete snapshot)",
+		slog.InfoContext(ctx, "Merged OnDemand delta into base (complete snapshot)",
 			slog.String("id", id), slog.Duration("merge", time.Since(tMerge)))
 	}
 
@@ -1322,6 +1325,15 @@ func (s *AteomService) restoreWorkloadBlkRootfs(ctx context.Context, req *ateomp
 		slog.InfoContext(ctx, "Reconstructed actor rootfs disk from image", slog.String("id", id))
 	}
 
+	// Repoint the snapshot config's writable /dev/vdb disk at THIS actor's
+	// reconstructed backing file. The golden snapshot recorded the golden actor's
+	// per-actor disk path, which is stale on any pod restoring a different actor
+	// (and absent on any node that never ran the golden) — unlike /dev/vda, the
+	// content-addressed kata image whose path is identical on every node.
+	if err := repointActorRootfsDisk(restoreDir, diskPath); err != nil {
+		return nil, fmt.Errorf("while repointing actor rootfs disk in snapshot config: %w", err)
+	}
+
 	// Networking: rebuild the per-activation veth + tap; the snapshot's virtio-net
 	// is fd-backed, so CH needs fresh tap FDs (net_fds) on restore.
 	if err := s.setupActorNetwork(ctx); err != nil {
@@ -1395,8 +1407,10 @@ func (s *AteomService) restoreWorkloadBlkRootfs(ctx context.Context, req *ateomp
 // rewriteSnapshotSocketPaths repoints the snapshot config.json's per-sandbox
 // socket paths (virtio-fs vhost-user socket, hybrid-vsock socket) from the source
 // actor's VMDir to the restoring actor's VMDir, so the sockets we create are the
-// ones CH reopens. Disk/kernel paths are content-addressed static files and
-// identical on every node. (The frozen base id for the shared-dir layout comes
+// ones CH reopens. The kernel and /dev/vda kata image are content-addressed
+// static files with identical paths on every node, so they need no rewrite; the
+// writable /dev/vdb actor rootfs disk is per-actor and is repointed separately
+// (see repointActorRootfsDisk). (The frozen base id for the shared-dir layout comes
 // from the base-id snapshot file, NOT from these socket paths — they are rewritten
 // per-restore and so do not carry the invariant golden id.)
 func rewriteSnapshotSocketPaths(snapshotDir, id string) error {
@@ -1436,6 +1450,48 @@ func rewriteSnapshotSocketPaths(snapshotDir, id string) error {
 		return err
 	}
 	return nil
+}
+
+// repointActorRootfsDisk rewrites the snapshot config.json so the writable
+// /dev/vdb actor rootfs disk points at this actor's reconstructed backing file
+// (diskPath). The actor rootfs disk lives under the actor's per-actor directory
+// (keyed by actor id), so the golden snapshot's recorded path is the GOLDEN
+// actor's — stale on any pod restoring a different actor, and absent on any node
+// that never ran the golden. (This is the disk analogue of the serial.file
+// repoint in rewriteSnapshotSocketPaths.) The disk is identified by basename so
+// the read-only /dev/vda kata image (a content-addressed static file) is left
+// untouched; it is an error if no actor rootfs disk is present to repoint.
+func repointActorRootfsDisk(snapshotDir, diskPath string) error {
+	cfgPath := filepath.Join(snapshotDir, "config.json")
+	b, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return err
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		return fmt.Errorf("parsing %q: %w", cfgPath, err)
+	}
+	rewrote := false
+	if disks, ok := cfg["disks"].([]any); ok {
+		for _, d := range disks {
+			dm, ok := d.(map[string]any)
+			if !ok {
+				continue
+			}
+			if p, _ := dm["path"].(string); filepath.Base(p) == actorRootfsDiskName {
+				dm["path"] = diskPath
+				rewrote = true
+			}
+		}
+	}
+	if !rewrote {
+		return fmt.Errorf("no %q disk found in %q to repoint", actorRootfsDiskName, cfgPath)
+	}
+	out, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(cfgPath, out, 0o600)
 }
 
 // slogWriter adapts an io.Writer to slog at info level, for the kata shim's
