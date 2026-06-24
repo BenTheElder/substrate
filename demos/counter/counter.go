@@ -27,13 +27,20 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/spf13/pflag"
 )
 
+// requestCount is the in-RAM counter. It lives in the actor's memory and so is
+// carried across suspend/resume by the guest memory snapshot.
 var requestCount uint64
+
+// diskCounterPath is the on-disk counter. It lives in the actor's rootfs
+const diskCounterPath = "/disk-counter"
 
 func main() {
 	pflag.Parse()
@@ -46,10 +53,35 @@ func main() {
 		ctx := r.Context()
 		count := atomic.AddUint64(&requestCount, 1)
 		currentIP := getCurrentIP()
-		response := fmt.Sprintf("hello from: %s | preserved memory count: %d\n", currentIP, count)
+		response := fmt.Sprintf("hello from: %s | preserved memory count: %d | on-disk count: %s\n",
+			currentIP, count, diskCounterString())
 		slog.InfoContext(ctx, "Handled request", slog.String("response", response))
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(response))
+	})
+
+	// /disk/incr increments the ON-DISK counter: read the file, add one, write
+	// it back. This is a rootfs write made after the golden snapshot, so it shows
+	// whether the runtime preserves the rootfs across suspend/resume (contrast
+	// with the in-RAM counter above).
+	defaultMux.HandleFunc("/disk/incr", func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		n, _ := readDiskCounter()
+		n++
+		if err := writeDiskCounter(n); err != nil {
+			slog.ErrorContext(ctx, "Error writing on-disk counter", slog.Any("err", err))
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		slog.InfoContext(ctx, "Incremented on-disk counter", slog.Uint64("disk_count", n))
+		fmt.Fprintf(w, "on-disk count: %d\n", n)
+	})
+
+	// /disk reads the ON-DISK counter without modifying it. Reports "<absent>"
+	// when the file does not exist (e.g. the rootfs was reset on resume, dropping
+	// the post-golden write).
+	defaultMux.HandleFunc("/disk", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "on-disk count: %s\n", diskCounterString())
 	})
 
 	go func() {
@@ -102,6 +134,35 @@ func hashRandomFile() string {
 
 	hash := sha256.Sum256(rfBytes)
 	return base64.RawStdEncoding.EncodeToString(hash[:])
+}
+
+// readDiskCounter returns the on-disk counter and whether the file was present.
+// A missing or unparseable file reads as (0, false).
+func readDiskCounter() (uint64, bool) {
+	b, err := os.ReadFile(diskCounterPath)
+	if err != nil {
+		return 0, false
+	}
+	n, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// writeDiskCounter persists the on-disk counter value to the rootfs.
+func writeDiskCounter(n uint64) error {
+	return os.WriteFile(diskCounterPath, []byte(strconv.FormatUint(n, 10)), 0o644)
+}
+
+// diskCounterString renders the on-disk counter for a response, or "<absent>"
+// when the file does not exist.
+func diskCounterString() string {
+	n, ok := readDiskCounter()
+	if !ok {
+		return "<absent>"
+	}
+	return strconv.FormatUint(n, 10)
 }
 
 func getCurrentIP() string {
