@@ -18,24 +18,26 @@
 # ateom-microvm fetches at runtime (fetch-not-bake). Run this on a Linux
 # host of the TARGET arch.
 #
-# Produces, under $OUT, the four assets named as the SandboxConfig expects, plus
+# Produces, under $OUT, the six assets named as the ActorTemplate expects, plus
 # their sha256 sums (paste into demos/counter/counter-microvm.yaml.tmpl):
-#   cloud-hypervisor  vmlinux  rootfs.img  configuration-clh.toml
+#   containerd-shim-kata-v2  cloud-hypervisor  virtiofsd-patched
+#   vmlinux  rootfs.img  configuration-clh.toml
 #
-# ateom owns the cloud-hypervisor boot and gives the actor a writable virtio-blk
-# rootfs, so neither the kata shim nor virtiofsd is part of the asset set.
+# virtiofsd is built from upstream main: the vhost-0.16 snapshot/restore fix (REPLY_ACK)
+# is on main but NOT in any release tag yet, so the kata-bundled virtiofsd (v1.13.3 tag,
+# old vhost) hangs CH's restore handshake (confirmed on kind/arm64). main needs no manual
+# patch (the bump is already there). Needs rust (rustup) + libcap-ng-dev libseccomp-dev
+# pkg-config on the build host.
 #
-# Env: ARCH (arm64|amd64, default arm64), KATA_VER (3.31.0), CH_VER (v52.0),
-#      OUT (default ./bin/microvm-assets/$ARCH, under the gitignored bin/).
+# Env: ARCH (arm64|amd64, default arm64), KATA_VER (3.32.0), CH_VER (v52.0),
+#      OUT (default ./microvm-assets-$ARCH).
 
 set -o errexit -o nounset -o pipefail
 
-ROOT="$(git rev-parse --show-toplevel)"
-
 ARCH="${ARCH:-arm64}"
-KATA_VER="${KATA_VER:-3.31.0}"
+KATA_VER="${KATA_VER:-3.32.0}"
 CH_VER="${CH_VER:-v52.0}"
-OUT="${OUT:-${ROOT}/bin/microvm-assets/$ARCH}"
+OUT="${OUT:-$PWD/microvm-assets-$ARCH}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -55,6 +57,7 @@ mkdir -p kata
 tar --zstd -xf kata-static.tar.zst -C kata
 KROOT="kata/opt/kata"
 
+cp "${KROOT}/bin/containerd-shim-kata-v2" "${OUT}/containerd-shim-kata-v2"
 cp "$(readlink -f "${KROOT}/share/kata-containers/vmlinux.container")" "${OUT}/vmlinux"
 cp "$(readlink -f "${KROOT}/share/kata-containers/kata-containers.img")" "${OUT}/rootfs.img"
 cp "${KROOT}/share/defaults/kata-containers/configuration-clh.toml" "${OUT}/configuration-clh.toml"
@@ -64,12 +67,34 @@ curl -fSL -o "${OUT}/cloud-hypervisor" \
   "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${CH_VER}/${CH_ASSET}"
 chmod +x "${OUT}/cloud-hypervisor"
 
+echo ">> Building virtiofsd from upstream main (vhost 0.16)..."
+# The vhost-0.16 / vhost-user-backend-0.22 snapshot-restore fix (REPLY_ACK) is on
+# virtiofsd main but NOT in any release tag yet — so the kata-bundled virtiofsd (built
+# from the v1.13.3 TAG, old vhost) still hangs CH's restore handshake. Empirically
+# confirmed on kind/arm64: kata-bundled -> vm.restore i/o timeout; main -> works.
+# Build current main (no manual patch needed; main already has the bump). Keep the
+# asset name virtiofsd-patched so the manifest is unchanged. Build deps (Debian):
+# apt-get install -y git libcap-ng-dev libseccomp-dev pkg-config; rust via rustup.
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "cargo not found; install rust (rustup) + libcap-ng-dev libseccomp-dev pkg-config" >&2
+  exit 1
+fi
+git clone --depth 1 https://gitlab.com/virtio-fs/virtiofsd.git
+(
+  cd virtiofsd
+  grep -E '^(vhost|vhost-user-backend) =' Cargo.toml   # expect vhost 0.16 / backend 0.22
+  cargo build --release
+)
+cp "virtiofsd/target/release/virtiofsd" "${OUT}/virtiofsd-patched"
+chmod +x "${OUT}/virtiofsd-patched"
+
 echo
 echo ">> Assets assembled in ${OUT}:"
 cd "${OUT}"
-for f in cloud-hypervisor vmlinux rootfs.img configuration-clh.toml; do
+for f in containerd-shim-kata-v2 cloud-hypervisor virtiofsd-patched vmlinux rootfs.img configuration-clh.toml; do
   [ -f "$f" ] || { echo "MISSING: $f" >&2; exit 1; }
 done
+"${OUT}/virtiofsd-patched" --version 2>/dev/null | head -1 || true
 echo
 echo ">> sha256 (paste into demos/counter/counter-microvm.yaml.tmpl runtime.assets):"
-sha256sum cloud-hypervisor vmlinux rootfs.img configuration-clh.toml
+sha256sum containerd-shim-kata-v2 cloud-hypervisor virtiofsd-patched vmlinux rootfs.img configuration-clh.toml
