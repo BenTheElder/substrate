@@ -21,6 +21,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -29,6 +30,42 @@ import (
 func TestSnapshotURL(t *testing.T) {
 	if got, want := SnapshotURL("/var/lib/snap"), "file:///var/lib/snap"; got != want {
 		t.Errorf("SnapshotURL = %q, want %q", got, want)
+	}
+}
+
+func TestRestoreArgs(t *testing.T) {
+	tests := []struct {
+		name string
+		opts RestoreOptions
+		want []string
+	}{
+		{
+			name: "default copy mode",
+			opts: RestoreOptions{APISocket: "/run/ch.sock", SourceDir: "/snap"},
+			want: []string{"--api-socket", "/run/ch.sock", "--restore", "source_url=file:///snap"},
+		},
+		{
+			name: "explicit copy mode",
+			opts: RestoreOptions{APISocket: "/run/ch.sock", SourceDir: "/snap", MemoryRestoreMode: "copy"},
+			want: []string{"--api-socket", "/run/ch.sock", "--restore", "source_url=file:///snap"},
+		},
+		{
+			name: "ondemand mode",
+			opts: RestoreOptions{APISocket: "/run/ch.sock", SourceDir: "/snap", MemoryRestoreMode: "ondemand"},
+			want: []string{"--api-socket", "/run/ch.sock", "--restore", "source_url=file:///snap,memory_restore_mode=ondemand,prefault=off"},
+		},
+		{
+			name: "extra args appended",
+			opts: RestoreOptions{APISocket: "/run/ch.sock", SourceDir: "/snap", ExtraArgs: []string{"--log-file", "/tmp/vmm.log"}},
+			want: []string{"--api-socket", "/run/ch.sock", "--restore", "source_url=file:///snap", "--log-file", "/tmp/vmm.log"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RestoreArgs(tc.opts); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("RestoreArgs() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

@@ -20,12 +20,11 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"strings"
 	"time"
 
-	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/third_party/kata/agentpb"
+	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/kata/agentpb"
 	"github.com/containerd/ttrpc"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
@@ -85,12 +84,12 @@ func DebugConsoleDump(ctx context.Context, vsockPath, cmd string) string {
 }
 
 // AgentClient is a thin ttrpc client for the kata-agent RPCs ateom drives
-// directly. ateom owns the cloud-hypervisor boot (no kata shim) and drives the
-// kata-agent over ttrpc itself: alongside UpdateInterface/UpdateRoutes for guest
-// networking, it issues CreateContainer/StartContainer to assemble the container
-// rootfs directly, instead of relying on the kata runtime's hooks
-// (ShareRootFilesystem) to emit the storages. It dials the agent through CH's
-// hybrid-vsock unix socket — the same channel the kata shim would use.
+// directly. Resurrected + expanded from tag ateom-chv-pre-rebase (which only
+// mirrored UpdateInterface/UpdateRoutes for post-restore re-IP): this version
+// adds CreateContainer/StartContainer so ateom can assemble the container rootfs
+// itself ("be your own hook scheduler") instead of relying on the kata runtime's
+// ShareRootFilesystem to emit the storages. It dials the agent through CH's
+// hybrid-vsock unix socket — the same channel the kata shim uses.
 type AgentClient struct {
 	conn   net.Conn
 	client *ttrpc.Client
@@ -156,12 +155,13 @@ func (a *AgentClient) StartContainer(ctx context.Context, containerID string) er
 	return nil
 }
 
-// CreateSandbox establishes the agent's sandbox context (sandbox id, hostname,
-// sandbox pidns) before any container is created. The kata shim normally issues
-// this once at VM boot; on the ateom-owned-boot path (no shim) ateom must call it
-// itself so the agent has a sandbox to attach containers to. Storages is empty —
-// the actor rootfs arrives as a per-container "blk" storage, not a sandbox mount.
-// Mirrors grpc.AgentService/CreateSandbox (returns google.protobuf.Empty).
+// CreateSandbox initializes the guest sandbox: sets the hostname, mounts the
+// sandbox-level storages (here: the kataShared virtio-fs mount that backs the
+// container rootfs base), marks the sandbox running, and sets up the shared
+// namespaces. The kata shim normally does this (startSandbox); ateom does it
+// itself when it owns the cold boot. The kata-agent requires CreateSandbox before
+// CreateContainer (CreateContainer depends on the sandbox mounts + shared ns it
+// sets up). Mirrors grpc.AgentService/CreateSandbox.
 func (a *AgentClient) CreateSandbox(ctx context.Context, req *agentpb.CreateSandboxRequest) error {
 	if err := a.client.Call(ctx, "grpc.AgentService", "CreateSandbox", req, &emptypb.Empty{}); err != nil {
 		return fmt.Errorf("agent CreateSandbox: %w", err)
@@ -169,10 +169,9 @@ func (a *AgentClient) CreateSandbox(ctx context.Context, req *agentpb.CreateSand
 	return nil
 }
 
-// UpdateInterface configures a guest network interface (the kata shim's job; on
-// the owned-boot path ateom does it). The agent matches the link by HwAddr, then
-// applies the name/IP/MTU. Mirrors grpc.AgentService/UpdateInterface (returns the
-// resulting Interface).
+// UpdateInterface configures one guest network interface (the agent applies the
+// IP addresses, MTU, and hardware address to the named device). Returns the
+// resulting interface (which we ignore). Mirrors grpc.AgentService/UpdateInterface.
 func (a *AgentClient) UpdateInterface(ctx context.Context, iface *agentpb.Interface) error {
 	req := &agentpb.UpdateInterfaceRequest{Interface: iface}
 	if err := a.client.Call(ctx, "grpc.AgentService", "UpdateInterface", req, &agentpb.Interface{}); err != nil {
@@ -181,9 +180,8 @@ func (a *AgentClient) UpdateInterface(ctx context.Context, iface *agentpb.Interf
 	return nil
 }
 
-// UpdateRoutes replaces the guest's route table with routes (the agent flushes
-// and re-adds). Pass the connected (scope-link) route AND the default route so
-// the gateway stays reachable. Mirrors grpc.AgentService/UpdateRoutes.
+// UpdateRoutes replaces the guest routing table with routes. Returns the
+// resulting routes (which we ignore). Mirrors grpc.AgentService/UpdateRoutes.
 func (a *AgentClient) UpdateRoutes(ctx context.Context, routes []*agentpb.Route) error {
 	req := &agentpb.UpdateRoutesRequest{Routes: &agentpb.Routes{Routes: routes}}
 	if err := a.client.Call(ctx, "grpc.AgentService", "UpdateRoutes", req, &agentpb.Routes{}); err != nil {
@@ -192,82 +190,14 @@ func (a *AgentClient) UpdateRoutes(ctx context.Context, routes []*agentpb.Route)
 	return nil
 }
 
-// AddARPNeighbors installs static ARP entries in the guest — used to pin the
-// gateway (169.254.17.1) to its FIXED MAC so a restored guest's frozen neighbor
-// entry stays valid across pods. Mirrors grpc.AgentService/AddARPNeighbors.
+// AddARPNeighbors installs static ARP entries in the guest (e.g. pinning the
+// gateway's fixed MAC so the frozen ARP cache stays valid across restore).
+// Best-effort by convention (old agents may not support it). Mirrors
+// grpc.AgentService/AddARPNeighbors.
 func (a *AgentClient) AddARPNeighbors(ctx context.Context, neighbors []*agentpb.ARPNeighbor) error {
 	req := &agentpb.AddARPNeighborsRequest{Neighbors: &agentpb.ARPNeighbors{ARPNeighbors: neighbors}}
 	if err := a.client.Call(ctx, "grpc.AgentService", "AddARPNeighbors", req, &emptypb.Empty{}); err != nil {
 		return fmt.Errorf("agent AddARPNeighbors: %w", err)
 	}
 	return nil
-}
-
-// ReadStdout reads up to max bytes from the container process's stdout. It is a
-// unary RPC (NOT a server stream): each call returns whatever bytes the agent has
-// buffered (up to max), so callers loop until it returns an error — the agent
-// returns an error/EOF-like status once the stream ends (container exit / connection
-// close). Mirrors grpc.AgentService/ReadStdout. The kata-agent keys the stream by
-// ExecId, which the owned-boot path sets equal to ContainerId (see StartBlkWorkload).
-func (a *AgentClient) ReadStdout(ctx context.Context, containerID, execID string, max uint32) ([]byte, error) {
-	resp := &agentpb.ReadStreamResponse{}
-	req := &agentpb.ReadStreamRequest{ContainerId: containerID, ExecId: execID, Len: max}
-	if err := a.client.Call(ctx, "grpc.AgentService", "ReadStdout", req, resp); err != nil {
-		return nil, err
-	}
-	return resp.GetData(), nil
-}
-
-// ReadStderr reads up to max bytes from the container process's stderr. Same
-// semantics as ReadStdout (unary, loop-until-error). Mirrors
-// grpc.AgentService/ReadStderr.
-func (a *AgentClient) ReadStderr(ctx context.Context, containerID, execID string, max uint32) ([]byte, error) {
-	resp := &agentpb.ReadStreamResponse{}
-	req := &agentpb.ReadStreamRequest{ContainerId: containerID, ExecId: execID, Len: max}
-	if err := a.client.Call(ctx, "grpc.AgentService", "ReadStderr", req, resp); err != nil {
-		return nil, err
-	}
-	return resp.GetData(), nil
-}
-
-// StreamReader adapts the agent's repeated ReadStdout/ReadStderr unary calls into
-// an io.Reader, so the consumer can pump the container's output through the shared
-// actorlog forwarder like any other stream. Each Read issues one RPC with Len set
-// to len(p); on RPC error (the agent signals EOF/container-exit via an error
-// status) it returns io.EOF so the consuming goroutine terminates cleanly. The
-// reader stops when its context is cancelled OR the underlying ttrpc connection is
-// closed (both surface as RPC errors), so it never outlives the AgentClient.
-type StreamReader struct {
-	ctx         context.Context
-	ac          *AgentClient
-	containerID string
-	execID      string
-	stderr      bool
-}
-
-// NewStdioReader returns an io.Reader over the container's stdout (stderr=false)
-// or stderr (stderr=true). execID matches the value passed to StartBlkWorkload
-// (equal to containerID on the owned-boot path).
-func NewStdioReader(ctx context.Context, ac *AgentClient, containerID, execID string, stderr bool) *StreamReader {
-	return &StreamReader{ctx: ctx, ac: ac, containerID: containerID, execID: execID, stderr: stderr}
-}
-
-// Read issues a single ReadStdout/ReadStderr RPC for up to len(p) bytes, copying
-// the returned data into p. It returns io.EOF on any RPC error so the consumer
-// stops cleanly when the container exits or the connection closes.
-func (r *StreamReader) Read(p []byte) (int, error) {
-	var (
-		data []byte
-		err  error
-	)
-	if r.stderr {
-		data, err = r.ac.ReadStderr(r.ctx, r.containerID, r.execID, uint32(len(p)))
-	} else {
-		data, err = r.ac.ReadStdout(r.ctx, r.containerID, r.execID, uint32(len(p)))
-	}
-	if err != nil {
-		return 0, io.EOF
-	}
-	n := copy(p, data)
-	return n, nil
 }

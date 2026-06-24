@@ -32,8 +32,6 @@ import (
 	"strings"
 	"sync"
 
-	"cloud.google.com/go/compute/metadata"
-	"github.com/agent-substrate/substrate/internal/actorlog"
 	"github.com/agent-substrate/substrate/internal/ateinterceptors"
 	"github.com/agent-substrate/substrate/internal/ateompath"
 	"github.com/agent-substrate/substrate/internal/proto/ateompb"
@@ -51,16 +49,23 @@ import (
 var (
 	podUID = flag.String("pod-uid", "", "The UID of the current pod")
 
+	shimBinary = flag.String("shim-binary", "containerd-shim-kata-v2", "Path to the kata containerd shim v2 binary.")
+
 	chBinary = flag.String("cloud-hypervisor-binary", "cloud-hypervisor", "Path to the cloud-hypervisor binary (used to relaunch on restore).")
+
+	virtiofsdBinary = flag.String("virtiofsd-binary", "virtiofsd", "Path to the virtiofsd binary (needs find-paths migration support, >= 1.13; used on restore).")
 
 	kataConfig = flag.String("kata-config", "", "Path to a kata configuration.toml (passed to the shim as KATA_CONF_FILE). Empty uses kata's default. atelet generates one pointing at runtime-fetched assets.")
 
-	kataDebug = flag.Bool("kata-debug", false, "Verbose kata-agent debugging: raise the guest agent log level and forward the guest console (incl. agent logs) into the pod logs.")
+	kataNamespace = flag.String("kata-namespace", "default", "containerd namespace the kata shim runs under.")
+
+	kataDebug = flag.Bool("kata-debug", false, "Verbose kata debugging: shim -debug, hypervisor/agent/runtime enable_debug, and guest console (incl. kata-agent logs) forwarded into pod logs.")
 
 	showVersion = flag.Bool("version", false, "Print version and exit.")
 
 	// reapLock guards subprocess exec against the child reaper, mirroring
-	// ateom-gvisor. ateom-microvm spawns the cloud-hypervisor process under it.
+	// ateom-gvisor. ateom-microvm will spawn the kata shim and CH
+	// processes under it in later milestones.
 	reapLock sync.RWMutex
 )
 
@@ -82,11 +87,7 @@ func do(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Share one synchronized writer between the runtime logger and the actor-log
-	// forwarder (created below) so the two log streams to the pod's stdout don't
-	// interleave-corrupt each other's lines (mirrors ateom-gvisor).
-	logWriter := actorlog.NewSyncedWriter(os.Stdout)
-	serverboot.InitLoggerWithWriter(logWriter)
+	serverboot.InitLogger()
 	slog.InfoContext(ctx, "ateom-microvm booting", slog.String("version", version.String()))
 
 	tp, err := serverboot.InitTracing(ctx, serverboot.TracingOptions{
@@ -104,10 +105,15 @@ func do(ctx context.Context) error {
 		return fmt.Errorf("in os.MkdirAll(%q): %w", ateomDir, err)
 	}
 
-	// Reap children reparented to us (cloud-hypervisor), guarded so our own
-	// exec.Cmd calls can take the wait.
+	// Reap children reparented to us (kata shim / cloud-hypervisor in later
+	// milestones), guarded so our own exec.Cmd calls can take the wait.
 	go reap.ReapChildren(nil, nil, nil, &reapLock)
 	slog.InfoContext(ctx, "Child process reaper launched")
+
+	// kata launches virtiofsd with --syslog, which delivers to /dev/log. In a
+	// pod there is no syslog daemon, so provide a sink or virtiofsd fails
+	// ("Unix syslog delivery error") and Create fails.
+	startSyslogSink(ctx)
 
 	// kata's virtio-fs sharing depends on mount propagation: it slave-binds
 	// .../shared (served by virtiofsd) from .../mounts and expects the later
@@ -140,17 +146,11 @@ func do(ctx context.Context) error {
 		return fmt.Errorf("while creating interior netns: %w", err)
 	}
 
-	// Forward the actor container's stdout/stderr to the worker pod's stdout as
-	// JSON with ate.dev/* labels (logging parity with ateom-gvisor). It shares
-	// logWriter with the runtime logger so the two streams to os.Stdout are
-	// serialized through one SyncedWriter and never interleave-corrupt lines.
-	actorLogger := actorlog.NewActorLogger(logWriter, metadata.OnGCE())
-
 	svr := grpc.NewServer(
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.UnaryInterceptor(ateinterceptors.ServerUnaryInterceptor),
 	)
-	ateompb.RegisterAteomServer(svr, NewService(*podUID, *chBinary, *kataConfig, *kataDebug, interiorNetNS, actorLogger))
+	ateompb.RegisterAteomServer(svr, NewService(*podUID, *shimBinary, *chBinary, *virtiofsdBinary, *kataConfig, *kataNamespace, *kataDebug, interiorNetNS))
 	reflection.Register(svr)
 
 	slog.InfoContext(ctx, "ateom-microvm serving", slog.String("socket", sockPath))
@@ -188,6 +188,28 @@ func ensureSharedPropagation(ctx context.Context, path string) error {
 	return nil
 }
 
+// startSyslogSink binds a unixgram socket at /dev/log and drains it, so
+// virtiofsd's --syslog delivery (which kata always enables) succeeds inside a
+// pod that has no syslog daemon. Best-effort.
+func startSyslogSink(ctx context.Context) {
+	const addr = "/dev/log"
+	_ = os.Remove(addr)
+	conn, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: addr, Net: "unixgram"})
+	if err != nil {
+		slog.WarnContext(ctx, "Failed to create /dev/log syslog sink; virtiofsd --syslog may fail", slog.Any("err", err))
+		return
+	}
+	slog.InfoContext(ctx, "syslog sink listening", slog.String("addr", addr))
+	go func() {
+		buf := make([]byte, 8192)
+		for {
+			if _, _, err := conn.ReadFromUnix(buf); err != nil {
+				return
+			}
+		}
+	}()
+}
+
 // AteomService is the cloud-hypervisor implementation of ateompb.AteomServer.
 type AteomService struct {
 	ateompb.UnimplementedAteomServer
@@ -196,19 +218,17 @@ type AteomService struct {
 	// lifecycle is not safe to drive concurrently.
 	lock sync.Mutex
 
-	podUID     string
-	chBinary   string
-	kataConfig string
-	kataDebug  bool
+	podUID          string
+	shimBinary      string
+	chBinary        string
+	virtiofsdBinary string
+	kataConfig      string
+	namespace       string
+	kataDebug       bool
 
 	// interiorNetNS hosts the per-activation actor veth peer (see net.go);
 	// kata is pointed at it.
 	interiorNetNS netns.NsHandle
-
-	// actorLogger forwards the actor container's stdout/stderr to the worker pod's
-	// stdout as ate.dev/*-labeled JSON and emits actor lifecycle events (parity
-	// with ateom-gvisor).
-	actorLogger *actorlog.ActorLogger
 
 	// running maps actor id -> the live micro-VM, kept so CheckpointWorkload can
 	// pause+snapshot+teardown the same sandbox (and RestoreWorkload can track the
@@ -219,14 +239,16 @@ type AteomService struct {
 var _ ateompb.AteomServer = (*AteomService)(nil)
 
 // NewService creates a new AteomService.
-func NewService(podUID, chBinary, kataConfig string, kataDebug bool, interiorNetNS netns.NsHandle, actorLogger *actorlog.ActorLogger) *AteomService {
+func NewService(podUID, shimBinary, chBinary, virtiofsdBinary, kataConfig, namespace string, kataDebug bool, interiorNetNS netns.NsHandle) *AteomService {
 	return &AteomService{
-		podUID:        podUID,
-		chBinary:      chBinary,
-		kataConfig:    kataConfig,
-		kataDebug:     kataDebug,
-		interiorNetNS: interiorNetNS,
-		actorLogger:   actorLogger,
-		running:       map[string]*runningActor{},
+		podUID:          podUID,
+		shimBinary:      shimBinary,
+		chBinary:        chBinary,
+		virtiofsdBinary: virtiofsdBinary,
+		kataConfig:      kataConfig,
+		namespace:       namespace,
+		kataDebug:       kataDebug,
+		interiorNetNS:   interiorNetNS,
+		running:         map[string]*runningActor{},
 	}
 }

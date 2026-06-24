@@ -20,35 +20,80 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/third_party/kata/agentpb"
+	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/kata/agentpb"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 )
 
-// StartBlkWorkload starts the actor container with its rootfs backed by a single
-// boot-time virtio-blk disk (devPath, e.g. "/dev/vdb") — the virtio-blk-rootfs
-// path. There is NO overlay, NO virtio-fs, NO tmpfs upper: the agent direct-mounts
-// devPath (ext4) as the container rootfs, so rootfs writes land on the host-backed
-// disk file (off guest RAM) and the CH snapshot stays memory-only with no balloon.
+// StartOverlayWorkload assembles the actor's container rootfs as
+// overlay(lowerdir=RO virtio-fs base, upperdir/workdir=guest tmpfs) and starts
+// it, by driving the stock kata-agent over ttrpc — the "be your own hook
+// scheduler" path (no patched shim). The shim must already have booted the
+// sandbox and shared the RO base over virtio-fs at
+// /run/kata-containers/shared/containers/<sandboxID>/rootfs (the carrier).
 //
-// One "blk" storage: source is the /dev node (kata's block storage handler mounts
-// it directly when source starts with /dev — no uevent/auto-enumeration wait,
-// unlike a hotplugged disk), fstype ext4, mounted at the container rootfs path.
-// The spec's Root.Path is set to that mount point, which the agent's setup_bundle
-// then uses as the container root.
-func (a *AgentClient) StartBlkWorkload(ctx context.Context, containerID, devPath string, spec *specs.Spec) error {
-	rootfs := "/run/kata-containers/" + containerID + "/rootfs"
+// Two storages, in order (the proven recipe from kata branch
+// ateom-virtiofs-overlay-rootfs / shareRootFilesystemWithVirtiofsOverlay):
+//  1. bind the lazy virtio-fs base submount to a stable lower path (forces its
+//     automount, which a bare overlay lowerdir would not trigger);
+//  2. overlay it with a guest-tmpfs upper/work (created by the agent via the
+//     create_directory driver options; under /run = guest RAM, captured by the
+//     CH memory snapshot). Options are CLEAN (no io.katacontainers.fs-opt.*
+//     markers — those EINVAL the guest overlayfs).
+//
+// spec is the augmented OCI spec; its Root.Path is overridden to the overlay
+// mount point, which the agent's setup_bundle then uses as the container root.
+//
+// upperBase selects where the overlay upper/work live: if non-empty (the
+// host-backed scratch-disk path, e.g. OverlayUpperBase(baseID) mounted from
+// /dev/vdb), the upper/work are <upperBase>/{fs,work} so rootfs writes land on the
+// disk (out of guest RAM → memory-only snapshot, no balloon). If empty, they
+// default to the guest tmpfs under /run/kata-containers/<containerID>/{fs,work}.
+func (a *AgentClient) StartOverlayWorkload(ctx context.Context, sandboxID, containerID, upperBase string, spec *specs.Spec) error {
+	const createDir = "io.katacontainers.volume.overlayfs.create_directory"
+	// Lower = the carrier's RESOLVED rootfs, i.e. the eager bind the agent's
+	// setup_bundle makes at /run/kata-containers/<sandboxID>/rootfs from the
+	// (RO) virtio-fs base. We deliberately do NOT point at the kata shared-dir
+	// submount (/run/kata-containers/shared/containers/<id>/rootfs): that is a
+	// lazily auto-mounted virtio-fs submount which is not reliably visible to a
+	// *separate* container's storage on all platforms (resolves on amd64,
+	// ENOENTs on arm64/kind). The resolved bind is stable + eager on both.
+	// Lower = the carrier's resolved rootfs (the eager bind the agent's
+	// setup_bundle makes at /run/kata-containers/<sandboxID>/rootfs from the RO
+	// virtio-fs base). Eager + stable on both amd64 and arm64.
+	sharedBase := "/run/kata-containers/" + sandboxID + "/rootfs"
+	base := "/run/kata-containers/" + containerID
+	lower := base + "/lower"
+	ovlRoot := base + "/rootfs"
+	// upper/work default to the guest tmpfs (captured by the CH memory snapshot);
+	// when a host-backed disk is mounted at upperBase, put them there instead so
+	// rootfs writes never enter snapshot-captured RAM.
+	upper := base + "/fs"
+	work := base + "/work"
+	if upperBase != "" {
+		upper = upperBase + "/fs"
+		work = upperBase + "/work"
+	}
+
 	storages := []*agentpb.Storage{
 		{
-			Driver:     "blk",
-			Source:     devPath,
-			Fstype:     "ext4",
-			MountPoint: rootfs,
-			Options:    []string{"rw"},
+			Driver:     "virtio-fs",
+			Source:     sharedBase,
+			MountPoint: lower,
+			Fstype:     "bind",
+			Options:    []string{"bind"},
+		},
+		{
+			Driver:        "overlayfs",
+			Source:        "overlay",
+			Fstype:        "overlay",
+			MountPoint:    ovlRoot,
+			DriverOptions: []string{createDir + "=" + upper, createDir + "=" + work},
+			Options:       []string{"lowerdir=" + lower, "upperdir=" + upper, "workdir=" + work},
 		},
 	}
 
 	pbSpec := SpecToAgentPB(spec)
-	pbSpec.Root = &agentpb.Root{Path: rootfs, Readonly: false}
+	pbSpec.Root = &agentpb.Root{Path: ovlRoot, Readonly: false}
 
 	if err := a.CreateContainer(ctx, &agentpb.CreateContainerRequest{
 		ContainerId: containerID,
@@ -56,10 +101,10 @@ func (a *AgentClient) StartBlkWorkload(ctx context.Context, containerID, devPath
 		Storages:    storages,
 		OCI:         pbSpec,
 	}); err != nil {
-		return fmt.Errorf("creating blk workload %q: %w", containerID, err)
+		return fmt.Errorf("creating overlay workload %q: %w", containerID, err)
 	}
 	if err := a.StartContainer(ctx, containerID); err != nil {
-		return fmt.Errorf("starting blk workload %q: %w", containerID, err)
+		return fmt.Errorf("starting overlay workload %q: %w", containerID, err)
 	}
 	return nil
 }

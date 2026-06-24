@@ -128,3 +128,9 @@ func (c *apiClient) put(ctx context.Context, path string, body any) error {
 type snapshotConfig struct {
 	DestinationURL string `json:"destination_url"`
 }
+
+// vmResize is the body of /api/v1/vm.resize. Only the balloon target is set;
+// desired_vcpus/desired_ram are omitted so CH leaves them unchanged.
+type vmResize struct {
+	DesiredBalloon *int64 `json:"desired_balloon,omitempty"`
+}

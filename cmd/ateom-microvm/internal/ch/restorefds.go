@@ -85,26 +85,21 @@ func LaunchVMM(ctx context.Context, o LaunchVMMOptions) (*exec.Cmd, *Client, err
 // (the only way CH accepts net FDs on restore; mirrors ch-remote's
 // send_with_fds). The VM comes back paused; call Resume after.
 //
-// memMode selects guest-RAM restore: "" / "Copy" = eager copy (CH default), or
-// "OnDemand" = userfaultfd demand-paging. OnDemand keeps the (memfd-backed) guest
-// memory SPARSE — it only faults in the pages the guest touches, instead of eager
-// copy densifying the whole memfd — so a subsequent snapshot writes just the
-// working set (fast) instead of full RAM. Confirmed on CH v52: the REST
-// RestoreConfig accepts memory_restore_mode (enum Copy|OnDemand) alongside the
-// SCM_RIGHTS net_fds, so ondemand + fd-backed net DO compose over REST (an earlier
-// note claimed memory_restore_mode was CLI-only; that was a pre-v52 limitation).
-// NOTE: with OnDemand, CH demand-pages from the snapshot's memory file for the
-// VM's whole lifetime, so sourceDir must stay present until the actor is torn down.
-func (c *Client) RestoreWithNetFDs(ctx context.Context, sourceDir string, nets []RestoredNet, memMode string) error {
+// NOTE on ondemand (userfaultfd) restore: it cannot be combined with this net-FD
+// path. memory_restore_mode is only accepted on the CLI `--restore` form (CH's
+// REST RestoreConfig denies the unknown field -> HTTP 400), while net_fds can ONLY
+// be passed over the REST api-socket via SCM_RIGHTS. So fd-backed restores use
+// CH's eager (copy) memory restore; ondemand would need a CH API that accepts both
+// net_fds and memory_restore_mode (follow-on).
+func (c *Client) RestoreWithNetFDs(ctx context.Context, sourceDir string, nets []RestoredNet) error {
 	type restoredNetConfig struct {
 		ID     string `json:"id"`
 		NumFDs int    `json:"num_fds"`
 	}
 	cfg := struct {
-		SourceURL         string              `json:"source_url"`
-		MemoryRestoreMode string              `json:"memory_restore_mode,omitempty"`
-		NetFDs            []restoredNetConfig `json:"net_fds,omitempty"`
-	}{SourceURL: SnapshotURL(sourceDir), MemoryRestoreMode: memMode}
+		SourceURL string              `json:"source_url"`
+		NetFDs    []restoredNetConfig `json:"net_fds,omitempty"`
+	}{SourceURL: SnapshotURL(sourceDir)}
 	var fds []int
 	for _, n := range nets {
 		cfg.NetFDs = append(cfg.NetFDs, restoredNetConfig{ID: n.ID, NumFDs: len(n.FDs)})
@@ -149,54 +144,6 @@ func (c *Client) RestoreWithNetFDs(ctx context.Context, sourceDir string, nets [
 	parts := strings.SplitN(strings.TrimSpace(status), " ", 3)
 	if len(parts) < 2 || !strings.HasPrefix(parts[1], "2") {
 		return fmt.Errorf("vm.restore failed: %s", strings.TrimSpace(status))
-	}
-	return nil
-}
-
-// AddNetWithFDs hotplugs a virtio-net device into a freshly-created (pre-boot or
-// running) VM, passing the tap FDs via SCM_RIGHTS — the boot-path analog of
-// RestoreWithNetFDs. kata adds net this way between vm.create and vm.boot
-// (clh.go vmAddNetPut). mac may be empty (CH assigns one); numQueues should be
-// 2*queuePairs (rx+tx) and len(fds) == queuePairs.
-func (c *Client) AddNetWithFDs(ctx context.Context, mac string, numQueues int, fds []int) error {
-	cfg := struct {
-		Mac       string `json:"mac,omitempty"`
-		NumQueues int    `json:"num_queues,omitempty"`
-		NumFDs    int    `json:"num_fds,omitempty"`
-	}{Mac: mac, NumQueues: numQueues, NumFDs: len(fds)}
-	body, err := json.Marshal(cfg)
-	if err != nil {
-		return err
-	}
-	raddr, err := net.ResolveUnixAddr("unix", c.apiSocket)
-	if err != nil {
-		return err
-	}
-	conn, err := net.DialUnix("unix", nil, raddr)
-	if err != nil {
-		return fmt.Errorf("dialing api-socket: %w", err)
-	}
-	defer conn.Close()
-	if dl, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(dl)
-	} else {
-		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
-	}
-	req := fmt.Sprintf("PUT /api/v1/vm.add-net HTTP/1.1\r\nHost: localhost\r\nAccept: */*\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(body), body)
-	var oob []byte
-	if len(fds) > 0 {
-		oob = unix.UnixRights(fds...)
-	}
-	if _, _, err := conn.WriteMsgUnix([]byte(req), oob, nil); err != nil {
-		return fmt.Errorf("sending vm.add-net with fds: %w", err)
-	}
-	status, err := bufio.NewReader(conn).ReadString('\n')
-	if err != nil {
-		return fmt.Errorf("reading vm.add-net response: %w", err)
-	}
-	parts := strings.SplitN(strings.TrimSpace(status), " ", 3)
-	if len(parts) < 2 || !strings.HasPrefix(parts[1], "2") {
-		return fmt.Errorf("vm.add-net failed: %s", strings.TrimSpace(status))
 	}
 	return nil
 }
