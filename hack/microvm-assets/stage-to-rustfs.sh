@@ -18,32 +18,28 @@
 # under kata-assets/, where atelet fetches it (per demos/counter/counter-microvm.yaml.tmpl).
 # Run after the cluster is up (hack/install-ate-kind.sh) and assemble.sh has produced $OUT.
 #
-# Requires the `aws` CLI. Env: OUT (asset dir, default ./bin/microvm-assets/arm64),
-# BUCKET (default ate-snapshots), NAMESPACE (rustfs namespace, default ate-system),
-# KUBECTL_CONTEXT (optional; kube context for port-forward).
+# Requires the `aws` CLI. Env: OUT (asset dir, default ./microvm-assets-arm64),
+# BUCKET (default ate-snapshots), NAMESPACE (rustfs namespace, default ate-system).
 
 set -o errexit -o nounset -o pipefail
 
-ROOT="$(git rev-parse --show-toplevel)"
-
-OUT="${OUT:-${ROOT}/bin/microvm-assets/arm64}"
+OUT="${OUT:-$PWD/microvm-assets-arm64}"
 BUCKET="${BUCKET:-ate-snapshots}"
 NAMESPACE="${NAMESPACE:-ate-system}"
-KUBECTL_CONTEXT="${KUBECTL_CONTEXT:-}"
 
 export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-rustfsadmin}"
 export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-rustfsadmin}"
 export AWS_REGION="${AWS_REGION:-us-east-1}"
 
 echo ">> Port-forwarding svc/rustfs 9000 in namespace ${NAMESPACE}..."
-kubectl ${KUBECTL_CONTEXT:+--context="${KUBECTL_CONTEXT}"} -n "${NAMESPACE}" port-forward svc/rustfs 9000:9000 >/tmp/rustfs-pf.log 2>&1 &
+kubectl -n "${NAMESPACE}" port-forward svc/rustfs 9000:9000 >/tmp/rustfs-pf.log 2>&1 &
 PF_PID=$!
 trap 'kill "$PF_PID" 2>/dev/null || true' EXIT
 sleep 3
 
 ENDPOINT="http://localhost:9000"
 echo ">> Uploading assets to s3://${BUCKET}/kata-assets/ via ${ENDPOINT}..."
-for f in cloud-hypervisor vmlinux rootfs.img configuration-clh.toml; do
+for f in containerd-shim-kata-v2 cloud-hypervisor virtiofsd-patched vmlinux rootfs.img configuration-clh.toml; do
   echo "   $f"
   aws --endpoint-url "${ENDPOINT}" s3 cp "${OUT}/${f}" "s3://${BUCKET}/kata-assets/${f}"
 done

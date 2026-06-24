@@ -20,8 +20,9 @@
 # configuration.toml) live on a cluster-scoped SandboxConfig, FETCHED at runtime
 # from the cluster object store bucket ${BUCKET_NAME} under kata-assets/ (rustfs on
 # kind, GCS on GKE) — NOT baked into the worker image. ateom owns the
-# cloud-hypervisor boot itself and gives the actor a writable virtio-blk rootfs, so
-# neither the kata shim nor virtiofsd is needed. The per-arch sha256 values below
+# cloud-hypervisor boot itself and gives the actor an overlay rootfs (virtio-fs RO
+# lower + virtio-blk writable upper), so it fetches virtiofsd (+ kata-shim). The
+# per-arch sha256 values below
 # are the asset sets produced by hack/microvm-assets/assemble.sh; atelet selects
 # the block matching the node's architecture, and each cluster's bucket holds that
 # arch's binaries at these paths (staged by run-microvm-demo[-kind].sh).
@@ -44,15 +45,24 @@ spec:
       cloud-hypervisor:
         url: "gs://${BUCKET_NAME}/kata-assets/cloud-hypervisor"
         sha256: "bf004ddc1a148f47caa87ac49a783b8dbd6bf9bc27abe522ed197df7b982d3b1"
+      # kata-shim + virtiofsd are needed by the overlay rootfs path (virtio-fs RO
+      # lower + virtio-blk upper). virtiofsd is built from upstream main (vhost 0.16;
+      # the snapshot/restore fix is not in a release tag yet). kata assets are 3.32.0.
+      kata-shim:
+        url: "gs://${BUCKET_NAME}/kata-assets/containerd-shim-kata-v2"
+        sha256: "bd255d4754bd920e0946f144b9bf85df4049daab13de1dc39636ab1f54a5b24a"
+      virtiofsd:
+        url: "gs://${BUCKET_NAME}/kata-assets/virtiofsd-patched"
+        sha256: "c33bbd38acfc1bd8d1a103304a931ba9739a930af9df1c58d1d9f5e317e60089"
       kata-kernel:
         url: "gs://${BUCKET_NAME}/kata-assets/vmlinux"
-        sha256: "a44d663f4ddad20a35527a3578fadef9beb23c1e5cb720e85d6928d6de70d3a1"
+        sha256: "f437320bab94f19105d12b932aa29735f0d54d2588218872254367f312c1027c"
       kata-image:
         url: "gs://${BUCKET_NAME}/kata-assets/rootfs.img"
-        sha256: "7ebd652760c881374c0a761d34addcb76d9a650e35c10c01b780ebcdd9a1f2aa"
+        sha256: "31ffb41177571c5654d3a28a2728eaac9d6d3daed90bb993f64e0b4b3ca6b235"
       kata-config:
         url: "gs://${BUCKET_NAME}/kata-assets/configuration-clh.toml"
-        sha256: "df504d9be0ed01765fdc8a9467955e1e671eb97724443f65a524bf914ccb818b"
+        sha256: "8a09a40543a527dbdc3ff26d229bae0de9aebb655475c28d7e5482dbedefa030"
     amd64:
       cloud-hypervisor:
         url: "gs://${BUCKET_NAME}/kata-assets/cloud-hypervisor"
