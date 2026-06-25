@@ -45,6 +45,11 @@ import (
 type runningActor struct {
 	containerName string
 
+	// ovlContainerID is the kata-agent container id of the overlay WORKLOAD (id-ovl),
+	// distinct from the carrier container (id). The agent keys the actor's stdout/
+	// stderr streams by this id; checkpoint/reset target the upper, not this id.
+	ovlContainerID string
+
 	// baseID is the FROZEN base sandbox id propagated across this actor's restore
 	// lineage. For a cold-run actor this is the actor's own id; for a restored
 	// actor it is the id read from the snapshot's base-id file (the golden id,
@@ -54,6 +59,10 @@ type runningActor struct {
 
 	// ateom owns this CH process (booted at Run or relaunched at Restore).
 	chCmd *exec.Cmd
+	// vfsdCmd is the virtiofsd serving the overlay RO lower (the CH fs device
+	// demand-pages from it for the actor's lifetime). ateom owns it; teardownActor
+	// kills it after the CH process. nil on any non-overlay path.
+	vfsdCmd *exec.Cmd
 	// apiSocket is the CH api-socket for this ateom-owned VMM.
 	apiSocket string
 
@@ -88,49 +97,30 @@ const baseIDFile = "base-id"
 // Asset names in RunWorkloadRequest.runtime_asset_paths (set by atelet's
 // fetchRuntimeAssets, keyed by the ActorTemplate runtime asset names).
 const (
-	assetCH     = "cloud-hypervisor"
-	assetKernel = "kata-kernel"
-	assetImage  = "kata-image"
-	assetConfig = "kata-config"
+	assetCH        = "cloud-hypervisor"
+	assetKernel    = "kata-kernel"
+	assetImage     = "kata-image"
+	assetConfig    = "kata-config"
+	assetVirtiofsd = "virtiofsd"
 )
 
-// actorRootfsDiskName is the actor's writable rootfs disk file under the actor
-// dir; it is the /dev/vdb backing path recorded in the snapshot config.json and
-// reopened verbatim on restore.
-const actorRootfsDiskName = "actor-rootfs.ext4"
-
-// goldenRootfsDiskName is the verbatim copy of the actor's /dev/vdb disk AS-OF the
-// golden snapshot, kept under the actor dir. reset-to-golden recreates /dev/vdb
-// from it on restore (byte-identical to what the snapshot's guest RAM/ext4 cache
-// expects), discarding the actor's later rootfs writes — gVisor semantics.
-const goldenRootfsDiskName = "golden-rootfs.ext4"
-
-// fileMissing reports whether path does not exist.
-func fileMissing(path string) bool {
-	_, err := os.Stat(path)
-	return os.IsNotExist(err)
-}
-
-// copyDiskFile copies a (sparse) disk image verbatim, preserving holes so the
-// (mostly-empty) ext4 image doesn't materialize its scratch blocks. Used to
-// save/restore the golden rootfs disk template.
-func copyDiskFile(ctx context.Context, src, dst string) error {
-	tmp := dst + ".tmp"
-	_ = os.Remove(tmp)
-	if out, err := exec.CommandContext(ctx, "cp", "--sparse=always", src, tmp).CombinedOutput(); err != nil {
-		return fmt.Errorf("cp %s -> %s: %w: %s", src, tmp, err, out)
-	}
-	if err := os.Rename(tmp, dst); err != nil {
-		return fmt.Errorf("rename %s -> %s: %w", tmp, dst, err)
-	}
-	return nil
-}
+// scratchDiskFile / scratchDiskBytes describe the empty writable /dev/vdb disk
+// backing the overlay upper. It is sparse (costs nothing until written), formatted
+// in-guest (mkfs.ext4), and mounted as the overlayfs upper/work so the actor's
+// rootfs writes stay off the snapshot-captured guest RAM.
+const (
+	scratchDiskFile  = "scratch.img"
+	scratchDiskBytes = 1 << 30 // 1 GiB sparse
+)
 
 // resolvedRuntime holds the concrete binary/config paths for a request, taken
 // from fetched runtime assets when present, else the process flags.
 type resolvedRuntime struct {
 	ch         string
 	configFile string
+	// virtiofsd is the vhost-user-fs daemon serving the overlay RO lower. Empty
+	// falls back to "virtiofsd" on PATH (StartVirtiofsd's default).
+	virtiofsd string
 }
 
 func firstNonEmpty(a, b string) string {
@@ -146,18 +136,21 @@ func (s *AteomService) resolveRuntime(paths map[string]string) resolvedRuntime {
 	return resolvedRuntime{
 		ch:         firstNonEmpty(paths[assetCH], s.chBinary),
 		configFile: firstNonEmpty(paths[assetConfig], s.kataConfig),
+		virtiofsd:  paths[assetVirtiofsd],
 	}
 }
 
 // RunWorkload boots the actor as a cloud-hypervisor micro-VM that ateom owns.
 //
-// ateom boots cloud-hypervisor itself — no kata shim — and gives the actor a
-// writable boot-time virtio-blk disk (/dev/vdb, built from the OCI bundle rootfs)
-// as its container rootfs. Rootfs writes land on that host-backed disk (off guest
-// RAM), so the CH snapshot is memory-only with no balloon and no virtiofsd
-// find-paths. It replicates the kata clh boot (vm.create kernel+image, add-net,
-// vm.boot) and the shim's post-boot work (agent CreateSandbox + guest network
-// config) before driving the kata-agent to start the blk-rootfs container.
+// ateom boots cloud-hypervisor itself — no kata shim — and gives the actor an
+// OVERLAY rootfs: the OCI image is served read-only over virtio-fs (the lower, by
+// virtiofsd find-paths) and a small empty boot-time virtio-blk disk (/dev/vdb) is
+// the writable ext4 upper. Per-actor setup is O(1) (bind the image, format an empty
+// upper) instead of O(image), and rootfs writes land on the host-backed upper (off
+// guest RAM), so the CH snapshot stays small. It replicates the kata clh boot
+// (vm.create kernel+image+fs, add-net, vm.boot) and the shim's post-boot work (agent
+// CreateSandbox + guest network config) before driving the kata-agent to create the
+// carrier + start the overlay container.
 //
 // Contract with atelet (mirrors ateom-gvisor):
 //   - The runtime assets (guest kernel, guest OS image, cloud-hypervisor, base
@@ -190,7 +183,6 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	if kernel == "" || image == "" {
 		return nil, fmt.Errorf("owned-boot requires %q and %q asset paths", assetKernel, assetImage)
 	}
-	actorDir := ateompath.ActorPath(ns, name, id)
 	rr := s.resolveRuntime(paths)
 
 	// Networking (host side): per-activation veth into the interior netns. The
@@ -212,12 +204,14 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 		return nil, fmt.Errorf("while preparing kata OCI spec: %w", err)
 	}
 
-	// Build the actor's writable rootfs as a raw ext4 virtio-blk disk from the
-	// atelet-populated OCI bundle rootfs. This becomes /dev/vdb.
-	diskPath := filepath.Join(actorDir, actorRootfsDiskName)
-	if err := kata.BuildExt4Image(ctx, filepath.Join(bundle, "rootfs"), diskPath); err != nil {
-		return nil, fmt.Errorf("while building actor rootfs disk: %w", err)
-	}
+	// Overlay rootfs (large-image path): the actor rootfs is overlay(virtio-fs RO
+	// lower + virtio-blk ext4 upper) rather than a per-actor full ext4 disk. The
+	// lower is the OCI image bundle served by virtiofsd (bound in, O(1)/actor); the
+	// upper is a small empty /dev/vdb formatted in-guest. Rootfs writes land on the
+	// upper, off the snapshot-captured guest RAM. Assembled below, after the VM dir
+	// + sockets exist.
+	bundleRootfs := filepath.Join(bundle, "rootfs")
+	scratchPath := filepath.Join(kata.VMDir(id), scratchDiskFile)
 
 	// Sizing + agent params from the kata config.
 	var cfgBytes []byte
@@ -241,6 +235,34 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	if err := os.MkdirAll(kata.VMDir(id), 0o700); err != nil {
 		return nil, fmt.Errorf("while creating VM dir: %w", err)
 	}
+
+	// Stage the overlay lower: bind the image bundle into virtiofsd's find-paths
+	// location (O(1)), create the empty sparse scratch upper disk, and start
+	// virtiofsd serving the lower. CH demand-pages from virtiofsd for the actor's
+	// lifetime, so ateom owns the process (killed in teardownActor). sourceID == id
+	// on a cold run (the frozen base id this lineage carries).
+	if err := kata.ReconstructSharedDirFromImage(ctx, bundleRootfs, id, id); err != nil {
+		return nil, fmt.Errorf("while staging overlay lower: %w", err)
+	}
+	if err := kata.CreateSparseFile(scratchPath, scratchDiskBytes); err != nil {
+		return nil, fmt.Errorf("while creating scratch upper: %w", err)
+	}
+	vfsdLogW, _ := os.OpenFile(filepath.Join(kata.VMDir(id), "virtiofsd.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	vfsdCmd, err := kata.StartVirtiofsd(ctx, kata.VirtiofsdOptions{
+		Binary:     rr.virtiofsd,
+		SocketPath: kata.VirtiofsdSocketPath(id),
+		SharedDir:  kata.SharedDir(id),
+		Log:        vfsdLogW,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("while starting virtiofsd: %w", err)
+	}
+	defer func() {
+		if retErr != nil && vfsdCmd.Process != nil {
+			_ = vfsdCmd.Process.Kill()
+			_, _ = vfsdCmd.Process.Wait()
+		}
+	}()
 
 	// Launch a bare VMM (CH + api-socket); ateom owns this process for teardown.
 	apiSocket := filepath.Join(kata.VMDir(id), "clh-api.sock")
@@ -284,12 +306,19 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 		Memory:  ch.MemoryConfig{Size: int64(memMiB) * 1024 * 1024, Shared: true},
 		Payload: ch.PayloadConfig{Kernel: kernel, Cmdline: cmdline},
 		Disks: []ch.DiskConfig{
+			// /dev/vda: the kata guest image (RO). /dev/vdb: the empty overlay upper.
 			{Path: image, Readonly: true, ImageType: "Raw", NumQueues: int32(vcpus), QueueSize: 1024},
-			{Path: diskPath, Readonly: false, ImageType: "Raw", NumQueues: int32(vcpus), QueueSize: 1024},
+			{Path: scratchPath, Readonly: false, ImageType: "Raw", NumQueues: int32(vcpus), QueueSize: 1024},
 		},
-		Rng:    &ch.RngConfig{Src: "/dev/urandom"},
-		Serial: &ch.ConsoleConfig{Mode: "File", File: serialLog},
-		Vsock:  &ch.VsockConfig{Cid: 3, Socket: kata.VsockSocketPath(id)},
+		// virtio-fs RO lower, on PCI segment 1 (kata's convention) — needs 2 segments.
+		Fs: []ch.FsConfig{{
+			Tag: kata.FsTag, Socket: kata.VirtiofsdSocketPath(id),
+			NumQueues: 1, QueueSize: 1024, PciSegment: 1,
+		}},
+		Platform: &ch.PlatformConfig{NumPciSegments: 2},
+		Rng:      &ch.RngConfig{Src: "/dev/urandom"},
+		Serial:   &ch.ConsoleConfig{Mode: "File", File: serialLog},
+		Vsock:    &ch.VsockConfig{Cid: 3, Socket: kata.VsockSocketPath(id)},
 	}
 	if err := client.CreateVM(ctx, vmCfg); err != nil {
 		return nil, fmt.Errorf("while creating VM: %w", err)
@@ -347,7 +376,7 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 
 	// Establish the agent sandbox (the shim normally does this at boot).
 	sbCtx, sbCancel := context.WithTimeout(ctx, 20*time.Second)
-	err = ac.CreateSandbox(sbCtx, &agentpb.CreateSandboxRequest{Hostname: spec.Hostname, SandboxId: id})
+	err = ac.CreateSandboxForActor(sbCtx, id, spec.Hostname)
 	sbCancel()
 	if err != nil {
 		return nil, fmt.Errorf("while creating agent sandbox: %w", err)
@@ -364,29 +393,56 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 		return nil, fmt.Errorf("while configuring guest network: %w", err)
 	}
 
-	// Start the actor with its rootfs on /dev/vdb (single blk storage).
+	// Format + mount the empty /dev/vdb scratch as the overlay upper (in-guest
+	// mkfs.ext4 over the debug console — no host e2fsprogs needed). upperBase is
+	// keyed on the FROZEN base id (== id on a cold run) so the lineage's reset-to-
+	// golden wipe targets a stable path across suspend/resume.
+	upperBase := kata.OverlayUpperBase(id)
+	if err = kata.SetupScratchUpper(ctx, vsockPath, upperBase); err != nil {
+		return nil, fmt.Errorf("while setting up overlay upper: %w", err)
+	}
+
+	// Carrier container (id == sandbox): rootfs = the virtio-fs base, created but NOT
+	// started, so the agent's setup_bundle eagerly binds the base to
+	// /run/kata-containers/<id>/rootfs (the overlay lowerdir — stable on arm64 where
+	// bare virtio-fs submounts ENOENT).
+	carrierCtx, carrierCancel := context.WithTimeout(ctx, 30*time.Second)
+	err = ac.CreateCarrier(carrierCtx, id, spec)
+	carrierCancel()
+	if err != nil {
+		dump := kata.DebugConsoleDump(ctx, vsockPath,
+			"echo '== shared/containers =='; ls -la /run/kata-containers/shared/containers/ 2>&1 | head -40")
+		slog.ErrorContext(ctx, "carrier create failed; dump", slog.String("dump", dump))
+		return nil, fmt.Errorf("while creating carrier: %w", err)
+	}
+
+	// Start the actor with an overlayfs rootfs: lower = the carrier's bind of the RO
+	// base, upper/work = <upperBase>/{fs,work} on /dev/vdb (writes off snapshot RAM).
+	// The workload is a SEPARATE container id (id-ovl) from the carrier (id).
+	ovlID := id + "-ovl"
 	wlCtx, wlCancel := context.WithTimeout(ctx, 30*time.Second)
-	err = ac.StartBlkWorkload(wlCtx, id, "/dev/vdb", spec)
+	err = ac.StartOverlayWorkload(wlCtx, id, ovlID, upperBase, spec)
 	wlCancel()
 	if err != nil {
 		dump := kata.DebugConsoleDump(ctx, vsockPath,
-			"echo '== /dev/vdb =='; ls -l /dev/vdb 2>&1; blkid /dev/vdb 2>&1; "+
-				"echo '== mounts =='; grep kata /proc/mounts 2>&1")
-		slog.ErrorContext(ctx, "blk workload failed; dump", slog.String("dump", dump))
-		return nil, fmt.Errorf("while starting blk workload: %w", err)
+			"echo '== /dev/vdb =='; blkid /dev/vdb 2>&1; echo '== upper =='; ls -la "+upperBase+" 2>&1; "+
+				"echo '== carrier rootfs =='; ls /run/kata-containers/"+id+"/rootfs/ 2>&1 | head; "+
+				"echo '== mounts =='; grep -E 'kata|overlay|vdb' /proc/mounts 2>&1")
+		slog.ErrorContext(ctx, "overlay workload failed; dump", slog.String("dump", dump))
+		return nil, fmt.Errorf("while starting overlay workload: %w", err)
 	}
 
-	ra := &runningActor{chCmd: chCmd, apiSocket: apiSocket, containerName: containerName, baseID: id, logAgent: ac}
+	ra := &runningActor{chCmd: chCmd, vfsdCmd: vfsdCmd, apiSocket: apiSocket, containerName: containerName, ovlContainerID: ovlID, baseID: id, logAgent: ac}
 	s.running[id] = ra
 
 	// Forward the actor container's stdout/stderr into the pod logs (parity with
-	// ateom-gvisor). StartBlkWorkload uses containerID==execID==id, so the agent
-	// keys the streams by id. The goroutines read over ac for the actor's lifetime
+	// ateom-gvisor). The overlay workload's container/exec id is ovlID, so the agent
+	// keys the streams by ovlID. The goroutines read over ac for the actor's lifetime
 	// and exit (io.EOF) when teardownActor closes ac.
-	s.startActorLogForwarding(ac, id, name, ns, containerName)
+	s.startActorLogForwarding(ac, ovlID, name, ns, containerName)
 
 	s.actorLogger.EmitLifecycleLog("Actor started", id, name, ns)
-	slog.InfoContext(ctx, "Actor started (owned-boot, virtio-blk rootfs)", slog.String("id", id))
+	slog.InfoContext(ctx, "Actor started (owned-boot, overlay rootfs)", slog.String("id", id), slog.String("workload", ovlID))
 	return &ateompb.RunWorkloadResponse{}, nil
 }
 
@@ -645,6 +701,36 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 		return nil, fmt.Errorf("while waiting for CH api-socket: %w", err)
 	}
 
+	// The FROZEN base id (the golden cold-run id) keys both the find-paths base layout
+	// AND the overlay upper mount path, invariant across the actor's whole restore
+	// lineage. For a cold-run actor it is its own id; for a restored actor it is the
+	// golden id propagated via ra.baseID (set from the snapshot we restored from). We
+	// can NOT derive it from config.json (its socket paths get rewritten to the current
+	// id on every restore, losing the invariant golden id).
+	baseID := id
+	if ra != nil && ra.baseID != "" {
+		baseID = ra.baseID
+	}
+
+	// Reset-to-golden (gVisor semantics): wipe the overlay upper (on the host-backed
+	// /dev/vdb scratch, mounted at <upperBase>/fs in the guest) so the actor's rootfs
+	// writes are discarded — on resume the rootfs is the golden image again. fstrim
+	// frees the blocks back to holes so the shipped scratch.img stays tiny. Done via
+	// the guest debug console (vsock 1026) BEFORE pause (it needs live vCPUs). Keyed on
+	// baseID so a restored actor wipes the path the lineage froze. Best-effort.
+	upperBase := kata.OverlayUpperBase(baseID)
+	ovlUpper := upperBase + "/fs"
+	wipeCmd := "b=$(ls -A " + ovlUpper + " 2>/dev/null | wc -l); " +
+		"rm -rf " + ovlUpper + "/* " + ovlUpper + "/.[!.]* 2>/dev/null; " +
+		"fstrim " + upperBase + " 2>/dev/null; " +
+		"a=$(ls -A " + ovlUpper + " 2>/dev/null | wc -l); echo upper_before=$b upper_after=$a"
+	wipeOut := kata.DebugConsoleDump(ctx, kata.VsockSocketPath(id), wipeCmd)
+	if strings.Contains(wipeOut, "upper_after=0") {
+		slog.InfoContext(ctx, "Reset overlay upper to golden", slog.String("id", id), slog.String("console", strings.TrimSpace(wipeOut)))
+	} else {
+		slog.WarnContext(ctx, "Reset-to-golden did NOT confirm empty upper; continuing", slog.String("id", id), slog.String("console", strings.TrimSpace(wipeOut)))
+	}
+
 	tPause := time.Now()
 	if err := client.Pause(ctx); err != nil {
 		return nil, fmt.Errorf("while pausing guest: %w", err)
@@ -660,26 +746,18 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 		return nil, fmt.Errorf("while creating checkpoint dir: %w", err)
 	}
 
-	// Record the FROZEN base id (the id the guest's virtio-fs find-paths are pinned
-	// to, <baseID>/rootfs). For a cold (shim-owned) actor this is its own id; for a
-	// restored actor it is the golden id propagated via ra.baseID (set from the
-	// snapshot we restored from). RestoreWorkload reads this to lay the
-	// reconstructed-from-image base at the path the guest expects. We can NOT derive
-	// it from config.json (its socket paths get rewritten to the current id on every
-	// restore, losing the invariant golden id).
-	baseID := id
-	if ra != nil && ra.baseID != "" {
-		baseID = ra.baseID
-	}
+	// Record the FROZEN base id (computed above, the id the guest's virtio-fs
+	// find-paths are pinned to at <baseID>/rootfs). RestoreWorkload reads this to lay
+	// the reconstructed-from-image lower at the path the guest expects.
 	if err := os.WriteFile(filepath.Join(checkpointDir, baseIDFile), []byte(baseID), 0o600); err != nil {
 		return nil, fmt.Errorf("while writing %s: %w", baseIDFile, err)
 	}
 
-	// NB: the snapshot is MEMORY-ONLY (config/state/memory-ranges + base-id). The
-	// RO base (/dev/vda kata image) is a content-addressed static file present on
-	// every node, and the writable rootfs (/dev/vdb) is reset from the golden disk
-	// template at restore — neither needs to ship in the snapshot, mirroring gVisor
-	// ateom (rootfs from the image at restore).
+	// NB: the snapshot ships the memory image (config/state/memory-ranges + base-id)
+	// PLUS the tiny reset-to-golden overlay upper (scratch.img, written below). The RO
+	// lower (the OCI image, served via virtio-fs) is reconstructed from the local
+	// bundle at restore, so it never ships — keeping the snapshot small and the rootfs
+	// gVisor-ephemeral (rootfs writes reset to the golden image at restore).
 
 	slog.InfoContext(ctx, "Snapshotting guest", slog.String("id", id), slog.String("dir", checkpointDir))
 	tSnapshot := time.Now()
@@ -708,20 +786,16 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 			slog.String("id", id), slog.Duration("merge", time.Since(tMerge)))
 	}
 
-	// reset-to-golden support: save the actor's /dev/vdb AS-OF this (paused,
-	// consistent) snapshot as a verbatim golden template, so future restores can
-	// recreate the disk byte-identical to what the snapshot's guest RAM expects
-	// while discarding the actor's later rootfs writes. Saved once (the first/golden
-	// checkpoint) and kept; best-effort (without it, restore reopens the live disk =
-	// continuity). TODO: ship the template with the snapshot for cross-node restore
-	// (it's golden, shipped once per template, like the OCI base).
-	actorDir := ateompath.ActorPath(ns, name, id)
-	if tmpl := filepath.Join(actorDir, goldenRootfsDiskName); fileMissing(tmpl) {
-		if cerr := copyDiskFile(ctx, filepath.Join(actorDir, actorRootfsDiskName), tmpl); cerr != nil {
-			slog.WarnContext(ctx, "Failed to save golden rootfs template; restore will reopen live disk", slog.Any("err", cerr))
-		} else {
-			slog.InfoContext(ctx, "Saved golden rootfs disk template", slog.String("id", id))
-		}
+	// Ship the overlay upper (the /dev/vdb scratch) byte-exact alongside the memory
+	// snapshot. The guest froze with this ext4 mounted, so its on-disk state must match
+	// the snapshot's guest page cache on resume — it is COPIED, not reconstructed (only
+	// the empty/golden lower can be rebuilt deterministically; a live ext4 cannot).
+	// After reset-to-golden + fstrim above it is empty + sparse (tiny). RestoreWorkload
+	// places it into the restoring actor's VMDir and repoints the config at it.
+	scratchSrc := filepath.Join(kata.VMDir(id), scratchDiskFile)
+	scratchDst := filepath.Join(checkpointDir, scratchDiskFile)
+	if out, cerr := exec.CommandContext(ctx, "cp", "--sparse=always", scratchSrc, scratchDst).CombinedOutput(); cerr != nil {
+		return nil, fmt.Errorf("while shipping overlay upper scratch: %w (%s)", cerr, strings.TrimSpace(string(out)))
 	}
 
 	// Report exactly the files we wrote so atelet ships precisely the CH snapshot
@@ -795,6 +869,12 @@ func (s *AteomService) teardownActor(ctx context.Context, id string, ra *running
 			_ = ra.chCmd.Process.Kill()
 			_, _ = ra.chCmd.Process.Wait()
 		}
+		// Kill the virtiofsd serving the overlay RO lower (after CH, which was the
+		// only client). nil on the non-overlay path.
+		if ra.vfsdCmd != nil && ra.vfsdCmd.Process != nil {
+			_ = ra.vfsdCmd.Process.Kill()
+			_, _ = ra.vfsdCmd.Process.Wait()
+		}
 	}
 
 	// Sweep any leftover per-sandbox host-side state + orphaned per-sandbox
@@ -805,16 +885,17 @@ func (s *AteomService) teardownActor(ctx context.Context, id string, ra *running
 // RestoreWorkload restores the actor on a (possibly different) pod by relaunching
 // cloud-hypervisor directly from the downloaded snapshot and resuming.
 //
-// Contract with atelet: the memory-only snapshot dir (config.json + state.json +
-// memory-ranges + base-id) has been downloaded to RestoreStateDir.
+// Contract with atelet: the snapshot dir (config.json + state.json + memory-ranges
+// + base-id + scratch.img overlay upper) has been downloaded to RestoreStateDir.
 //
-// There is NO virtiofsd and NO shared-dir to reconstruct — the rootfs is the
-// writable /dev/vdb disk, which CH reopens from the path recorded in the snapshot
-// config.json. Steps: rewrite the vsock socket path to this actor's VMDir,
-// reset /dev/vdb to the golden disk template (or rebuild it from the OCI image),
-// rebuild the tap (the snapshot's virtio-net is fd-backed → fresh net_fds),
-// relaunch CH with --restore, and resume. Guest RAM (incl. the actor's in-memory
-// state and frozen network config) comes back from the memory-only snapshot.
+// The overlay rootfs is reconstructed: rebuild the virtio-fs RO lower from the local
+// OCI bundle (atelet re-unpacked the golden image) at the frozen find-paths path,
+// place the shipped /dev/vdb upper (scratch.img) in this actor's VMDir, and start
+// virtiofsd. Then rewrite the snapshot config's per-VMDir paths (vsock + serial + fs
+// socket + the upper disk) to this actor's, rebuild the tap (the snapshot's
+// virtio-net is fd-backed → fresh net_fds), relaunch CH with --restore (eager Copy),
+// and resume. Guest RAM (incl. the actor's in-memory state and frozen network config)
+// comes back from the memory image.
 func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.RestoreWorkloadRequest) (resp *ateompb.RestoreWorkloadResponse, retErr error) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
@@ -845,42 +926,53 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		return nil, fmt.Errorf("while creating VM dir: %w", err)
 	}
 
-	// Recreate the /dev/vdb backing file the snapshot references (the actor dir),
-	// reset-to-golden. Two ways, both byte-consistent with the golden snapshot's
-	// guest ext4 cache:
-	//   - same-node: a verbatim golden template (copyDiskFile) — guaranteed identical.
-	//   - cross-node: rebuild from the OCI image atelet unpacked to the bundle at
-	//     restore (mkfs.ext4 -d is LAYOUT-deterministic for identical inputs, so the
-	//     data blocks land at the same offsets the guest cache expects; only the
-	//     superblock UUID/timestamps differ, which are cached in RAM and not re-read).
-	// Either way the actor's prior rootfs writes are discarded (gVisor semantics).
 	containers := req.GetSpec().GetContainers()
 	if len(containers) != 1 {
 		return nil, status.Errorf(codes.Unimplemented, "ateom-microvm supports exactly one container, got %d", len(containers))
 	}
-	actorDir := ateompath.ActorPath(ns, name, id)
-	diskPath := filepath.Join(actorDir, actorRootfsDiskName)
-	if tmpl := filepath.Join(actorDir, goldenRootfsDiskName); !fileMissing(tmpl) {
-		if err := copyDiskFile(ctx, tmpl, diskPath); err != nil {
-			return nil, fmt.Errorf("while resetting rootfs disk to golden (template): %w", err)
-		}
-		slog.InfoContext(ctx, "Reset actor rootfs disk to golden (template)", slog.String("id", id))
-	} else {
-		bundleRootfs := filepath.Join(ateompath.OCIBundlePath(ns, name, id, containers[0].GetName()), "rootfs")
-		if err := kata.BuildExt4Image(ctx, bundleRootfs, diskPath); err != nil {
-			return nil, fmt.Errorf("while reconstructing rootfs disk from image: %w", err)
-		}
-		slog.InfoContext(ctx, "Reconstructed actor rootfs disk from image", slog.String("id", id))
+
+	// Reconstruct the overlay RO lower from the LOCAL OCI bundle (atelet re-unpacked
+	// the golden image; reset-to-golden means the base is always the golden image) at
+	// the frozen find-paths location <SharedDir(id)>/<srcID>/rootfs. The guest's
+	// virtio-fs is pinned to srcID, so the bind must land at srcID's path even though
+	// this actor's id differs. Cross-node consistency relies on a deterministic unpack.
+	bundleRootfs := filepath.Join(ateompath.OCIBundlePath(ns, name, id, containers[0].GetName()), "rootfs")
+	if err := kata.ReconstructSharedDirFromImage(ctx, bundleRootfs, id, srcID); err != nil {
+		return nil, fmt.Errorf("while reconstructing overlay lower: %w", err)
 	}
 
-	// Repoint the snapshot config's writable /dev/vdb disk at THIS actor's
-	// reconstructed backing file. The golden snapshot recorded the golden actor's
-	// per-actor disk path, which is stale on any pod restoring a different actor
-	// (and absent on any node that never ran the golden) — unlike /dev/vda, the
-	// content-addressed kata image whose path is identical on every node.
-	if err := repointActorRootfsDisk(restoreDir, diskPath); err != nil {
-		return nil, fmt.Errorf("while repointing actor rootfs disk in snapshot config: %w", err)
+	// Place the shipped overlay upper (scratch.img) at this actor's VMDir and repoint
+	// the snapshot config's /dev/vdb disk at it (the snapshot recorded the golden
+	// actor's per-actor path). The guest resumes with this ext4 mounted, so it must be
+	// the byte-exact disk the snapshot's page cache expects — copied, not rebuilt.
+	scratchSrc := filepath.Join(restoreDir, scratchDiskFile)
+	scratchDst := filepath.Join(kata.VMDir(id), scratchDiskFile)
+	if out, cerr := exec.CommandContext(ctx, "cp", "--sparse=always", scratchSrc, scratchDst).CombinedOutput(); cerr != nil {
+		return nil, fmt.Errorf("while placing overlay upper for restore: %w (%s)", cerr, strings.TrimSpace(string(out)))
 	}
+	if err := repointDisk(restoreDir, scratchDiskFile, scratchDst); err != nil {
+		return nil, fmt.Errorf("while repointing overlay upper in snapshot config: %w", err)
+	}
+
+	// Start virtiofsd serving the reconstructed lower; CH connects to it at restore
+	// (the fs socket was repointed to this VMDir above) and demand-pages for the VM's
+	// lifetime, so ateom owns it (killed in teardownActor).
+	vfsdLogW, _ := os.OpenFile(filepath.Join(kata.VMDir(id), "virtiofsd.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	vfsdCmd, err := kata.StartVirtiofsd(ctx, kata.VirtiofsdOptions{
+		Binary:     rr.virtiofsd,
+		SocketPath: kata.VirtiofsdSocketPath(id),
+		SharedDir:  kata.SharedDir(id),
+		Log:        vfsdLogW,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("while starting virtiofsd for restore: %w", err)
+	}
+	defer func() {
+		if retErr != nil && vfsdCmd.Process != nil {
+			_ = vfsdCmd.Process.Kill()
+			_, _ = vfsdCmd.Process.Wait()
+		}
+	}()
 
 	// Networking: rebuild the per-activation veth + tap; the snapshot's virtio-net
 	// is fd-backed, so CH needs fresh tap FDs (net_fds) on restore.
@@ -932,26 +1024,24 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 			_ = chCmd.Process.Kill()
 		}
 	}()
-	// OnDemand (userfaultfd) memory restore: ~75ms vs ~1.8s eager, and it keeps the
-	// memfd SPARSE so the next suspend isn't the eager-copy-densified full-RAM scan.
-	// CH's OnDemand snapshot alone would be INCOMPLETE (it writes only faulted pages,
-	// dropping the un-faulted ones it demand-pages from this source) — so
-	// CheckpointWorkload overlays CH's delta onto this source (restoreSourceDir) to
-	// rebuild a complete snapshot. CH demand-pages from restoreDir for the VM's whole
-	// lifetime, so it must persist until teardown (atelet keeps it until reset).
-	if err := client.RestoreWithNetFDs(ctx, restoreDir, restoredNets, "OnDemand"); err != nil {
+	// Eager (Copy) memory restore. The overlay path uses it (not OnDemand) because the
+	// snapshot is self-contained (memory image + shipped scratch upper) — eager restore
+	// reads it fully and produces a COMPLETE next snapshot, so there is no restore
+	// source to demand-page from or to overlay deltas onto at checkpoint.
+	if err := client.RestoreWithNetFDs(ctx, restoreDir, restoredNets, "Copy"); err != nil {
 		return nil, fmt.Errorf("while restoring VM with net FDs: %w", err)
 	}
 	if err := client.Resume(ctx); err != nil {
 		return nil, fmt.Errorf("while resuming restored guest: %w", err)
 	}
 
-	ra := &runningActor{chCmd: chCmd, apiSocket: apiSocket, baseID: srcID, restoreSourceDir: restoreDir}
+	ra := &runningActor{chCmd: chCmd, vfsdCmd: vfsdCmd, apiSocket: apiSocket, baseID: srcID, ovlContainerID: id + "-ovl"}
 
 	// Re-attach stdout/stderr forwarding: the restored guest's container + kata-agent
-	// are alive, so a fresh dial over this actor's vsock resumes ReadStdout/ReadStderr
-	// (same containerID==execID==id as the cold run). Best-effort — a failed dial must
-	// not fail the restore (the actor is already running); forwarding is just skipped.
+	// are alive, so a fresh dial over this actor's vsock resumes ReadStdout/ReadStderr.
+	// The overlay workload's container/exec id is ovlContainerID (id-ovl), so the agent
+	// keys the streams by it. Best-effort — a failed dial must not fail the restore (the
+	// actor is already running); forwarding is just skipped.
 	vsockPath := kata.VsockSocketPath(id)
 	logAC, dialErr := dialAgentRetry(ctx, vsockPath, 15*time.Second)
 	if dialErr != nil {
@@ -959,12 +1049,12 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 			slog.String("id", id), slog.Any("err", dialErr))
 	} else {
 		ra.logAgent = logAC
-		s.startActorLogForwarding(logAC, id, name, ns, containers[0].GetName())
+		s.startActorLogForwarding(logAC, ra.ovlContainerID, name, ns, containers[0].GetName())
 	}
 
 	s.running[id] = ra
 	s.actorLogger.EmitLifecycleLog("Actor restored", id, name, ns)
-	slog.InfoContext(ctx, "Actor restored (owned-boot, virtio-blk rootfs)",
+	slog.InfoContext(ctx, "Actor restored (owned-boot, overlay rootfs)",
 		slog.String("id", id), slog.Duration("total", time.Since(tStart)))
 	return &ateompb.RestoreWorkloadResponse{}, nil
 }
@@ -997,6 +1087,15 @@ func rewriteSnapshotSocketPaths(snapshotDir, id string) error {
 			serial["file"] = filepath.Join(kata.VMDir(id), "serial.log")
 		}
 	}
+	// The overlay RO lower is served by a per-VMDir virtiofsd socket; the snapshot
+	// recorded the golden actor's, so repoint each fs device at this actor's VMDir.
+	if fss, ok := cfg["fs"].([]any); ok {
+		for _, f := range fss {
+			if fm, ok := f.(map[string]any); ok {
+				fm["socket"] = kata.VirtiofsdSocketPath(id)
+			}
+		}
+	}
 	out, err := json.Marshal(cfg)
 	if err != nil {
 		return err
@@ -1007,16 +1106,16 @@ func rewriteSnapshotSocketPaths(snapshotDir, id string) error {
 	return nil
 }
 
-// repointActorRootfsDisk rewrites the snapshot config.json so the writable
-// /dev/vdb actor rootfs disk points at this actor's reconstructed backing file
-// (diskPath). The actor rootfs disk lives under the actor's per-actor directory
-// (keyed by actor id), so the golden snapshot's recorded path is the GOLDEN
-// actor's — stale on any pod restoring a different actor, and absent on any node
-// that never ran the golden. (This is the disk analogue of the serial.file
-// repoint in rewriteSnapshotSocketPaths.) The disk is identified by basename so
-// the read-only /dev/vda kata image (a content-addressed static file) is left
-// untouched; it is an error if no actor rootfs disk is present to repoint.
-func repointActorRootfsDisk(snapshotDir, diskPath string) error {
+// repointDisk rewrites the snapshot config.json so the writable disk whose backing
+// file has the given basename points at newPath. The overlay upper (scratch.img)
+// lives under the actor's per-actor VMDir (keyed by actor id), so the golden
+// snapshot's recorded path is the GOLDEN actor's — stale on any pod restoring a
+// different actor, and absent on any node that never ran the golden. (This is the
+// disk analogue of the serial.file/fs.socket repoints in rewriteSnapshotSocketPaths.)
+// The disk is identified by basename so the read-only /dev/vda kata image (a
+// content-addressed static file) is left untouched; it is an error if no disk with
+// that basename is present to repoint.
+func repointDisk(snapshotDir, basename, newPath string) error {
 	cfgPath := filepath.Join(snapshotDir, "config.json")
 	b, err := os.ReadFile(cfgPath)
 	if err != nil {
@@ -1033,14 +1132,14 @@ func repointActorRootfsDisk(snapshotDir, diskPath string) error {
 			if !ok {
 				continue
 			}
-			if p, _ := dm["path"].(string); filepath.Base(p) == actorRootfsDiskName {
-				dm["path"] = diskPath
+			if p, _ := dm["path"].(string); filepath.Base(p) == basename {
+				dm["path"] = newPath
 				rewrote = true
 			}
 		}
 	}
 	if !rewrote {
-		return fmt.Errorf("no %q disk found in %q to repoint", actorRootfsDiskName, cfgPath)
+		return fmt.Errorf("no %q disk found in %q to repoint", basename, cfgPath)
 	}
 	out, err := json.Marshal(cfg)
 	if err != nil {
