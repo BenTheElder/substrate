@@ -156,11 +156,12 @@ func (s *AteomService) resolveRuntime(paths map[string]string) resolvedRuntime {
 //
 // ateom boots cloud-hypervisor itself — no kata shim — and gives the actor a
 // writable boot-time virtio-blk disk (/dev/vdb, built from the OCI bundle rootfs)
-// as its container rootfs. Rootfs writes land on that host-backed disk (off guest
-// RAM), so the CH snapshot is memory-only with no balloon and no virtiofsd
-// find-paths. It replicates the kata clh boot (vm.create kernel+image, add-net,
-// vm.boot) and the shim's post-boot work (agent CreateSandbox + guest network
-// config) before driving the kata-agent to start the blk-rootfs container.
+// as its container rootfs. Rootfs data lives on that host-backed disk rather than
+// a guest tmpfs overlay-upper, so the CH snapshot is memory-only with no balloon
+// needed to reclaim a RAM-backed upper. It replicates the kata clh boot (vm.create
+// kernel+image, add-net, vm.boot) and the shim's post-boot work (agent
+// CreateSandbox + guest network config) before driving the kata-agent to start the
+// blk-rootfs container.
 //
 // Contract with atelet (mirrors ateom-gvisor):
 //   - The runtime assets (guest kernel, guest OS image, cloud-hypervisor, base
@@ -626,9 +627,9 @@ func defaultKataResources() *specs.LinuxResources {
 //
 // ateom drives the ateom-owned CH's REST api-socket: pause -> snapshot
 // file://<CheckpointStateDir> (config.json + state.json + sparse memory-ranges) ->
-// tear the VMM down. The actor's rootfs writes are on the host-backed /dev/vdb
-// (NOT guest RAM), so the snapshot is naturally memory-only and small — no overlay
-// tmpfs upper to wipe and no balloon to inflate before snapshot.
+// tear the VMM down. The actor's rootfs lives on the host-backed /dev/vdb, not a
+// guest tmpfs overlay-upper, so the snapshot is naturally memory-only and small —
+// no RAM-backed upper to wipe and no balloon to inflate before snapshot.
 func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.CheckpointWorkloadRequest) (*ateompb.CheckpointWorkloadResponse, error) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
@@ -681,11 +682,9 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 		return nil, fmt.Errorf("while writing %s: %w", baseIDFile, err)
 	}
 
-	// NB: the snapshot is MEMORY-ONLY (config/state/memory-ranges + base-id). The
-	// RO base (/dev/vda kata image) is a content-addressed static file present on
-	// every node, and the writable rootfs (/dev/vdb) is reset from the golden disk
-	// template at restore — neither needs to ship in the snapshot, mirroring gVisor
-	// ateom (rootfs from the image at restore).
+	// NB: the snapshot is memory-only (config/state/memory-ranges + base-id). The RO
+	// base (/dev/vda) and the writable rootfs (/dev/vdb, reset to golden at restore)
+	// are reconstructed on every node, so neither ships in the snapshot.
 
 	slog.InfoContext(ctx, "Snapshotting guest", slog.String("id", id), slog.String("dir", checkpointDir))
 	tSnapshot := time.Now()
