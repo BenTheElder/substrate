@@ -31,6 +31,7 @@ import (
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/third_party/kata/agentpb"
 	"github.com/agent-substrate/substrate/internal/ateompath"
 	"github.com/agent-substrate/substrate/internal/proto/ateompb"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -220,21 +221,10 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 		return nil, fmt.Errorf("while building actor rootfs disk: %w", err)
 	}
 
-	// Sizing + agent params from the kata config.
-	var cfgBytes []byte
-	if rr.configFile != "" {
-		cfgBytes, _ = os.ReadFile(rr.configFile)
-	}
-	cfg, err := kata.ParseConfig(cfgBytes, 2048, 1)
+	// Guest sizing + agent kernel params from the kata config.
+	memMiB, vcpus, kparams, err := s.guestConfig(rr)
 	if err != nil {
-		return nil, fmt.Errorf("while parsing kata config: %w", err)
-	}
-	memMiB, vcpus := cfg.MemoryMiB, cfg.VCPUs
-	// Enable the guest debug console (vsock 1026) for in-guest diagnostics on
-	// failure; with kata-debug also raise the agent log level.
-	kparams := kata.WithDebugConsole(cfg.KernelParams)
-	if s.kataDebug {
-		kparams = kata.WithAgentDebug(kparams)
+		return nil, err
 	}
 
 	// Clean stale per-sandbox state + create the runtime dir for the sockets.
@@ -261,37 +251,11 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 		}
 	}()
 
-	// Kernel cmdline: replicate kata's clh boot cmdline (verified against a live
-	// kata snapshot's payload.cmdline). Beyond the root/clh base params it MUST
-	// include systemd.unit=kata-containers.target (else systemd boots the default
-	// target and powers off — the guest exits ~6s in) and mask systemd-networkd
-	// (the agent owns eth0). The console is ARCH-SPECIFIC: ttyAMA0 (PL011) on
-	// arm64, ttyS0 (8250) on amd64 — wrong console => "unable to open an initial
-	// console". The config's kernel_params (agent.* etc.) are appended. Serial is
-	// captured to a file for boot debugging.
+	// Assemble the CH VmConfig (kata-compatible cmdline, RO image on /dev/vda +
+	// writable rootfs on /dev/vdb). serialLog is also read on a failed agent dial
+	// below, so keep it here.
 	serialLog := filepath.Join(kata.VMDir(id), "serial.log")
-	console := "ttyS0"
-	if runtime.GOARCH == "arm64" {
-		console = "ttyAMA0"
-	}
-	cmdline := "root=/dev/vda1 rootflags=data=ordered,errors=remount-ro ro rootfstype=ext4 " +
-		"panic=1 no_timer_check noreplace-smp console=" + console + ",115200n8 " +
-		"systemd.unit=kata-containers.target systemd.mask=systemd-networkd.service systemd.mask=systemd-networkd.socket"
-	if kparams != "" {
-		cmdline += " " + kparams
-	}
-	vmCfg := ch.VmConfig{
-		Cpus:    ch.CpusConfig{BootVcpus: int32(vcpus), MaxVcpus: int32(vcpus)},
-		Memory:  ch.MemoryConfig{Size: int64(memMiB) * 1024 * 1024, Shared: true},
-		Payload: ch.PayloadConfig{Kernel: kernel, Cmdline: cmdline},
-		Disks: []ch.DiskConfig{
-			{Path: image, Readonly: true, ImageType: "Raw", NumQueues: int32(vcpus), QueueSize: 1024},
-			{Path: diskPath, Readonly: false, ImageType: "Raw", NumQueues: int32(vcpus), QueueSize: 1024},
-		},
-		Rng:    &ch.RngConfig{Src: "/dev/urandom"},
-		Serial: &ch.ConsoleConfig{Mode: "File", File: serialLog},
-		Vsock:  &ch.VsockConfig{Cid: 3, Socket: kata.VsockSocketPath(id)},
-	}
+	vmCfg := buildVMConfig(id, kernel, image, diskPath, kparams, serialLog, memMiB, vcpus)
 	if err := client.CreateVM(ctx, vmCfg); err != nil {
 		return nil, fmt.Errorf("while creating VM: %w", err)
 	}
@@ -346,35 +310,9 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 		}
 	}()
 
-	// Establish the agent sandbox (the shim normally does this at boot).
-	sbCtx, sbCancel := context.WithTimeout(ctx, 20*time.Second)
-	err = ac.CreateSandbox(sbCtx, &agentpb.CreateSandboxRequest{Hostname: spec.Hostname, SandboxId: id})
-	sbCancel()
-	if err != nil {
-		return nil, fmt.Errorf("while creating agent sandbox: %w", err)
-	}
-
-	// Configure guest networking (the shim's job): eth0 IP/MAC/MTU, routes, ARP.
-	mtu := uint64(s.actorVethMTU(ctx))
-	netCtx, netCancel := context.WithTimeout(ctx, 20*time.Second)
-	err = s.configureGuestNetwork(netCtx, ac, mtu)
-	netCancel()
-	if err != nil {
-		dump := kata.DebugConsoleDump(ctx, vsockPath, "ip addr 2>&1; echo '== route =='; ip route 2>&1; echo '== neigh =='; ip neigh 2>&1")
-		slog.ErrorContext(ctx, "guest network config failed; dump", slog.String("dump", dump))
-		return nil, fmt.Errorf("while configuring guest network: %w", err)
-	}
-
-	// Start the actor with its rootfs on /dev/vdb (single blk storage).
-	wlCtx, wlCancel := context.WithTimeout(ctx, 30*time.Second)
-	err = ac.StartBlkWorkload(wlCtx, id, "/dev/vdb", spec)
-	wlCancel()
-	if err != nil {
-		dump := kata.DebugConsoleDump(ctx, vsockPath,
-			"echo '== /dev/vdb =='; ls -l /dev/vdb 2>&1; blkid /dev/vdb 2>&1; "+
-				"echo '== mounts =='; grep kata /proc/mounts 2>&1")
-		slog.ErrorContext(ctx, "blk workload failed; dump", slog.String("dump", dump))
-		return nil, fmt.Errorf("while starting blk workload: %w", err)
+	// Post-boot kata-agent setup: sandbox, guest networking, start the container.
+	if err := s.startActorContainer(ctx, ac, id, vsockPath, spec); err != nil {
+		return nil, err
 	}
 
 	ra := &runningActor{chCmd: chCmd, apiSocket: apiSocket, containerName: containerName, baseID: id, logAgent: ac}
@@ -389,6 +327,97 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	s.actorLogger.EmitLifecycleLog("Actor started", id, name, ns)
 	slog.InfoContext(ctx, "Actor started (owned-boot, virtio-blk rootfs)", slog.String("id", id))
 	return &ateompb.RunWorkloadResponse{}, nil
+}
+
+// guestConfig reads guest sizing + agent kernel params from the resolved kata
+// config, enabling the debug console (vsock 1026) for in-guest diagnostics and,
+// with kataDebug, raising the agent log level.
+func (s *AteomService) guestConfig(rr resolvedRuntime) (memMiB, vcpus int, kparams string, err error) {
+	var cfgBytes []byte
+	if rr.configFile != "" {
+		cfgBytes, _ = os.ReadFile(rr.configFile)
+	}
+	cfg, err := kata.ParseConfig(cfgBytes, 2048, 1)
+	if err != nil {
+		return 0, 0, "", fmt.Errorf("while parsing kata config: %w", err)
+	}
+	kparams = kata.WithDebugConsole(cfg.KernelParams)
+	if s.kataDebug {
+		kparams = kata.WithAgentDebug(kparams)
+	}
+	return cfg.MemoryMiB, cfg.VCPUs, kparams, nil
+}
+
+// buildVMConfig assembles the cloud-hypervisor VmConfig for the owned boot. The
+// kernel cmdline replicates kata's clh boot cmdline (verified against a live kata
+// snapshot's payload.cmdline): beyond the root/clh base params it MUST include
+// systemd.unit=kata-containers.target (else systemd boots the default target and
+// powers off — the guest exits ~6s in) and mask systemd-networkd (the agent owns
+// eth0). The console is ARCH-SPECIFIC: ttyAMA0 (PL011) on arm64, ttyS0 (8250) on
+// amd64 — the wrong one => "unable to open an initial console". The config's
+// kernel_params are appended; serial is captured to serialLog for boot debugging.
+// The RO guest image is /dev/vda, the writable rootfs /dev/vdb.
+func buildVMConfig(id, kernel, image, diskPath, kparams, serialLog string, memMiB, vcpus int) ch.VmConfig {
+	console := "ttyS0"
+	if runtime.GOARCH == "arm64" {
+		console = "ttyAMA0"
+	}
+	cmdline := "root=/dev/vda1 rootflags=data=ordered,errors=remount-ro ro rootfstype=ext4 " +
+		"panic=1 no_timer_check noreplace-smp console=" + console + ",115200n8 " +
+		"systemd.unit=kata-containers.target systemd.mask=systemd-networkd.service systemd.mask=systemd-networkd.socket"
+	if kparams != "" {
+		cmdline += " " + kparams
+	}
+	return ch.VmConfig{
+		Cpus:    ch.CpusConfig{BootVcpus: int32(vcpus), MaxVcpus: int32(vcpus)},
+		Memory:  ch.MemoryConfig{Size: int64(memMiB) * 1024 * 1024, Shared: true},
+		Payload: ch.PayloadConfig{Kernel: kernel, Cmdline: cmdline},
+		Disks: []ch.DiskConfig{
+			{Path: image, Readonly: true, ImageType: "Raw", NumQueues: int32(vcpus), QueueSize: 1024},
+			{Path: diskPath, Readonly: false, ImageType: "Raw", NumQueues: int32(vcpus), QueueSize: 1024},
+		},
+		Rng:    &ch.RngConfig{Src: "/dev/urandom"},
+		Serial: &ch.ConsoleConfig{Mode: "File", File: serialLog},
+		Vsock:  &ch.VsockConfig{Cid: 3, Socket: kata.VsockSocketPath(id)},
+	}
+}
+
+// startActorContainer performs the post-boot kata-agent setup the shim normally
+// does at boot: establish the sandbox, configure guest networking (eth0
+// IP/MAC/MTU + routes), and start the actor container on its /dev/vdb rootfs. On
+// failure it dumps guest diagnostics over the debug console.
+func (s *AteomService) startActorContainer(ctx context.Context, ac *kata.AgentClient, id, vsockPath string, spec *specs.Spec) error {
+	// Establish the agent sandbox (the shim normally does this at boot).
+	sbCtx, sbCancel := context.WithTimeout(ctx, 20*time.Second)
+	err := ac.CreateSandbox(sbCtx, &agentpb.CreateSandboxRequest{Hostname: spec.Hostname, SandboxId: id})
+	sbCancel()
+	if err != nil {
+		return fmt.Errorf("while creating agent sandbox: %w", err)
+	}
+
+	// Configure guest networking (the shim's job): eth0 IP/MAC/MTU, routes, ARP.
+	mtu := uint64(s.actorVethMTU(ctx))
+	netCtx, netCancel := context.WithTimeout(ctx, 20*time.Second)
+	err = s.configureGuestNetwork(netCtx, ac, mtu)
+	netCancel()
+	if err != nil {
+		dump := kata.DebugConsoleDump(ctx, vsockPath, "ip addr 2>&1; echo '== route =='; ip route 2>&1; echo '== neigh =='; ip neigh 2>&1")
+		slog.ErrorContext(ctx, "guest network config failed; dump", slog.String("dump", dump))
+		return fmt.Errorf("while configuring guest network: %w", err)
+	}
+
+	// Start the actor with its rootfs on /dev/vdb (single blk storage).
+	wlCtx, wlCancel := context.WithTimeout(ctx, 30*time.Second)
+	err = ac.StartBlkWorkload(wlCtx, id, "/dev/vdb", spec)
+	wlCancel()
+	if err != nil {
+		dump := kata.DebugConsoleDump(ctx, vsockPath,
+			"echo '== /dev/vdb =='; ls -l /dev/vdb 2>&1; blkid /dev/vdb 2>&1; "+
+				"echo '== mounts =='; grep kata /proc/mounts 2>&1")
+		slog.ErrorContext(ctx, "blk workload failed; dump", slog.String("dump", dump))
+		return fmt.Errorf("while starting blk workload: %w", err)
+	}
+	return nil
 }
 
 // startActorLogForwarding spawns two goroutines that pump the actor container's
