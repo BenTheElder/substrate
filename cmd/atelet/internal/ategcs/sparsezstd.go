@@ -159,6 +159,9 @@ func readSparseZstd(dst *os.File, src io.Reader) (logical int64, err error) {
 	if numExt < 0 || numExt > 1<<28 {
 		return 0, fmt.Errorf("implausible numExtents %d", numExt)
 	}
+	if size < 0 {
+		return 0, fmt.Errorf("negative totalSize %d", size)
+	}
 	exts := make([]extent, numExt)
 	for i := range exts {
 		if err := binary.Read(src, binary.LittleEndian, &exts[i].off); err != nil {
@@ -166,6 +169,12 @@ func readSparseZstd(dst *os.File, src io.Reader) (logical int64, err error) {
 		}
 		if err := binary.Read(src, binary.LittleEndian, &exts[i].length); err != nil {
 			return 0, err
+		}
+		// Validate against the declared size (the header comes from the downloaded
+		// snapshot): an out-of-range extent would seek/write past the file or wrap
+		// on the off+length arithmetic. size-off is safe because off <= size.
+		if exts[i].off < 0 || exts[i].length < 0 || exts[i].off > size || exts[i].length > size-exts[i].off {
+			return 0, fmt.Errorf("sparse extent %d out of range (off=%d len=%d size=%d)", i, exts[i].off, exts[i].length, size)
 		}
 	}
 	if err := dst.Truncate(size); err != nil {

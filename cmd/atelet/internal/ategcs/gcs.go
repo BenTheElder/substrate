@@ -40,7 +40,7 @@ func (g *gcsClient) GetObject(ctx context.Context, bucket, object string) (io.Re
 // storage.Writer (no Content-Length / signing requirement). This lets callers
 // pipe compression directly into the upload (overlap) instead of staging a
 // seekable temp file. (S3's PutObject needs a seekable body, so it does NOT
-// implement this — see objects.go sendToGCSWithZstd.)
+// implement this — see objects.go sendZstd.)
 func (g *gcsClient) SupportsStreamingPut() bool { return true }
 
 func (g *gcsClient) PutObject(ctx context.Context, bucket, object string, reader io.Reader) error {

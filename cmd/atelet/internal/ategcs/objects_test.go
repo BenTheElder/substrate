@@ -48,7 +48,7 @@ func (s *memStore) GetObject(_ context.Context, bucket, object string) (io.ReadC
 }
 
 // streamingMemStore is a memStore that advertises streaming PutObject support, so
-// sendToGCSWithZstd takes the pipe (compress∥upload overlap) path used for GCS
+// sendZstd takes the pipe (compress∥upload overlap) path used for GCS
 // instead of staging a seekable temp file.
 type streamingMemStore struct{ *memStore }
 
@@ -280,9 +280,9 @@ func TestPlainZstdBackwardCompatRoundTrip(t *testing.T) {
 	store := newMemStore()
 	ctx := context.Background()
 	const gsURL = "gs://bucket/snap/config.json.zstd"
-	// SendBytesToGCS is uncompressed; use sendToGCSWithZstd with a non-file reader to
+	// SendBytesToGCS is uncompressed; use sendZstd with a non-file reader to
 	// hit the plain-zstd branch (no magic).
-	if err := sendToGCSWithZstd(ctx, store, gsURL, bytes.NewReader(want)); err != nil {
+	if err := sendZstd(ctx, store, gsURL, bytes.NewReader(want)); err != nil {
 		t.Fatalf("upload: %v", err)
 	}
 	stored := store.m["bucket/snap/config.json.zstd"]

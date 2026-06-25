@@ -109,8 +109,8 @@ func SendLocalFileToGCSWithZstd(ctx context.Context, client ObjectStorage, gsURL
 		}
 	}()
 
-	if err := sendToGCSWithZstd(ctx, client, gsURL, localFile); err != nil {
-		return fmt.Errorf("in sendToGCSWithZstd: %w", err)
+	if err := sendZstd(ctx, client, gsURL, localFile); err != nil {
+		return fmt.Errorf("in sendZstd: %w", err)
 	}
 
 	return nil
@@ -120,7 +120,7 @@ func SendLocalFileToGCSWithZstd(ctx context.Context, client ObjectStorage, gsURL
 // streaming body without buffering (GCS). See gcsClient.SupportsStreamingPut.
 type streamingPutter interface{ SupportsStreamingPut() bool }
 
-// sendToGCSWithZstd zstd-compresses content and uploads it to gsURL.
+// sendZstd zstd-compresses content and uploads it to gsURL.
 //
 // The snapshot memory-ranges is the large object here (the whole guest RAM image,
 // mostly zero) on the SUSPEND critical path, so we compress with SpeedFastest across
@@ -135,7 +135,7 @@ type streamingPutter interface{ SupportsStreamingPut() bool }
 //   - S3/rustfs PutObject hands the body to the AWS SDK, which needs a seekable body
 //     to sign + set Content-Length (a non-seekable pipe hangs there), so we compress
 //     to a SEEKABLE temp file first.
-func sendToGCSWithZstd(ctx context.Context, client ObjectStorage, gsURL string, content io.Reader) (err error) {
+func sendZstd(ctx context.Context, client ObjectStorage, gsURL string, content io.Reader) (err error) {
 	bucket, object, err := parseGCSURL(gsURL)
 	if err != nil {
 		return fmt.Errorf("while parsing URL: %w", err)
@@ -143,7 +143,7 @@ func sendToGCSWithZstd(ctx context.Context, client ObjectStorage, gsURL string, 
 	tStart := time.Now()
 
 	if sp, ok := client.(streamingPutter); ok && sp.SupportsStreamingPut() {
-		return sendToGCSStreaming(ctx, client, bucket, object, content, tStart)
+		return sendStreamingZstd(ctx, client, bucket, object, content, tStart)
 	}
 
 	tmpFile, err := os.CreateTemp("", "substrate-upload-compress-")
@@ -190,12 +190,12 @@ func sendToGCSWithZstd(ctx context.Context, client ObjectStorage, gsURL string, 
 	return nil
 }
 
-// sendToGCSStreaming compresses content and uploads it in one overlapped pass: a
+// sendStreamingZstd compresses content and uploads it in one overlapped pass: a
 // goroutine writes the (sparse-extent or plain) zstd stream into an io.Pipe while
 // PutObject streams the read end to the object store. No seekable temp file, and
 // the compress runs concurrently with the network PUT. Used only for streaming
-// backends (GCS); see sendToGCSWithZstd.
-func sendToGCSStreaming(ctx context.Context, client ObjectStorage, bucket, object string, content io.Reader, tStart time.Time) error {
+// backends (GCS); see sendZstd.
+func sendStreamingZstd(ctx context.Context, client ObjectStorage, bucket, object string, content io.Reader, tStart time.Time) error {
 	type result struct {
 		logical, dataBytes int64
 		sparse             bool
@@ -353,12 +353,18 @@ func fetchFromGCSWithZstd(ctx context.Context, client ObjectStorage, gsURL strin
 	return nil
 }
 
-// copyZstdSparse copies src into dst skipping all-zero blocks, so dst becomes a
+// copyZstdSparse writes src into dst skipping all-zero blocks, so dst becomes a
 // sparse file (the skipped regions are holes). Returns the logical size (total bytes
 // consumed from src) and the bytes actually written (non-zero). dst is truncated to
-// the logical size at the end so trailing zero regions become a hole and the file
-// size is exact. dst must be a fresh/truncated regular file opened for writing.
+// empty first (so skipped regions are real holes, not stale bytes) and to the
+// logical size at the end (so trailing zero regions become a hole and the size is
+// exact). dst must be a regular file opened for writing.
 func copyZstdSparse(dst *os.File, src io.Reader) (size int64, written int64, err error) {
+	// Start from an empty file so the holes we skip can't expose pre-existing bytes:
+	// this writes out only the non-zero chunks, it does not overlay onto dst.
+	if err := dst.Truncate(0); err != nil {
+		return 0, 0, fmt.Errorf("truncating dst: %w", err)
+	}
 	// 64KiB blocks: a multiple of the 4KiB fs block (so skipped runs align to whole
 	// hole-able blocks) while keeping the zero-scan + WriteAt syscall count modest.
 	const block = 64 << 10
