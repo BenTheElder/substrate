@@ -133,6 +133,10 @@ func SpecToAgentPB(s *specs.Spec) *agentpb.Spec {
 			MaskedPaths:   s.Linux.MaskedPaths,
 			ReadonlyPaths: s.Linux.ReadonlyPaths,
 		}
+		// TODO: forward the remaining OCI security knobs the kata-agent supports
+		// for parity with the OCI spec — Linux.Seccomp and Linux.Sysctl here, and
+		// Process.ApparmorProfile / Process.SelinuxLabel above. The MVP runs the
+		// actor with kata's defaults for these.
 		for _, ns := range s.Linux.Namespaces {
 			// Mirror the kata shim (kata_agent.go constrainGRPCSpec): the
 			// network/cgroup/time namespaces are handled on the host / unsupported

@@ -60,7 +60,7 @@ func buildDeploymentApplyConfig(wp *atev1alpha1.WorkerPool) *appsv1ac.Deployment
 				WithType(corev1.HostPathDirectoryOrCreate)))
 
 	applyWorkerPoolPodTemplate(podSpecAC, containerAC, wp.Spec.Template)
-	applyMicroVMPodShape(podSpecAC, containerAC, wp)
+	maybeApplyMicroVMPodShape(podSpecAC, containerAC, wp.Spec.SandboxClass)
 	podSpecAC.WithContainers(containerAC)
 
 	return appsv1ac.Deployment(deploymentName(wp.Name), wp.Namespace).
@@ -82,21 +82,21 @@ func buildDeploymentApplyConfig(wp *atev1alpha1.WorkerPool) *appsv1ac.Deployment
 				WithSpec(podSpecAC)))
 }
 
-// applyMicroVMPodShape adds the /dev/kvm device and node placement a micro-VM
-// (kata + cloud-hypervisor) worker pool needs, on top of any pod-template
-// settings. No-op for other sandbox classes.
+// maybeApplyMicroVMPodShape adds the /dev/kvm device and node placement a
+// micro-VM (kata + cloud-hypervisor) worker pool needs, on top of any
+// pod-template settings. No-op unless sandboxClass is the micro-VM class.
 //
 // TODO: this hardcodes one sandbox class's pod requirements in the controller.
 // Consider making it generic so a sandbox class can declare its own pod shape
 // (e.g. required devices/mounts + node placement on the SandboxConfig spec)
 // instead of branching on SandboxClass here, so new classes don't need a
 // controller change.
-func applyMicroVMPodShape(
+func maybeApplyMicroVMPodShape(
 	podSpecAC *corev1ac.PodSpecApplyConfiguration,
 	containerAC *corev1ac.ContainerApplyConfiguration,
-	wp *atev1alpha1.WorkerPool,
+	sandboxClass atev1alpha1.SandboxClass,
 ) {
-	if wp.Spec.SandboxClass != atev1alpha1.SandboxClassMicroVM {
+	if sandboxClass != atev1alpha1.SandboxClassMicroVM {
 		return
 	}
 

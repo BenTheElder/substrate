@@ -413,7 +413,10 @@ func (s *AteomService) startActorLogForwarding(ac *kata.AgentClient, id, name, n
 
 // dialAgentRetry polls DialAgent until the kata-agent answers the hybrid-vsock
 // CONNECT (the socket file exists at boot, but the agent only listens once the
-// guest reaches kata-containers.target) or timeout elapses.
+// guest reaches kata-containers.target) or the overall timeout elapses. Each
+// attempt is capped at 5s (usually it fails fast with connection-refused while
+// the agent isn't listening yet; the cap only bounds a rare hung dial), then
+// waits 500ms before retrying — so steady-state polling is ~every 500ms, not 5s.
 func dialAgentRetry(ctx context.Context, vsockPath string, timeout time.Duration) (*kata.AgentClient, error) {
 	deadline := time.Now().Add(timeout)
 	var lastErr error

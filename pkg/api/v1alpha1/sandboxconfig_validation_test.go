@@ -121,6 +121,10 @@ func TestSandboxConfigValidation(t *testing.T) {
 		sc:      sandboxConfig("ok-microvm", "microvm", map[string]map[string]AssetFile{"amd64": microVMAssets()}),
 		wantErr: false,
 	}, {
+		name:    "valid microvm arm64 asset set",
+		sc:      sandboxConfig("ok-microvm-arm64", "microvm", map[string]map[string]AssetFile{"arm64": microVMAssets()}),
+		wantErr: false,
+	}, {
 		name: "microvm missing an asset",
 		sc: sandboxConfig("bad-microvm", "microvm", map[string]map[string]AssetFile{"amd64": func() map[string]AssetFile {
 			m := microVMAssets()
