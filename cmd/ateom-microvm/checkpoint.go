@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/ch"
@@ -120,21 +121,15 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 			slog.String("id", id), slog.Duration("merge", time.Since(tMerge)))
 	}
 
-	// reset-to-golden support: save the actor's /dev/vdb AS-OF this (paused,
-	// consistent) snapshot as a verbatim golden template, so future restores can
-	// recreate the disk byte-identical to what the snapshot's guest RAM expects
-	// while discarding the actor's later rootfs writes. Saved once (the first/golden
+	// reset-to-golden support: save each container's writable rootfs disk AS-OF this
+	// (paused, consistent) snapshot as a verbatim golden template, so future restores
+	// recreate the disks byte-identical to what the snapshot's guest RAM expects while
+	// discarding the actor's later rootfs writes. Saved once (the first/golden
 	// checkpoint) and kept; best-effort (without it, restore reopens the live disk =
-	// continuity). TODO: ship the template with the snapshot for cross-node restore
-	// (it's golden, shipped once per template, like the OCI base).
+	// continuity). TODO: ship the templates with the snapshot for cross-node restore
+	// (they're golden, shipped once per template, like the OCI base).
 	actorDir := ateompath.ActorPath(ns, name, id)
-	if tmpl := filepath.Join(actorDir, goldenRootfsDiskName); fileMissing(tmpl) {
-		if cerr := copyDiskFile(ctx, filepath.Join(actorDir, actorRootfsDiskName), tmpl); cerr != nil {
-			slog.WarnContext(ctx, "Failed to save golden rootfs template; restore will reopen live disk", slog.Any("err", cerr))
-		} else {
-			slog.InfoContext(ctx, "Saved golden rootfs disk template", slog.String("id", id))
-		}
-	}
+	saveGoldenRootfsDisks(ctx, actorDir, id)
 
 	// Report exactly the files we wrote so atelet ships precisely the CH snapshot
 	// (config.json + state.json + memory-ranges + base-id), not gVisor's fixed set.
@@ -161,6 +156,26 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 		slog.Duration("pause", dPause),
 		slog.Duration("snapshot", dSnapshot), slog.Duration("teardown", dTeardown))
 	return &ateompb.CheckpointWorkloadResponse{SnapshotFiles: snapshotFiles}, nil
+}
+
+// saveGoldenRootfsDisks copies each of the actor's writable rootfs disks
+// (actor-rootfs-<i>.ext4) to its golden template (golden-rootfs-<i>.ext4) under
+// actorDir, preserving the container-index suffix so restore can match each disk to
+// its letter. Idempotent (skips templates already saved) and best-effort: a failure
+// only means restore reopens the live disk instead of resetting to golden.
+func saveGoldenRootfsDisks(ctx context.Context, actorDir, id string) {
+	rootfsDisks, _ := filepath.Glob(filepath.Join(actorDir, actorRootfsDiskPrefix+"*.ext4"))
+	for _, disk := range rootfsDisks {
+		tmpl := filepath.Join(actorDir, goldenRootfsDiskPrefix+strings.TrimPrefix(filepath.Base(disk), actorRootfsDiskPrefix))
+		if !fileMissing(tmpl) {
+			continue
+		}
+		if cerr := copyDiskFile(ctx, disk, tmpl); cerr != nil {
+			slog.WarnContext(ctx, "Failed to save golden rootfs template; restore will reopen live disk", slog.String("disk", filepath.Base(disk)), slog.Any("err", cerr))
+		} else {
+			slog.InfoContext(ctx, "Saved golden rootfs disk template", slog.String("id", id), slog.String("disk", filepath.Base(disk)))
+		}
+	}
 }
 
 // listFiles returns the (relative) names of regular files directly under dir.

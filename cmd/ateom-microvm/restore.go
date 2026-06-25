@@ -40,10 +40,10 @@ import (
 // Contract with atelet: the memory-only snapshot dir (config.json + state.json +
 // memory-ranges + base-id) has been downloaded to RestoreStateDir.
 //
-// There is NO virtiofsd and NO shared-dir to reconstruct — the rootfs is the
-// writable /dev/vdb disk, which CH reopens from the path recorded in the snapshot
-// config.json. Steps: rewrite the vsock socket path to this actor's VMDir,
-// reset /dev/vdb to the golden disk template (or rebuild it from the OCI image),
+// There is NO virtiofsd and NO shared-dir to reconstruct — each container's rootfs
+// is a writable /dev/vd{b+i} disk, which CH reopens from the path recorded in the
+// snapshot config.json. Steps: rewrite the vsock socket path to this actor's VMDir,
+// reset each rootfs disk to its golden template (or rebuild it from the OCI image),
 // rebuild the tap (the snapshot's virtio-net is fd-backed → fresh net_fds),
 // relaunch CH with --restore, and resume. Guest RAM (incl. the actor's in-memory
 // state and frozen network config) comes back from the memory-only snapshot.
@@ -77,41 +77,34 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		return nil, fmt.Errorf("while creating VM dir: %w", err)
 	}
 
-	// Recreate the /dev/vdb backing file the snapshot references (the actor dir),
-	// reset-to-golden. Two ways, both byte-consistent with the golden snapshot's
-	// guest ext4 cache:
+	// Recreate each container's writable rootfs backing file the snapshot references
+	// (the actor dir), reset-to-golden. Two ways, both byte-consistent with the golden
+	// snapshot's guest ext4 cache:
 	//   - same-node: a verbatim golden template (copyDiskFile) — guaranteed identical.
 	//   - cross-node: rebuild from the OCI image atelet unpacked to the bundle at
 	//     restore (mkfs.ext4 -d is LAYOUT-deterministic for identical inputs, so the
 	//     data blocks land at the same offsets the guest cache expects; only the
 	//     superblock UUID/timestamps differ, which are cached in RAM and not re-read).
-	// Either way the actor's prior rootfs writes are discarded (gVisor semantics).
+	// Either way the actor's prior rootfs writes are discarded.
 	containers := req.GetSpec().GetContainers()
-	if len(containers) != 1 {
-		return nil, status.Errorf(codes.Unimplemented, "ateom-microvm supports exactly one container, got %d", len(containers))
+	if len(containers) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "actor spec has no containers")
+	}
+	if len(containers) > maxActorContainers {
+		return nil, status.Errorf(codes.Unimplemented, "ateom-microvm supports at most %d containers, got %d", maxActorContainers, len(containers))
 	}
 	actorDir := ateompath.ActorPath(ns, name, id)
-	diskPath := filepath.Join(actorDir, actorRootfsDiskName)
-	if tmpl := filepath.Join(actorDir, goldenRootfsDiskName); !fileMissing(tmpl) {
-		if err := copyDiskFile(ctx, tmpl, diskPath); err != nil {
-			return nil, fmt.Errorf("while resetting rootfs disk to golden (template): %w", err)
-		}
-		slog.InfoContext(ctx, "Reset actor rootfs disk to golden (template)", slog.String("id", id))
-	} else {
-		bundleRootfs := filepath.Join(ateompath.OCIBundlePath(ns, name, id, containers[0].GetName()), "rootfs")
-		if err := kata.BuildExt4Image(ctx, bundleRootfs, diskPath); err != nil {
-			return nil, fmt.Errorf("while reconstructing rootfs disk from image: %w", err)
-		}
-		slog.InfoContext(ctx, "Reconstructed actor rootfs disk from image", slog.String("id", id))
+	if err := s.rebuildActorRootfsDisks(ctx, ns, name, id, actorDir, containers); err != nil {
+		return nil, err
 	}
 
-	// Repoint the snapshot config's writable /dev/vdb disk at THIS actor's
-	// reconstructed backing file. The golden snapshot recorded the golden actor's
-	// per-actor disk path, which is stale on any pod restoring a different actor
+	// Repoint the snapshot config's writable rootfs disks at THIS actor's
+	// reconstructed backing files. The golden snapshot recorded the golden actor's
+	// per-actor disk paths, which are stale on any pod restoring a different actor
 	// (and absent on any node that never ran the golden) — unlike /dev/vda, the
 	// content-addressed kata image whose path is identical on every node.
-	if err := repointActorRootfsDisk(restoreDir, diskPath); err != nil {
-		return nil, fmt.Errorf("while repointing actor rootfs disk in snapshot config: %w", err)
+	if err := repointActorRootfsDisks(restoreDir, actorDir); err != nil {
+		return nil, fmt.Errorf("while repointing actor rootfs disks in snapshot config: %w", err)
 	}
 
 	// Networking: rebuild the per-activation veth + tap; the snapshot's virtio-net
@@ -151,7 +144,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	}
 
 	// Relaunch CH and restore with the tap FDs attached (SCM_RIGHTS). CH reopens
-	// /dev/vda (image) + /dev/vdb (actor rootfs) from the snapshot config paths.
+	// /dev/vda (image) + each /dev/vd{b+i} (actor rootfs) from the snapshot config paths.
 	apiSocket := filepath.Join(kata.VMDir(id), "clh-api-restore.sock")
 	chCmd, client, err := ch.LaunchVMM(ctx, ch.LaunchVMMOptions{
 		Binary: rr.chBinary, APISocket: apiSocket, Stdout: slogWriter{ctx}, Stderr: slogWriter{ctx},
@@ -180,10 +173,11 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 
 	ra := &runningActor{chCmd: chCmd, apiSocket: apiSocket, baseID: srcID, restoreSourceDir: restoreDir}
 
-	// Re-attach stdout/stderr forwarding: the restored guest's container + kata-agent
-	// are alive, so a fresh dial over this actor's vsock resumes ReadStdout/ReadStderr
-	// (same containerID==execID==id as the cold run). Best-effort — a failed dial must
-	// not fail the restore (the actor is already running); forwarding is just skipped.
+	// Re-attach stdout/stderr forwarding for each container: the restored guest's
+	// containers + kata-agent are alive, so a fresh dial over this actor's vsock
+	// resumes ReadStdout/ReadStderr (same per-container kata containerID == the
+	// container name as the cold run). Best-effort — a failed dial must not fail the
+	// restore (the actor is already running); forwarding is just skipped.
 	vsockPath := kata.VsockSocketPath(id)
 	logAC, dialErr := dialAgentRetry(ctx, vsockPath, 15*time.Second)
 	if dialErr != nil {
@@ -191,7 +185,9 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 			slog.String("id", id), slog.Any("err", dialErr))
 	} else {
 		ra.logAgent = logAC
-		s.startActorLogForwarding(logAC, id, name, ns, containers[0].GetName())
+		for _, c := range containers {
+			s.startActorLogForwarding(logAC, id, c.GetName(), c.GetName(), name, ns)
+		}
 	}
 
 	s.running[id] = ra
@@ -201,12 +197,36 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	return &ateompb.RestoreWorkloadResponse{}, nil
 }
 
+// rebuildActorRootfsDisks recreates each container's writable rootfs backing file
+// (actor-rootfs-<i>.ext4) under actorDir, reset-to-golden: from the verbatim golden
+// template (golden-rootfs-<i>.ext4) when present, else rebuilt from the OCI image
+// atelet unpacked to the container's bundle. The spec order is stable (same
+// ActorTemplate), so index i keeps the same /dev/vd{b+i} mapping as the cold run.
+func (s *AteomService) rebuildActorRootfsDisks(ctx context.Context, ns, name, id, actorDir string, containers []*ateompb.Container) error {
+	for i, c := range containers {
+		diskPath := filepath.Join(actorDir, actorRootfsDiskFile(i))
+		if tmpl := filepath.Join(actorDir, goldenRootfsDiskFile(i)); !fileMissing(tmpl) {
+			if err := copyDiskFile(ctx, tmpl, diskPath); err != nil {
+				return fmt.Errorf("while resetting rootfs disk %d to golden (template): %w", i, err)
+			}
+			slog.InfoContext(ctx, "Reset actor rootfs disk to golden (template)", slog.String("id", id), slog.Int("disk", i))
+			continue
+		}
+		bundleRootfs := filepath.Join(ateompath.OCIBundlePath(ns, name, id, c.GetName()), "rootfs")
+		if err := kata.BuildExt4Image(ctx, bundleRootfs, diskPath); err != nil {
+			return fmt.Errorf("while reconstructing rootfs disk %d (%q) from image: %w", i, c.GetName(), err)
+		}
+		slog.InfoContext(ctx, "Reconstructed actor rootfs disk from image", slog.String("id", id), slog.String("container", c.GetName()))
+	}
+	return nil
+}
+
 // rewriteSnapshotSocketPaths repoints the snapshot config.json's per-sandbox
 // hybrid-vsock socket from the source actor's VMDir to the restoring actor's
 // VMDir, so the socket we create is the one CH reopens. The kernel and /dev/vda
 // kata image are content-addressed static files with identical paths on every
-// node, so they need no rewrite; the writable /dev/vdb actor rootfs disk is
-// per-actor and is repointed separately (see repointActorRootfsDisk).
+// node, so they need no rewrite; the writable actor rootfs disks are per-actor and
+// are repointed separately (see repointActorRootfsDisks).
 func rewriteSnapshotSocketPaths(snapshotDir, id string) error {
 	cfgPath := filepath.Join(snapshotDir, "config.json")
 	b, err := os.ReadFile(cfgPath)
@@ -239,16 +259,17 @@ func rewriteSnapshotSocketPaths(snapshotDir, id string) error {
 	return nil
 }
 
-// repointActorRootfsDisk rewrites the snapshot config.json so the writable
-// /dev/vdb actor rootfs disk points at this actor's reconstructed backing file
-// (diskPath). The actor rootfs disk lives under the actor's per-actor directory
-// (keyed by actor id), so the golden snapshot's recorded path is the GOLDEN
-// actor's — stale on any pod restoring a different actor, and absent on any node
-// that never ran the golden. (This is the disk analogue of the serial.file
-// repoint in rewriteSnapshotSocketPaths.) The disk is identified by basename so
-// the read-only /dev/vda kata image (a content-addressed static file) is left
-// untouched; it is an error if no actor rootfs disk is present to repoint.
-func repointActorRootfsDisk(snapshotDir, diskPath string) error {
+// repointActorRootfsDisks rewrites the snapshot config.json so each writable actor
+// rootfs disk points at this actor's reconstructed backing file under actorDir. The
+// rootfs disks live under the actor's per-actor directory (keyed by actor id), so the
+// golden snapshot's recorded paths are the GOLDEN actor's — stale on any pod restoring
+// a different actor, and absent on any node that never ran the golden. (This is the
+// disk analogue of the serial.file repoint in rewriteSnapshotSocketPaths.) Disks are
+// identified by the actor-rootfs- basename prefix so the read-only /dev/vda kata image
+// (a content-addressed static file) is left untouched, and each is repointed to
+// actorDir/<same basename> (the basename encodes the container index, so the disk-letter
+// mapping is preserved). It is an error if no actor rootfs disk is present.
+func repointActorRootfsDisks(snapshotDir, actorDir string) error {
 	cfgPath := filepath.Join(snapshotDir, "config.json")
 	b, err := os.ReadFile(cfgPath)
 	if err != nil {
@@ -265,14 +286,14 @@ func repointActorRootfsDisk(snapshotDir, diskPath string) error {
 			if !ok {
 				continue
 			}
-			if p, _ := dm["path"].(string); filepath.Base(p) == actorRootfsDiskName {
-				dm["path"] = diskPath
+			if p, _ := dm["path"].(string); strings.HasPrefix(filepath.Base(p), actorRootfsDiskPrefix) {
+				dm["path"] = filepath.Join(actorDir, filepath.Base(p))
 				rewrote = true
 			}
 		}
 	}
 	if !rewrote {
-		return fmt.Errorf("no %q disk found in %q to repoint", actorRootfsDiskName, cfgPath)
+		return fmt.Errorf("no %q* disk found in %q to repoint", actorRootfsDiskPrefix, cfgPath)
 	}
 	out, err := json.Marshal(cfg)
 	if err != nil {
