@@ -18,10 +18,13 @@
 # ateom-microvm fetches at runtime (fetch-not-bake). Run this on a Linux
 # host of the TARGET arch.
 #
-# Produces, under $OUT, the six assets named as the ActorTemplate expects, plus
+# Produces, under $OUT, the five assets named as the ActorTemplate expects, plus
 # their sha256 sums (paste into demos/counter/counter-microvm.yaml.tmpl):
-#   containerd-shim-kata-v2  cloud-hypervisor  virtiofsd-patched
-#   vmlinux  rootfs.img  configuration-clh.toml
+#   cloud-hypervisor  virtiofsd-patched  vmlinux  rootfs.img  configuration-clh.toml
+#
+# NB: the kata containerd shim (containerd-shim-kata-v2) is NOT needed — ateom owns
+# the cloud-hypervisor boot and drives the kata-agent directly over ttrpc, replacing
+# the shim. Only the guest kernel/image + CH + virtiofsd + base config are fetched.
 #
 # virtiofsd is built from upstream main: the vhost-0.16 snapshot/restore fix (REPLY_ACK)
 # is on main but NOT in any release tag yet, so the kata-bundled virtiofsd (v1.13.3 tag,
@@ -57,7 +60,6 @@ mkdir -p kata
 tar --zstd -xf kata-static.tar.zst -C kata
 KROOT="kata/opt/kata"
 
-cp "${KROOT}/bin/containerd-shim-kata-v2" "${OUT}/containerd-shim-kata-v2"
 cp "$(readlink -f "${KROOT}/share/kata-containers/vmlinux.container")" "${OUT}/vmlinux"
 cp "$(readlink -f "${KROOT}/share/kata-containers/kata-containers.img")" "${OUT}/rootfs.img"
 cp "${KROOT}/share/defaults/kata-containers/configuration-clh.toml" "${OUT}/configuration-clh.toml"
@@ -91,10 +93,10 @@ chmod +x "${OUT}/virtiofsd-patched"
 echo
 echo ">> Assets assembled in ${OUT}:"
 cd "${OUT}"
-for f in containerd-shim-kata-v2 cloud-hypervisor virtiofsd-patched vmlinux rootfs.img configuration-clh.toml; do
+for f in cloud-hypervisor virtiofsd-patched vmlinux rootfs.img configuration-clh.toml; do
   [ -f "$f" ] || { echo "MISSING: $f" >&2; exit 1; }
 done
 "${OUT}/virtiofsd-patched" --version 2>/dev/null | head -1 || true
 echo
 echo ">> sha256 (paste into demos/counter/counter-microvm.yaml.tmpl runtime.assets):"
-sha256sum containerd-shim-kata-v2 cloud-hypervisor virtiofsd-patched vmlinux rootfs.img configuration-clh.toml
+sha256sum cloud-hypervisor virtiofsd-patched vmlinux rootfs.img configuration-clh.toml

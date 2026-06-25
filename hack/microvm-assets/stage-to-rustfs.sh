@@ -39,7 +39,7 @@ sleep 3
 
 ENDPOINT="http://localhost:9000"
 echo ">> Uploading assets to s3://${BUCKET}/kata-assets/ via ${ENDPOINT}..."
-for f in containerd-shim-kata-v2 cloud-hypervisor virtiofsd-patched vmlinux rootfs.img configuration-clh.toml; do
+for f in cloud-hypervisor virtiofsd-patched vmlinux rootfs.img configuration-clh.toml; do
   echo "   $f"
   aws --endpoint-url "${ENDPOINT}" s3 cp "${OUT}/${f}" "s3://${BUCKET}/kata-assets/${f}"
 done
