@@ -116,9 +116,10 @@ func SendLocalFileToGCSWithZstd(ctx context.Context, client ObjectStorage, gsURL
 	return nil
 }
 
-// streamingPutter is an ObjectStorage whose PutObject accepts a non-seekable
-// streaming body without buffering (GCS). See gcsClient.SupportsStreamingPut.
-type streamingPutter interface{ SupportsStreamingPut() bool }
+// streamingPutter marks an ObjectStorage whose PutObject accepts a non-seekable
+// streaming body without buffering (e.g. GCS): implementing the interface is the
+// signal, so the marker method is never called. See gcsClient.
+type streamingPutter interface{ supportsStreamingPut() }
 
 // writeContentResult reports what writeContent compressed.
 type writeContentResult struct {
@@ -172,7 +173,7 @@ func sendZstd(ctx context.Context, client ObjectStorage, gsURL string, content i
 		return fmt.Errorf("while parsing URL: %w", err)
 	}
 	tStart := time.Now()
-	if sp, ok := client.(streamingPutter); ok && sp.SupportsStreamingPut() {
+	if _, ok := client.(streamingPutter); ok {
 		return sendStreamingZstd(ctx, client, bucket, object, content, tStart)
 	}
 	return sendBufferedZstd(ctx, client, bucket, object, content, tStart)

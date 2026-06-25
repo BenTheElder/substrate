@@ -52,7 +52,7 @@ func (s *memStore) GetObject(_ context.Context, bucket, object string) (io.ReadC
 // instead of staging a seekable temp file.
 type streamingMemStore struct{ *memStore }
 
-func (s *streamingMemStore) SupportsStreamingPut() bool { return true }
+func (s *streamingMemStore) supportsStreamingPut() {}
 
 // TestSparseUploadStreamingRoundTrip drives the STREAMING upload path (GCS-like
 // backend) end-to-end through the real entry points: the object must still be the
