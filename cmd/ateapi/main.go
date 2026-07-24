@@ -28,7 +28,6 @@ import (
 	"time"
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/controlapi"
-	"github.com/agent-substrate/substrate/cmd/ateapi/internal/credbundle"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/debugapi"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/k8sjwt"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/sessionidentity"
@@ -36,6 +35,7 @@ import (
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/workercache"
 	"github.com/agent-substrate/substrate/internal/ateapiauth"
 	"github.com/agent-substrate/substrate/internal/ateinterceptors"
+	"github.com/agent-substrate/substrate/internal/credbundle"
 	"github.com/agent-substrate/substrate/internal/serverboot"
 	"github.com/agent-substrate/substrate/internal/version"
 	"github.com/agent-substrate/substrate/pkg/client/clientset/versioned"
@@ -72,11 +72,11 @@ var (
 	clientJWTAudience    = pflag.String("client-jwt-audience", "", "The expected audience for client JWTs.")
 	sessionIDJWTPoolFile = pflag.String("session-id-jwt-pool", "", "The file that contains the serialized JWT authority pool for signing session JWTs")
 
-	sessionIDCAPoolFile = pflag.String("session-id-ca-pool", "", "The file that contains the CA pool for signing session JWTs")
-	workerpoolCACerts   = pflag.String("workerpool-ca-certs", "", "The file that contains the CA for verifying workerpool client certificates.")
+	sessionIDCAPoolFile    = pflag.String("session-id-ca-pool", "", "The file that contains the CA pool for signing session JWTs")
+	podIdentityCACerts     = pflag.String("pod-identity-ca-certs", "", "The file that contains the pod-identity CA bundle, used both for verifying client certificates presented to the gRPC server and for verifying atelet serving certificates when dialing atelet. If empty, client-cert verification is disabled and atelet dials will fail.")
+	ateletClientCredBundle = pflag.String("atelet-client-cred-bundle", "", "Credential bundle presented as the client certificate when dialing atelet.")
 
 	showVersion     = pflag.Bool("version", false, "Print version and exit.")
-	authMode        = pflag.String("auth-mode", "mtls", "Auth mode for incoming gRPC: mtls|jwt. 'mtls' (default) relies on transport-level mTLS for client identity. 'jwt' additionally requires a Kubernetes ServiceAccount Bearer token on every RPC. Substrate will drop support for JWT auth mode once the Pod Certificates feature is enabled by default in the minimum supported Kubernetes version.")
 	clientJWTCAFile = pflag.String("client-jwt-ca-cert", ateapiauth.DefaultServiceAccountCAFile, "CA cert file used to verify TLS when fetching the OIDC discovery document and JWKS for JWT authentication. Defaults to the in-cluster service account CA.")
 )
 
@@ -106,11 +106,6 @@ func main() {
 
 	loadFlagsFromEnv()
 	logFlagValues(ctx)
-
-	authModeParsed, err := ateapiauth.ParseMode(*authMode)
-	if err != nil {
-		serverboot.Fatal(ctx, "Invalid --auth-mode", err)
-	}
 
 	redisClient, err := connectRedis(ctx)
 	if err != nil {
@@ -159,15 +154,12 @@ func main() {
 		serverboot.Fatal(ctx, "Failed to register worker-count metric", err)
 	}
 
-	dialer := controlapi.NewAteletDialer(workerPodInformer.GetIndexer(), ateletPodInformer.GetIndexer())
-	sm := controlapi.NewService(redisPersistence, workerCache, actorTemplateLister, workerPoolLister, sandboxConfigLister, dialer, clientset)
+	ateletDialer := controlapi.NewAteletDialer(workerPodInformer.GetIndexer(), ateletPodInformer.GetIndexer(), *ateletClientCredBundle, *podIdentityCACerts)
+	sm := controlapi.NewService(redisPersistence, workerCache, actorTemplateLister, workerPoolLister, sandboxConfigLister, ateletDialer, clientset)
 
 	jwtIssuerDiscoveryClient := buildK8sServiceAccountIssuerDiscoveryClient(ctx, *clientJWTCAFile, *clientJWTIssuer)
-	if authModeParsed == ateapiauth.ModeJWT && jwtIssuerDiscoveryClient == nil {
-		serverboot.Fatal(ctx, "JWT auth mode requires a Kubernetes ServiceAccount issuer discovery client", fmt.Errorf("client JWT issuer %q is not usable for discovery", *clientJWTIssuer))
-	}
 
-	sessionIdentitySrv := sessionidentity.New(*clientJWTIssuer, *clientJWTAudience, *sessionIDJWTPoolFile, *sessionIDCAPoolFile, *workerpoolCACerts, jwtIssuerDiscoveryClient)
+	sessionIdentitySrv := sessionidentity.New(*clientJWTIssuer, *clientJWTAudience, *sessionIDJWTPoolFile, *sessionIDCAPoolFile, *podIdentityCACerts, jwtIssuerDiscoveryClient)
 	debugSrv := debugapi.NewService(redisPersistence)
 
 	lisCfg := &net.ListenConfig{}
@@ -177,10 +169,12 @@ func main() {
 	}
 
 	authCfg := ateapiauth.ServerConfig{
-		Mode: authModeParsed,
-		VerifyBearerToken: func(ctx context.Context, bearer string) error {
-			_, err := k8sjwt.Verify(ctx, jwtIssuerDiscoveryClient, bearer, *clientJWTIssuer, *clientJWTAudience, time.Now())
-			return err
+		VerifyBearerToken: func(ctx context.Context, bearer string) (string, error) {
+			claims, err := k8sjwt.Verify(ctx, jwtIssuerDiscoveryClient, bearer, *clientJWTIssuer, *clientJWTAudience, time.Now())
+			if err != nil {
+				return "", err
+			}
+			return claims.Subject, nil
 		},
 	}
 	if err := ateapiauth.ValidateServerConfig(authCfg); err != nil {
@@ -249,8 +243,8 @@ func logFlagValues(ctx context.Context) {
 		slog.String("client-jwt-audience", *clientJWTAudience),
 		slog.String("session-id-jwt-pool", *sessionIDJWTPoolFile),
 		slog.String("session-id-ca-pool", *sessionIDCAPoolFile),
-		slog.String("workerpool-ca-certs", *workerpoolCACerts),
-		slog.String("auth-mode", *authMode),
+		slog.String("pod-identity-ca-certs", *podIdentityCACerts),
+		slog.String("atelet-client-cred-bundle", *ateletClientCredBundle),
 	)
 }
 
@@ -294,7 +288,7 @@ func connectRedis(ctx context.Context) (*redis.ClusterClient, error) {
 }
 
 func buildRedisTLSConfig(ctx context.Context) (*tls.Config, error) {
-	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS13}
 	if *redisCACerts != "" {
 		ca, err := os.ReadFile(*redisCACerts)
 		if err != nil {
@@ -357,27 +351,30 @@ func newKubeClients() (*kubernetes.Clientset, versioned.Interface, error) {
 	return clientset, ateClient, nil
 }
 
-// buildServerCreds loads the workerpool CA pool (if configured) and
+// buildServerCreds loads the pod-identity CA pool (if configured) and
 // composes gRPC TransportCredentials over the server bundle + optional
 // client-cert verification.
 func buildServerCreds(ctx context.Context) (credentials.TransportCredentials, error) {
 	var clientCAs *x509.CertPool
-	if *workerpoolCACerts != "" {
+	if *podIdentityCACerts != "" {
 		// TODO: Periodically reload these to handle rotations. Consult with Tina to see how she did it for client-go.
-		ca, err := os.ReadFile(*workerpoolCACerts)
+		ca, err := os.ReadFile(*podIdentityCACerts)
 		if err != nil {
-			return nil, fmt.Errorf("read workerpool CA: %w", err)
+			return nil, fmt.Errorf("read pod-identity CA: %w", err)
 		}
 		clientCAs = x509.NewCertPool()
 		if !clientCAs.AppendCertsFromPEM(ca) {
-			return nil, fmt.Errorf("parse workerpool CA from %s", *workerpoolCACerts)
+			return nil, fmt.Errorf("parse pod-identity CA from %s", *podIdentityCACerts)
 		}
-		slog.InfoContext(ctx, "Using custom CA for workerpool clients", slog.String("path", *workerpoolCACerts))
+		slog.InfoContext(ctx, "Using pod-identity CA for client-cert verification", slog.String("path", *podIdentityCACerts))
 	}
 	return credentials.NewTLS(&tls.Config{
 		GetCertificate: credbundle.Loader(*grpcServerCredBundle),
-		ClientAuth:     tls.VerifyClientCertIfGiven,
-		ClientCAs:      clientCAs,
+		// Client certs stay optional at the transport level: certless
+		// clients such as kubectl-ate authenticate with a Bearer token in the
+		// ateapiauth interceptor.
+		ClientAuth: tls.VerifyClientCertIfGiven,
+		ClientCAs:  clientCAs,
 	}), nil
 }
 

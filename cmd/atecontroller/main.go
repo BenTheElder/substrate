@@ -39,10 +39,11 @@ var (
 
 	ateAPIConnSpec = pflag.String("ateapi-conn-spec", "dns:///api.ate-system.svc:443", "")
 
-	ateapiAuthMode   = pflag.String("ateapi-auth", "mtls", "Client auth to ateapi: mtls|jwt. 'mtls' (default) dials with insecure TLS and relies on pod-projected mTLS credentials for identity. 'jwt' verifies the server cert and sends a Bearer SA token.")
-	ateapiCAFile     = pflag.String("ateapi-ca-file", ateapiauth.DefaultServiceAccountCAFile, "PEM file with CAs trusted to verify the ateapi server cert. Required for jwt.")
+	ateapiCAFile     = pflag.String("ateapi-ca-file", ateapiauth.DefaultServiceAccountCAFile, "PEM file with CAs trusted to verify the ateapi server cert.")
 	ateapiServerName = pflag.String("ateapi-server-name", "", "SNI / hostname expected on the ateapi server cert. Optional.")
-	ateapiTokenFile  = pflag.String("ateapi-token-file", ateapiauth.DefaultServiceAccountTokenFile, "Projected SA token file used as Bearer credential. Required for jwt.")
+	ateapiTokenAuth  = pflag.Bool("ateapi-use-token-auth", false, "Authenticate to ateapi with the Bearer token from --ateapi-token-file instead of the client certificate from --ateapi-client-cert.")
+	ateapiTokenFile  = pflag.String("ateapi-token-file", "", "Projected SA token file used as Bearer credential. Required with --ateapi-use-token-auth, ignored otherwise.")
+	ateapiClientCert = pflag.String("ateapi-client-cert", "", "Credential bundle presented as the client certificate when dialing ateapi. Required unless --ateapi-use-token-auth is set, ignored otherwise.")
 )
 
 func init() {
@@ -54,17 +55,12 @@ func main() {
 	pflag.Parse()
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 
-	mode, err := ateapiauth.ParseMode(*ateapiAuthMode)
-	if err != nil {
-		setupLog.Error(err, "invalid --ateapi-auth")
-		os.Exit(1)
-	}
-
 	dialOpts, err := ateapiauth.DialOptions(ateapiauth.ClientConfig{
-		Mode:       mode,
-		CAFile:     *ateapiCAFile,
-		ServerName: *ateapiServerName,
-		TokenFile:  *ateapiTokenFile,
+		UseTokenAuth:     *ateapiTokenAuth,
+		CAFile:           *ateapiCAFile,
+		ServerName:       *ateapiServerName,
+		TokenFile:        *ateapiTokenFile,
+		ClientCredBundle: *ateapiClientCert,
 	})
 	if err != nil {
 		setupLog.Error(err, "building ateapi dial options")

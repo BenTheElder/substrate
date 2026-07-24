@@ -63,7 +63,7 @@ function usage() {
   echo "  --deploy-ate-system                    Deploy core system (CRDs, atelet, apiserver)"
   echo "  --delete-ate-system                    Delete core system"
   echo "  --delete-all                           Delete core system and all registered demos"
-  echo "  --auth-mode=mtls|jwt                   Select ateapi auth mode for --deploy-ate-system (default: mtls)"
+  echo "  --ateapi-client-auth=cert|token               Select how in-cluster clients authenticate to ateapi for --deploy-ate-system (default: cert; the server always accepts both)"
   echo ""
   echo "Infrastructure components:"
   echo ""
@@ -132,26 +132,26 @@ run_ko() {
   esac
 }
 
-ate_auth_mode() {
-  case "${ATE_API_AUTH_MODE:-mtls}" in
-    mtls|jwt)
-      echo "${ATE_API_AUTH_MODE:-mtls}"
+ateapi_client_auth() {
+  case "${ATE_ATEAPI_CLIENT_AUTH:-cert}" in
+    cert|token)
+      echo "${ATE_ATEAPI_CLIENT_AUTH:-cert}"
       ;;
     *)
-      echo "Error: ATE_API_AUTH_MODE must be mtls or jwt, got '${ATE_API_AUTH_MODE}'" >&2
+      echo "Error: ATE_ATEAPI_CLIENT_AUTH must be cert or token, got '${ATE_ATEAPI_CLIENT_AUTH}'" >&2
       exit 1
       ;;
   esac
 }
 
 render_ate_system_manifests() {
-  local auth_mode=""
-  auth_mode="$(ate_auth_mode)"
+  local client_auth=""
+  client_auth="$(ateapi_client_auth)"
 
-  if [[ "${auth_mode}" == "jwt" ]]; then
-    local overlay="manifests/ate-install/jwt"
+  if [[ "${client_auth}" == "token" ]]; then
+    local overlay="manifests/ate-install/token-client"
     if [[ "${ATE_INSTALL_KIND:-false}" == "true" ]]; then
-      overlay="manifests/ate-install/kind-jwt"
+      overlay="manifests/ate-install/kind-token-client"
     fi
     kubectl kustomize "${overlay}" --load-restrictor LoadRestrictionsNone | run_ko resolve -f -
     return
@@ -166,17 +166,36 @@ render_ate_system_manifests() {
   fi
 }
 
-create_valkey_ca_certs_secret() {
-  log_step "create_valkey_ca_certs_secret"
-  local ca_certs=""
-  # Extract from in-cluster service-dns-ca-pool secret (base64 json)
+# Extract a CA pool secret's RootCertificateDER and emit it as a PEM certificate.
+ca_pool_root_pem() {
+  local secret="$1"
   local pool_json=""
-  pool_json=$(run_kubectl get secret -n podcertificate-controller-system service-dns-ca-pool -o jsonpath='{.data.pool}' | base64 --decode)
-  # Extract RootCertificateDER base64 string
+  pool_json=$(run_kubectl get secret -n podcertificate-controller-system "${secret}" -o jsonpath='{.data.pool}' | base64 --decode)
   local der_base64=""
   der_base64=$(echo "${pool_json}" | grep -o '"RootCertificateDER":"[^"]*' | sed 's/"RootCertificateDER":"//')
-  # Convert DER to PEM certificate
-  ca_certs=$(echo "${der_base64}" | base64 --decode | openssl x509 -inform der -outform pem)
+  echo "${der_base64}" | base64 --decode | openssl x509 -inform der -outform pem
+}
+
+create_valkey_ca_certs_secret() {
+  log_step "create_valkey_ca_certs_secret"
+  # valkey requires a single tls-ca-cert-file to verify client and server certs it sees,
+  # so it needs both CAs:
+  #   - servicedns CA: verifies valkey peers' server certs.
+  #   - podidentity CA: verifies the client certs that connect to valkey
+  #     (apiserver, the init job, and peers acting as clients).
+  # Extract each root into its own variable: errexit cannot see a substitution
+  # failing inside printf's argument list, which would silently produce a CA
+  # file with a missing root.
+  local servicedns_root=""
+  servicedns_root=$(ca_pool_root_pem service-dns-ca-pool)
+  local podidentity_root=""
+  podidentity_root=$(ca_pool_root_pem pod-identity-ca-pool)
+  if [[ -z "${servicedns_root}" || -z "${podidentity_root}" ]]; then
+    echo "error: failed to extract a CA root for valkey-ca-certs" >&2
+    return 1
+  fi
+  local ca_certs=""
+  ca_certs=$(printf '%s\n%s\n' "${servicedns_root}" "${podidentity_root}")
 
   run_kubectl create secret generic valkey-ca-certs \
     --from-literal=ca.crt="${ca_certs}" \
@@ -226,7 +245,9 @@ create_api_server_env_vars() {
   redis_address="valkey-cluster.ate-system.svc:6379"
   use_iam_auth="false"
   tls_server_name="valkey-cluster.ate-system.svc"
-  client_cert="/run/servicedns.podcert.ate.dev/credential-bundle.pem"
+  # The apiserver dials valkey as a client, so it presents a podidentity
+  # (SPIFFE) client cert rather than a servicedns serving cert.
+  client_cert="/run/podidentity.podcert.ate.dev/credential-bundle.pem"
 
   echo "REDIS_ADDRESS: ${redis_address}"
 
@@ -529,13 +550,13 @@ BENCHMARK_WORKER_COUNT=1
 prescan_args=("$@")
 for ((i = 0; i < ${#prescan_args[@]}; i++)); do
   case "${prescan_args[i]}" in
-    --auth-mode=*) ATE_API_AUTH_MODE="${prescan_args[i]#*=}" ;;
-    --auth-mode)
+    --ateapi-client-auth=*) ATE_ATEAPI_CLIENT_AUTH="${prescan_args[i]#*=}" ;;
+    --ateapi-client-auth)
       if (( i + 1 >= ${#prescan_args[@]} )); then
-        echo "Error: --auth-mode requires mtls or jwt" >&2
+        echo "Error: --ateapi-client-auth requires cert or token" >&2
         exit 1
       fi
-      ATE_API_AUTH_MODE="${prescan_args[$((i + 1))]}"
+      ATE_ATEAPI_CLIENT_AUTH="${prescan_args[$((i + 1))]}"
       ;;
     --benchmark-worker-count)
       BENCHMARK_WORKER_COUNT="${prescan_args[i+1]:-1}"
@@ -560,14 +581,14 @@ while [[ "$#" -gt 0 ]]; do
   done
 
   case $1 in
-    --auth-mode=*) ATE_API_AUTH_MODE="${1#*=}" ;;
-    --auth-mode)
+    --ateapi-client-auth=*) ATE_ATEAPI_CLIENT_AUTH="${1#*=}" ;;
+    --ateapi-client-auth)
       shift
       if [[ "$#" -eq 0 ]]; then
-        echo "Error: --auth-mode requires mtls or jwt" >&2
+        echo "Error: --ateapi-client-auth requires cert or token" >&2
         exit 1
       fi
-      ATE_API_AUTH_MODE="$1"
+      ATE_ATEAPI_CLIENT_AUTH="$1"
       ;;
 
     --deploy-ate-system) deploy_ate_system ;;

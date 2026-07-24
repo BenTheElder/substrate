@@ -16,22 +16,15 @@ package router
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/big"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/spf13/cobra"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -62,37 +55,9 @@ func init() {
 	utilruntime.Must(v1alpha1.AddToScheme(scheme))
 }
 
-// RouterConfig holds deployment setup and endpoint options for the router node instance.
-type RouterConfig struct {
-	Standalone     bool
-	Namespace      string
-	Kubeconfig     string
-	AteapiAddr     string
-	HttpPort       int
-	XdsPort        int
-	ExtprocPort    int
-	ExtprocAddr    string
-	EnvoyImage     string
-	TemplatesFile  string
-	StatusPort     int
-	HealthInterval time.Duration
-	HttpsPort      int
-	EnvoyCertPath  string
-	LogLevel       string
-	MetricsAddr    string
-	// OtlpCollectorAddress is the host:port of the OTLP gRPC collector that
-	// Envoy reports tracing spans to. Empty disables Envoy-side tracing.
-	OtlpCollectorAddress string
-
-	AteapiAuthMode   string
-	AteapiCAFile     string
-	AteapiServerName string
-	AteapiTokenFile  string
-}
-
 // RouterServer instantiates and coordinates runtime threads executing system modules.
 type RouterServer struct {
-	cfg RouterConfig
+	cfg routerConfig
 
 	Cmd        *cobra.Command
 	k8sClient  client.Client
@@ -103,7 +68,7 @@ type RouterServer struct {
 	atStore    atStore
 }
 
-func NewRouterServer(cfg RouterConfig) (*RouterServer, error) {
+func NewRouterServer(cfg routerConfig) (*RouterServer, error) {
 	var k8sClient client.Client
 	var clientset kubernetes.Interface
 
@@ -193,15 +158,12 @@ func (s *RouterServer) Run(ctx context.Context) error {
 
 	go serverboot.StartMetricsServer(ctx, serverboot.MetricsServerOptions{Addr: s.cfg.MetricsAddr})
 
-	authMode, err := ateapiauth.ParseMode(s.cfg.AteapiAuthMode)
-	if err != nil {
-		return fmt.Errorf("invalid --ateapi-auth: %w", err)
-	}
 	dialOpts, err := ateapiauth.DialOptions(ateapiauth.ClientConfig{
-		Mode:       authMode,
-		CAFile:     s.cfg.AteapiCAFile,
-		ServerName: s.cfg.AteapiServerName,
-		TokenFile:  s.cfg.AteapiTokenFile,
+		UseTokenAuth:     s.cfg.Auth.AteapiUseTokenAuth,
+		CAFile:           s.cfg.Auth.AteapiCAFile,
+		ServerName:       s.cfg.Auth.AteapiServerName,
+		TokenFile:        s.cfg.Auth.AteapiTokenFile,
+		ClientCredBundle: s.cfg.Auth.AteapiClientCertPath,
 	})
 	if err != nil {
 		return fmt.Errorf("building ateapi dial options: %w", err)
@@ -214,7 +176,7 @@ func (s *RouterServer) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to establish grpc channel to ateapi client: %w", err)
 	}
-	slog.InfoContext(ctx, "Connecting to ateapi", slog.String("address", s.cfg.AteapiAddr), slog.String("auth", string(authMode)))
+	slog.InfoContext(ctx, "Connecting to ateapi", slog.String("address", s.cfg.AteapiAddr), slog.Bool("use-api-token-auth", s.cfg.Auth.AteapiUseTokenAuth))
 	s.apiClient = ateapipb.NewControlClient(conn)
 
 	slog.InfoContext(ctx, "Starting substrate router subsystem", slog.Bool("standalone", s.cfg.Standalone))
@@ -227,17 +189,7 @@ func (s *RouterServer) Run(ctx context.Context) error {
 		return fmt.Errorf("configure OTLP collector: %w", err)
 	}
 
-	var certContent, keyContent string
-	if s.cfg.EnvoyCertPath == "" {
-		slog.InfoContext(ctx, "No Envoy certificate path provided, generating self-signed certificate for testing")
-		var err error
-		certContent, keyContent, err = generateSelfSignedCert()
-		if err != nil {
-			return fmt.Errorf("failed to generate self-signed cert: %w", err)
-		}
-	}
-
-	xdsSrv.SetTlsConfig(s.cfg.HttpsPort, s.cfg.EnvoyCertPath, certContent, keyContent)
+	xdsSrv.SetTlsConfig(s.cfg.HttpsPort, s.cfg.EnvoyCertPath)
 	if s.extprocSrv == nil {
 		routeDuration, err := newRouteDurationHistogram()
 		if err != nil {
@@ -312,40 +264,4 @@ func (s *RouterServer) Run(ctx context.Context) error {
 	}
 
 	return g.Wait()
-}
-
-func generateSelfSignedCert() (string, string, error) {
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return "", "", err
-	}
-
-	template := x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject: pkix.Name{
-			Organization: []string{"Substrate Local Test"},
-		},
-		NotBefore: time.Now(),
-		NotAfter:  time.Now().Add(time.Hour * 24 * 365),
-
-		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true,
-		DNSNames:              []string{"localhost"},
-	}
-
-	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
-	if err != nil {
-		return "", "", err
-	}
-
-	certPem := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
-
-	privBytes, err := x509.MarshalPKCS8PrivateKey(priv)
-	if err != nil {
-		return "", "", err
-	}
-	keyPem := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privBytes})
-
-	return string(certPem), string(keyPem), nil
 }

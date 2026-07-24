@@ -74,7 +74,7 @@ func TestCheckK8sTimesOut(t *testing.T) {
 	}))
 	defer server.Close()
 
-	rh := newRouterHealth(time.Second, newHealthTestClientset(t, server), nil, RouterConfig{})
+	rh := newRouterHealth(time.Second, newHealthTestClientset(t, server), nil, routerConfig{})
 	startedAt := time.Now()
 	healthy, msg := rh.checkK8s(context.Background())
 	elapsed := time.Since(startedAt)
@@ -91,7 +91,7 @@ func TestCheckK8sTimesOut(t *testing.T) {
 }
 
 func TestCheckK8sWithoutRESTClient(t *testing.T) {
-	rh := newRouterHealth(time.Second, kubernetesfake.NewSimpleClientset(), nil, RouterConfig{})
+	rh := newRouterHealth(time.Second, kubernetesfake.NewSimpleClientset(), nil, routerConfig{})
 	healthy, msg := rh.checkK8s(context.Background())
 	if healthy {
 		t.Fatal("checkK8s returned healthy without a discovery REST client")
@@ -119,7 +119,7 @@ func TestHealthCheckDoesNotBlockReportOrStatusz(t *testing.T) {
 	}))
 	defer server.Close()
 
-	rh := newRouterHealth(time.Second, newHealthTestClientset(t, server), nil, RouterConfig{})
+	rh := newRouterHealth(time.Second, newHealthTestClientset(t, server), nil, routerConfig{})
 	setHealthyEnvoyClient(rh)
 	checkDone := make(chan struct{})
 	go func() {
@@ -144,7 +144,7 @@ func TestHealthCheckDoesNotBlockReportOrStatusz(t *testing.T) {
 	}
 
 	statusServer := httptest.NewServer(http.HandlerFunc((&RouterServer{
-		cfg:    RouterConfig{Standalone: true},
+		cfg:    routerConfig{Standalone: true},
 		health: rh,
 	}).handleStatusz))
 	defer statusServer.Close()
@@ -208,7 +208,7 @@ func TestHealthChecksRunConcurrently(t *testing.T) {
 			}
 		},
 	}
-	rh := newRouterHealth(time.Second, newHealthTestClientset(t, server), apiClient, RouterConfig{})
+	rh := newRouterHealth(time.Second, newHealthTestClientset(t, server), apiClient, routerConfig{})
 	rh.envoyClient = &http.Client{Transport: healthRoundTripFunc(func(*http.Request) (*http.Response, error) {
 		started <- "envoy"
 		<-release
@@ -261,7 +261,7 @@ func TestHealthStartStopsWhenK8sCheckIsCanceled(t *testing.T) {
 	}))
 	defer server.Close()
 
-	rh := newRouterHealth(time.Hour, newHealthTestClientset(t, server), nil, RouterConfig{})
+	rh := newRouterHealth(time.Hour, newHealthTestClientset(t, server), nil, routerConfig{})
 	setHealthyEnvoyClient(rh)
 	ctx, cancel := context.WithCancel(context.Background())
 	startDone := make(chan struct{})
