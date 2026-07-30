@@ -40,6 +40,11 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// packRestoreRanges narrows a snapshot's memory range table to the regions holding
+// data before restoring from it (see ch.WritePackedSnapshot). Opt-in while the
+// behaviour is being evaluated.
+var packRestoreRanges = os.Getenv("ATEOM_PACK_RESTORE_RANGES") == "1"
+
 // RestoreWorkload brings the actor back from a snapshot, on a possibly different
 // pod. What that means depends on the scope the snapshot was taken with:
 //
@@ -282,9 +287,26 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 	// CH's OnDemand snapshot alone would be INCOMPLETE (it writes only faulted pages,
 	// dropping the un-faulted ones it demand-pages from this source) — so
 	// CheckpointWorkload overlays CH's delta onto this source (restoreSourceDir) to
-	// rebuild a complete snapshot. CH demand-pages from restoreDir for the VM's whole
-	// lifetime, so it must persist until teardown (atelet keeps it until reset).
-	if err := client.RestoreWithNetFDs(ctx, restoreDir, restoredNets, "OnDemand"); err != nil {
+	// rebuild a complete snapshot. CH demand-pages from the restore source for the
+	// VM's whole lifetime, so it must persist until teardown (atelet keeps the actor's
+	// restore-state until reset, and the packed copy lives in the per-VM dir).
+	restoreFrom := restoreDir
+	if packRestoreRanges {
+		// Narrow the snapshot's memory range table to the regions holding data, so
+		// cloud-hypervisor registers userfaultfd over those instead of all of guest
+		// RAM. The unpacked restoreDir stays the merge base: its layout matches the
+		// deltas CH writes, which the packed copy's does not.
+		packedDir := filepath.Join(kata.VMDir(actorUID), "restore-packed")
+		stats, err := ch.WritePackedSnapshot(restoreDir, packedDir, ch.DefaultPackOptions)
+		if err != nil {
+			// Restoring from the original snapshot is always correct, just denser.
+			slog.WarnContext(ctx, "packing restore ranges failed; restoring unpacked", "error", err)
+		} else {
+			slog.InfoContext(ctx, "packed restore ranges", "stats", stats.String())
+			restoreFrom = packedDir
+		}
+	}
+	if err := client.RestoreWithNetFDs(ctx, restoreFrom, restoredNets, "OnDemand"); err != nil {
 		return fmt.Errorf("while restoring VM with net FDs: %w", err)
 	}
 	if err := client.Resume(ctx); err != nil {
