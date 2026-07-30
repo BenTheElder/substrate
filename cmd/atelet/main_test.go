@@ -568,6 +568,59 @@ func TestBuildAteomWorkloadSpecForwardsReadyz(t *testing.T) {
 	}
 }
 
+func TestBuildAteomWorkloadSpecForwardsDurableDirMounts(t *testing.T) {
+	in := &ateletpb.WorkloadSpec{
+		Volumes: []*ateletpb.Volume{
+			{Name: "data", Type: ateletpb.VolumeType_VOLUME_TYPE_DURABLE_DIR},
+			{Name: "cache", Type: ateletpb.VolumeType_VOLUME_TYPE_DURABLE_DIR},
+			{Name: "scratch", Type: ateletpb.VolumeType_VOLUME_TYPE_EXTERNAL},
+		},
+		Containers: []*ateletpb.Container{
+			{
+				Name: "main",
+				VolumeMounts: []*ateletpb.VolumeMount{
+					{Name: "data", MountPath: "/home/counter"},
+					{Name: "cache", MountPath: "/var/cache"},
+					// Only durable-dir volumes cross to ateom; other volume
+					// types are mounted by atelet itself.
+					{Name: "scratch", MountPath: "/scratch"},
+				},
+			},
+			{
+				Name: "sidecar",
+				VolumeMounts: []*ateletpb.VolumeMount{
+					{Name: "data", MountPath: "/shared"},
+				},
+			},
+			{Name: "no-volumes"},
+		},
+	}
+	// ateom needs the volume NAME as well as the path: the name selects the
+	// per-volume directory on the host, and an actor may have several.
+	want := &ateompb.WorkloadSpec{
+		Containers: []*ateompb.Container{
+			{
+				Name: "main",
+				DurableDirVolumeMounts: []*ateompb.DurableDirVolumeMount{
+					{VolumeName: "data", MountPath: "/home/counter"},
+					{VolumeName: "cache", MountPath: "/var/cache"},
+				},
+			},
+			{
+				Name: "sidecar",
+				DurableDirVolumeMounts: []*ateompb.DurableDirVolumeMount{
+					{VolumeName: "data", MountPath: "/shared"},
+				},
+			},
+			{Name: "no-volumes"},
+		},
+	}
+	got := buildAteomWorkloadSpec(in)
+	if diff := cmp.Diff(want, got, protocmp.Transform()); diff != "" {
+		t.Errorf("buildAteomWorkloadSpec mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestIsTerminalFileErr(t *testing.T) {
 	tests := []struct {
 		name string
