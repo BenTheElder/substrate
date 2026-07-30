@@ -130,6 +130,53 @@ func TestDurableDirLifecycle(t *testing.T) {
 	}
 }
 
+// TestMultipleDurableDirLifecycle covers an Actor with TWO durable-dir volumes:
+// both must survive pause/resume and suspend/resume independently. Only the
+// micro-VM runtime supports more than one — gVisor templates are still capped at
+// one by the ActorTemplate CEL rules, so the template would be rejected there.
+func TestMultipleDurableDirLifecycle(t *testing.T) {
+	if !isMicroVMEnvironment() {
+		t.Skip("Skipping TestMultipleDurableDirLifecycle: multiple DurableDir volumes are micro-VM only")
+	}
+
+	tests := []struct {
+		name string
+		tc   actorLifecycleTestCase
+	}{
+		{
+			name: "onCommit:Full, onPause:Full",
+			tc: actorLifecycleTestCase{
+				onCommit:               v1alpha1.SnapshotScopeFull,
+				onPause:                v1alpha1.SnapshotScopeFull,
+				wantMemoryAfterPause:   2,
+				wantFileAfterPause:     2,
+				wantMemoryAfterSuspend: 3,
+				wantFileAfterSuspend:   3,
+				checkSecondFileCounter: true,
+			},
+		},
+		{
+			name: "onCommit:Data, onPause:Data",
+			tc: actorLifecycleTestCase{
+				onCommit:               v1alpha1.SnapshotScopeData,
+				onPause:                v1alpha1.SnapshotScopeData,
+				wantMemoryAfterPause:   1,
+				wantFileAfterPause:     2,
+				wantMemoryAfterSuspend: 1,
+				wantFileAfterSuspend:   3,
+				checkSecondFileCounter: true,
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			runActorLifecycleTestCase(t, "multi-durabledir-lifecycle", createActorTemplateWithTwoDurableDirs, test.tc)
+		})
+	}
+}
+
 func TestExternalVolumeLifecycle(t *testing.T) {
 	if isMicroVMEnvironment() {
 		t.Skip("Skipping TestExternalVolumeLifecycle for microVM environment")
@@ -175,6 +222,12 @@ type actorLifecycleTestCase struct {
 	wantFileAfterPause     int
 	wantMemoryAfterSuspend int
 	wantFileAfterSuspend   int
+
+	// checkSecondFileCounter also asserts the counter kept in a SECOND durable
+	// volume. Both volumes are written on every request, so it must track the
+	// first counter exactly — if one volume were dropped or restored into the
+	// wrong place, they would diverge.
+	checkSecondFileCounter bool
 }
 
 func runActorLifecycleTestCase(t *testing.T, prefix string, createTemplate func(context.Context, *testing.T, *e2e.Clients, *e2e.Namespace, v1alpha1.SnapshotScope, v1alpha1.SnapshotScope) (*v1alpha1.ActorTemplate, error), tc actorLifecycleTestCase) {
@@ -228,6 +281,9 @@ func runActorLifecycleTestCase(t *testing.T, prefix string, createTemplate func(
 		t.Fatalf("failed to call actor: %v", err)
 	}
 	validateCounterResponse(t, resp, "after creation", 1, 1)
+	if tc.checkSecondFileCounter {
+		validateSecondFileCounter(t, resp, "after creation", 1)
+	}
 
 	//
 	// Pausing the actor
@@ -254,6 +310,9 @@ func runActorLifecycleTestCase(t *testing.T, prefix string, createTemplate func(
 		t.Fatalf("failed to call actor again: %v", err)
 	}
 	validateCounterResponse(t, resp, "after pause", tc.wantMemoryAfterPause, tc.wantFileAfterPause)
+	if tc.checkSecondFileCounter {
+		validateSecondFileCounter(t, resp, "after pause", tc.wantFileAfterPause)
+	}
 
 	//
 	// Suspending the actor
@@ -280,6 +339,19 @@ func runActorLifecycleTestCase(t *testing.T, prefix string, createTemplate func(
 		t.Fatalf("failed to call actor again: %v", err)
 	}
 	validateCounterResponse(t, resp, "after suspend", tc.wantMemoryAfterSuspend, tc.wantFileAfterSuspend)
+	if tc.checkSecondFileCounter {
+		validateSecondFileCounter(t, resp, "after suspend", tc.wantFileAfterSuspend)
+	}
+}
+
+// validateSecondFileCounter checks the counter the workload keeps in its second
+// durable-dir volume (see createActorTemplateWithTwoDurableDirs).
+func validateSecondFileCounter(t *testing.T, resp string, stage string, want int) {
+	t.Helper()
+	const prefix = "preserved second file counter: "
+	if !strings.Contains(resp, prefix+fmt.Sprintf("%d", want)) {
+		t.Errorf("[%s] expected second file count %d, got response: %s", stage, want, resp)
+	}
 }
 
 func validateCounterResponse(t *testing.T, resp string, stage string, wantMemory, wantFile int) {
@@ -675,6 +747,39 @@ func createActorTemplateWithExternalVolume(ctx context.Context, t *testing.T, cl
 		}
 	}
 	return createActorTemplateInternal(ctx, t, clients, nsObj, "counter-ext-vol", onCommit, onPause, modify)
+}
+
+// secondDurableDirVolume is the extra durable-dir volume (and where the counter
+// container mounts it) added by createActorTemplateWithTwoDurableDirs.
+const (
+	secondDurableDirVolume    = "data2"
+	secondDurableDirMountPath = "/home/counter2"
+)
+
+// createActorTemplateWithTwoDurableDirs builds a template with a SECOND
+// durable-dir volume alongside the one the demo already declares, and points the
+// counter's second file counter at it, so both volumes are written on every
+// request. Only the micro-VM runtime accepts this: gVisor templates are still
+// capped at one durable-dir volume by the ActorTemplate CEL rules.
+func createActorTemplateWithTwoDurableDirs(ctx context.Context, t *testing.T, clients *e2e.Clients, nsObj *e2e.Namespace, onCommit, onPause v1alpha1.SnapshotScope) (*v1alpha1.ActorTemplate, error) {
+	modify := func(at *v1alpha1.ActorTemplate) {
+		for i, c := range at.Spec.Containers {
+			if c.Name != "counter" {
+				continue
+			}
+			c.Command = []string{"/ko-app/counter", "--second-file-counter-directory=" + secondDurableDirMountPath}
+			c.VolumeMounts = append(c.VolumeMounts, v1alpha1.VolumeMount{
+				Name:      secondDurableDirVolume,
+				MountPath: secondDurableDirMountPath,
+			})
+			at.Spec.Containers[i] = c
+		}
+		at.Spec.Volumes = append(at.Spec.Volumes, v1alpha1.Volume{
+			Name:         secondDurableDirVolume,
+			VolumeSource: v1alpha1.VolumeSource{DurableDir: &v1alpha1.DurableDirVolumeSource{}},
+		})
+	}
+	return createActorTemplateInternal(ctx, t, clients, nsObj, "counter-two-durabledirs", onCommit, onPause, modify)
 }
 
 func waitForActorStatus(ctx context.Context, t *testing.T, clients *e2e.Clients, actorName string, expectedStatus ateapipb.Actor_Status) {
