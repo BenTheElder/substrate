@@ -45,6 +45,20 @@ import (
 // behaviour is being evaluated.
 var packRestoreRanges = os.Getenv("ATEOM_PACK_RESTORE_RANGES") == "1"
 
+// restoreMemMode selects how cloud-hypervisor loads guest RAM: "OnDemand"
+// (userfaultfd) or "Copy" (eager). Eager reads only the data extents of the memory
+// file and registers no userfaultfd at all, which matters on cloud-hypervisor
+// releases that background-prefault an on-demand restore and refuse to snapshot
+// until that finishes.
+var restoreMemMode = envOr("ATEOM_RESTORE_MEM_MODE", "OnDemand")
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
 // RestoreWorkload brings the actor back from a snapshot, on a possibly different
 // pod. What that means depends on the scope the snapshot was taken with:
 //
@@ -306,7 +320,7 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 			restoreFrom = packedDir
 		}
 	}
-	if err := client.RestoreWithNetFDs(ctx, restoreFrom, restoredNets, "OnDemand"); err != nil {
+	if err := client.RestoreWithNetFDs(ctx, restoreFrom, restoredNets, restoreMemMode); err != nil {
 		return fmt.Errorf("while restoring VM with net FDs: %w", err)
 	}
 	if err := client.Resume(ctx); err != nil {
