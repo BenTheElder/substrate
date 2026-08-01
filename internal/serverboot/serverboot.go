@@ -52,8 +52,31 @@ func InitLogger() {
 // one synchronized writer between the runtime logger and a separate writer (e.g.
 // ateom's actor-log forwarder) so their lines don't interleave.
 func InitLoggerWithWriter(w io.Writer) {
-	slog.SetDefault(slog.New(contextlogging.NewHandler(slog.NewJSONHandler(w, nil))))
+	slog.SetDefault(slog.New(contextlogging.NewHandler(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: &logLevel}))))
 }
+
+// logLevel is the dynamic minimum level behind the serverboot loggers.
+// A LevelVar so SetLogLevel works before or after InitLogger.
+var logLevel slog.LevelVar
+
+// SetLogLevel sets the minimum level of the serverboot loggers from a flag
+// value: "debug", "info", "warn", or "error" (case-insensitive). Empty
+// means unset and leaves the current level unchanged, so configs that
+// never populate the field keep the default.
+func SetLogLevel(level string) error {
+	if level == "" {
+		return nil
+	}
+	if err := logLevel.UnmarshalText([]byte(level)); err != nil {
+		return fmt.Errorf("invalid log level %q (want debug, info, warn, or error): %w", level, err)
+	}
+	return nil
+}
+
+// LogLevel exposes the level behind the serverboot loggers, for binaries
+// that build their own handler but should still honor --log-level. A
+// Leveler (not the LevelVar) so SetLogLevel stays the only mutation path.
+func LogLevel() slog.Leveler { return &logLevel }
 
 // serviceInstanceID is generated once so the tracer and meter resources share it.
 var serviceInstanceID = uuid.NewString()
