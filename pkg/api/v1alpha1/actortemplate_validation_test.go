@@ -561,6 +561,45 @@ func TestActorTemplateValidation(t *testing.T) {
 		wantErr: true,
 		errMsg:  "Unsupported value",
 	}, {
+		name: "SnapshotsConfig: onResume.fromData=Golden, microvm",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.SandboxClass = SandboxClassMicroVM
+			at.Spec.SnapshotsConfig.OnCommit = SnapshotScopeData
+			at.Spec.SnapshotsConfig.OnResume = OnResumeConfig{FromData: ResumeSourceGolden}
+		},
+		wantErr: false,
+	}, {
+		name: "SnapshotsConfig: onResume.fromData=ColdBoot, gvisor",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.SnapshotsConfig.OnResume = OnResumeConfig{FromData: ResumeSourceColdBoot}
+		},
+		wantErr: false,
+	}, {
+		name: "SnapshotsConfig: onResume.fromData invalid enum value",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.SandboxClass = SandboxClassMicroVM
+			at.Spec.SnapshotsConfig.OnResume = OnResumeConfig{FromData: ResumeSource("bogus")}
+		},
+		wantErr: true,
+		errMsg:  "Unsupported value",
+	}, {
+		name: "SnapshotsConfig: onResume.fromData=Golden, explicit gvisor (invalid)",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.SandboxClass = SandboxClassGvisor
+			at.Spec.SnapshotsConfig.OnCommit = SnapshotScopeData
+			at.Spec.SnapshotsConfig.OnResume = OnResumeConfig{FromData: ResumeSourceGolden}
+		},
+		wantErr: true,
+		errMsg:  "onResume.fromData: Golden is not supported when sandboxClass is 'gvisor'",
+	}, {
+		name: "SnapshotsConfig: onResume.fromData=Golden, SandboxClass unset (defaults to gvisor, invalid)",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.SnapshotsConfig.OnCommit = SnapshotScopeData
+			at.Spec.SnapshotsConfig.OnResume = OnResumeConfig{FromData: ResumeSourceGolden}
+		},
+		wantErr: true,
+		errMsg:  "onResume.fromData: Golden is not supported when sandboxClass is 'gvisor'",
+	}, {
 		name: "Volumes: 1 DurableDir mount is valid",
 		mutate: func(at *ActorTemplate) {
 			at.Spec.Volumes = []Volume{

@@ -424,6 +424,8 @@ func toAteomSnapshotScope(scope ateletpb.SnapshotScope) ateompb.SnapshotScope {
 	switch scope {
 	case ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA:
 		return ateompb.SnapshotScope_SNAPSHOT_SCOPE_DATA
+	case ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA_ON_GOLDEN:
+		return ateompb.SnapshotScope_SNAPSHOT_SCOPE_DATA_ON_GOLDEN
 	default:
 		return ateompb.SnapshotScope_SNAPSHOT_SCOPE_FULL
 	}
@@ -546,6 +548,38 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 		return nil, fmt.Errorf("unexpected checkpoint type: %v", req.GetType())
 	}
 
+	// On a DATA_ON_GOLDEN restore the actor's snapshot holds only durable-dir data; the guest
+	// state (memory + VM state) comes from the template's golden snapshot. Fetch
+	// the golden manifest too: its SnapshotFiles complete the restore set below,
+	// and its pinned sandbox binaries are the ones that will run the restored
+	// guest (the golden snapshot's memory image must be resumed by the binaries
+	// that created it).
+	var goldenRec *sandboxAssetsRecord
+	if req.GetScope() == ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA_ON_GOLDEN {
+		goldenPrefix := req.GetGoldenSnapshotUriPrefix()
+		manifest, err := ategcs.FetchFromGCS(ctx, s.gcsClient, strings.TrimSuffix(goldenPrefix, "/")+"/"+sandboxManifestName)
+		if err != nil {
+			return nil, ateerrors.CrashIfReason(ctx, fmt.Errorf("while fetching golden snapshot manifest: %w", err), ateerrors.ReasonInvalidObjectURL, ateerrors.ReasonFailedGetExternalObject)
+		}
+		if goldenRec, err = unmarshalSandboxRecord(manifest); err != nil {
+			return nil, ateerrors.CrashIfReason(ctx, fmt.Errorf("while unmarshalling golden sandbox record: %w", err), ateerrors.ReasonInvalidSandboxAsset)
+		}
+		if goldenRec.SandboxClass != sandboxRec.SandboxClass {
+			return nil, status.Errorf(codes.FailedPrecondition, "golden snapshot sandbox class %q does not match actor snapshot sandbox class %q", goldenRec.SandboxClass, sandboxRec.SandboxClass)
+		}
+	}
+
+	// The record whose pinned binaries run the restored workload: the golden's
+	// for a DATA_ON_GOLDEN restore, the snapshot's own otherwise. The golden's
+	// set wins because the guest state being resumed is the golden snapshot's
+	// memory image, and a memory image must be resumed by the exact binary
+	// versions that produced it; the actor's snapshot contributes only durable
+	// data (a plain tar), which no binary version reads back.
+	runtimeRec := sandboxRec
+	if goldenRec != nil {
+		runtimeRec = goldenRec
+	}
+
 	// Download the memory snapshot and prepare the sandbox assets + OCI bundle
 	// CONCURRENTLY. They are independent — only the final ateom.RestoreWorkload
 	// needs both — so overlapping the GCS download (~0.5s warm) with the asset
@@ -559,12 +593,41 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 		t := time.Now()
 		switch req.GetType() {
 		case ateletpb.CheckpointType_CHECKPOINT_TYPE_EXTERNAL:
-			if err := s.downloadExternalCheckpoint(gctx, req.GetExternalConfig().GetSnapshotUriPrefix(), checkpointDir, sandboxRec.SnapshotFiles); err != nil {
+			if req.GetScope() == ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA_ON_GOLDEN {
+				if goldenRec == nil {
+					return fmt.Errorf("no golden snapshot record for a %s restore", req.GetScope())
+				}
+				if err := s.downloadCombinedCheckpoint(gctx, req.GetExternalConfig().GetSnapshotUriPrefix(), req.GetGoldenSnapshotUriPrefix(), checkpointDir, sandboxRec.SnapshotFiles, goldenRec.SnapshotFiles); err != nil {
+					return ateerrors.CrashIfReason(ctx, err, ateerrors.ReasonFailedGetExternalObject, ateerrors.ReasonInvalidObjectURL, ateerrors.ReasonTerminalFileSystemError)
+				}
+			} else if err := s.downloadExternalCheckpoint(gctx, req.GetExternalConfig().GetSnapshotUriPrefix(), checkpointDir, sandboxRec.SnapshotFiles); err != nil {
 				return ateerrors.CrashIfReason(ctx, err, ateerrors.ReasonFailedGetExternalObject, ateerrors.ReasonInvalidObjectURL, ateerrors.ReasonTerminalFileSystemError)
 			}
 		case ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL:
-			if err := s.copyLocalCheckpoint(gctx, req.GetLocalConfig().GetSnapshotPrefix(), ateompath.LocalCheckpointsDir(actorUID), checkpointDir, sandboxRec.SnapshotFiles); err != nil {
-				return ateerrors.CrashIfReason(ctx, err, ateerrors.ReasonTerminalFileSystemError)
+			combineWithGolden := req.GetScope() == ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA_ON_GOLDEN
+			if combineWithGolden && goldenRec == nil {
+				return fmt.Errorf("no golden snapshot record for a %s restore", req.GetScope())
+			}
+			// A local (pause) checkpoint may still combine with the golden
+			// snapshot: the actor's files come from the local checkpoint dir,
+			// the golden's from object storage, concurrently.
+			gLocal, gLocalCtx := errgroup.WithContext(gctx)
+			gLocal.Go(func() error {
+				if err := s.copyLocalCheckpoint(gLocalCtx, req.GetLocalConfig().GetSnapshotPrefix(), ateompath.LocalCheckpointsDir(actorUID), checkpointDir, sandboxRec.SnapshotFiles); err != nil {
+					return ateerrors.CrashIfReason(ctx, err, ateerrors.ReasonTerminalFileSystemError)
+				}
+				return nil
+			})
+			if combineWithGolden {
+				gLocal.Go(func() error {
+					if err := s.downloadExternalCheckpoint(gLocalCtx, req.GetGoldenSnapshotUriPrefix(), checkpointDir, goldenOnlyFiles(sandboxRec.SnapshotFiles, goldenRec.SnapshotFiles)); err != nil {
+						return ateerrors.CrashIfReason(ctx, err, ateerrors.ReasonFailedGetExternalObject, ateerrors.ReasonInvalidObjectURL, ateerrors.ReasonTerminalFileSystemError)
+					}
+					return nil
+				})
+			}
+			if err := gLocal.Wait(); err != nil {
+				return err
 			}
 		}
 		dDownload = time.Since(t)
@@ -572,7 +635,7 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 	})
 	g.Go(func() error {
 		var err error
-		if assetPaths, err = s.ensureSandboxAssets(gctx, sandboxRec); err != nil {
+		if assetPaths, err = s.ensureSandboxAssets(gctx, runtimeRec); err != nil {
 			return ateerrors.CrashIfReason(ctx, err, ateerrors.ReasonFailedGetExternalObject, ateerrors.ReasonInvalidObjectURL, ateerrors.ReasonTerminalFileSystemError, ateerrors.ReasonInvalidSandboxAsset)
 		}
 		t := time.Now()
@@ -604,6 +667,10 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 		Spec:                   buildAteomWorkloadSpec(req.GetSpec()),
 		Scope:                  toAteomSnapshotScope(req.GetScope()),
 		ActorUid:               req.GetActorUid(),
+		// Informational: for DATA_ON_GOLDEN the golden snapshot's files are
+		// already staged into the restore dir by the combined download above;
+		// ateom restores from the shared dir and never fetches this URI.
+		GoldenSnapshotUriPrefix: req.GetGoldenSnapshotUriPrefix(),
 	}); err != nil {
 		// TODO: classify the errors returned by Ateom and crash the actor if needed.
 		return nil, fmt.Errorf("while calling ateom.RestoreWorkload: %w", err)
@@ -611,8 +678,11 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 	dAteom = time.Since(tAteom)
 
 	// Record the (manifest-pinned) sandbox binaries on-node so a subsequent
-	// Checkpoint of this restored actor can re-pin the same version.
-	if err := writeSandboxRecord(actorUID, sandboxRec); err != nil {
+	// Checkpoint of this restored actor can re-pin the same version. For a
+	// DATA_ON_GOLDEN restore that is the golden's set — those are the binaries
+	// actually running the guest (Checkpoint overwrites the identity fields
+	// from its own request).
+	if err := writeSandboxRecord(actorUID, runtimeRec); err != nil {
 		// Note: crash the actor right away, if we cannot write the sandbox record now, we will not be able to checkpoint it later.
 		return nil, ateerrors.CrashIfReason(ctx, err, ateerrors.ReasonTerminalFileSystemError)
 	}
@@ -664,6 +734,39 @@ func copyFile(src, dst string) (int64, error) {
 	}
 	nBytes, err := io.Copy(destination, source)
 	return nBytes, errors.Join(err, destination.Close())
+}
+
+// goldenOnlyFiles returns the golden snapshot files not shadowed by the
+// actor's own snapshot: on a DATA_ON_GOLDEN restore the actor's files (the
+// durable-dir data) win name collisions, and the golden snapshot supplies
+// the rest (guest memory + VM state).
+func goldenOnlyFiles(actorFiles, goldenFiles []string) []string {
+	shadowed := make(map[string]bool, len(actorFiles))
+	for _, f := range actorFiles {
+		shadowed[f] = true
+	}
+	rest := make([]string, 0, len(goldenFiles))
+	for _, f := range goldenFiles {
+		if !shadowed[f] {
+			rest = append(rest, f)
+		}
+	}
+	return rest
+}
+
+// downloadCombinedCheckpoint stages a DATA_ON_GOLDEN restore set into dstDir
+// as a single folder: every file of the actor's own snapshot (the durable-dir
+// data) plus the golden snapshot's files the actor's set does not shadow, so
+// the result looks like a Full snapshot whose durable-dir data is the actor's.
+func (s *AteomHerder) downloadCombinedCheckpoint(ctx context.Context, actorPrefix, goldenPrefix, dstDir string, actorFiles, goldenFiles []string) error {
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		return s.downloadExternalCheckpoint(gctx, actorPrefix, dstDir, actorFiles)
+	})
+	g.Go(func() error {
+		return s.downloadExternalCheckpoint(gctx, goldenPrefix, dstDir, goldenOnlyFiles(actorFiles, goldenFiles))
+	})
+	return g.Wait()
 }
 
 func (s *AteomHerder) downloadExternalCheckpoint(ctx context.Context, snapshotUriPrefix string, dstDir string, files []string) error {
@@ -952,6 +1055,13 @@ func validateCheckpointRequest(req *ateletpb.CheckpointRequest) error {
 	default:
 		return fmt.Errorf("invalid checkpoint type: %v", req.GetType())
 	}
+
+	// DATA_ON_GOLDEN is a restore-time operation (combine the golden
+	// snapshot's guest state with the actor's data): checkpoints only ever
+	// capture FULL or DATA.
+	if req.GetScope() == ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA_ON_GOLDEN {
+		return fmt.Errorf("snapshot scope %s is restore-only; checkpoints capture %s or %s", req.GetScope(), ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FULL, ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA)
+	}
 	return nil
 }
 
@@ -997,13 +1107,25 @@ func validateRestoreRequest(req *ateletpb.RestoreRequest) error {
 	default:
 		return fmt.Errorf("invalid checkpoint type: %v", req.GetType())
 	}
+
+	// A DATA_ON_GOLDEN restore needs both halves: the actor's data snapshot
+	// (local pause checkpoint or external commit) and the golden snapshot,
+	// which is always external.
+	if req.GetScope() == ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA_ON_GOLDEN {
+		if err := resources.ValidateSnapshotURIPrefix(req.GetGoldenSnapshotUriPrefix()); err != nil {
+			return fmt.Errorf("invalid golden_snapshot_uri_prefix: %w", err)
+		}
+	} else if req.GetGoldenSnapshotUriPrefix() != "" {
+		return fmt.Errorf("golden_snapshot_uri_prefix is only valid with snapshot scope %s", ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA_ON_GOLDEN)
+	}
 	return nil
 }
 
 func validateSnapshotScope(scope ateletpb.SnapshotScope) error {
 	switch scope {
 	case ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FULL,
-		ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA:
+		ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA,
+		ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA_ON_GOLDEN:
 		return nil
 	case ateletpb.SnapshotScope_SNAPSHOT_SCOPE_UNSPECIFIED:
 		return fmt.Errorf("snapshot scope must be non-zero")
