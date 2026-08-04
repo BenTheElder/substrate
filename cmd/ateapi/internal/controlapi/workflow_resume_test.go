@@ -17,6 +17,7 @@ package controlapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -36,6 +37,29 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
 )
+
+// TestSchedulerRecordable guards the retry-dedup rule: runStep re-runs Execute on
+// store.ErrVersionConflict, and those attempts (raw or wrapped) must not be
+// recorded, while the terminal success or real error must be.
+func TestSchedulerRecordable(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "success is recorded", err: nil, want: true},
+		{name: "version conflict is skipped", err: store.ErrVersionConflict, want: false},
+		{name: "wrapped version conflict is skipped", err: fmt.Errorf("update worker: %w", store.ErrVersionConflict), want: false},
+		{name: "real error is recorded", err: status.Error(codes.Internal, "boom"), want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := schedulerRecordable(tt.err); got != tt.want {
+				t.Errorf("schedulerRecordable(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
 
 func TestAssignWorkerStep_SkipsWorkerAssignedInOtherAtespace(t *testing.T) {
 	ctx := context.Background()
@@ -550,6 +574,50 @@ func TestResumeSteps_CheckPrerequisite(t *testing.T) {
 				}
 				err := tc.step.CheckPrerequisite(ctx, &ResumeInput{ActorRef: resources.ActorRef{Name: "id1"}}, state)
 				assertPrerequisiteResult(t, st, err, tc.allowed == nil || tc.allowed[st])
+			}
+		})
+	}
+}
+
+// TestResumeActor_MetricSkipsAlreadyRunningNoop guards the recording rule: the
+// router resumes per routed request, so a clean already-running no-op must not
+// be recorded, while failures must be.
+func TestResumeActor_MetricSkipsAlreadyRunningNoop(t *testing.T) {
+	tests := []struct {
+		name       string
+		seedStatus ateapipb.Actor_Status
+		wantRecord bool
+	}{
+		{name: "already running no-op is skipped", seedStatus: ateapipb.Actor_STATUS_RUNNING, wantRecord: false},
+		{name: "failed resume is recorded", seedStatus: ateapipb.Actor_STATUS_CRASHED, wantRecord: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			st, cleanup := storetest.SetupTestStore(t)
+			defer cleanup()
+			w := newTestActorWorkflow(t, st, "ns", "tmpl1")
+			inst, reader := newTestInstruments(t)
+			w.instruments = inst
+
+			seedWorkflowActor(t, ctx, st, resources.ActorRef{Atespace: "team-a", Name: "id1"}, "ns", "tmpl1", tt.seedStatus, func(a *ateapipb.Actor) {
+				a.AteomPodNamespace = "wns"
+				a.AteomPodName = "wpod"
+				a.AteomPodUid = "uid"
+				a.WorkerPoolName = "pool1"
+			})
+
+			_, _, err := w.ResumeActor(ctx, resources.ActorRef{Atespace: "team-a", Name: "id1"}, false)
+			if tt.wantRecord && err == nil {
+				t.Fatal("expected resume to fail, got nil error")
+			}
+			if !tt.wantRecord && err != nil {
+				t.Fatalf("ResumeActor failed: %v", err)
+			}
+
+			_, recorded := collectMetric(t, reader, lifecycleOpDurationMetric)
+			if recorded != tt.wantRecord {
+				t.Errorf("lifecycle datapoint recorded = %v, want %v", recorded, tt.wantRecord)
 			}
 		})
 	}
