@@ -777,6 +777,10 @@ type sparseDest interface {
 // should fall back to a dense copy.
 var errSparseUnsupported = errors.New("filesystem cannot report holes")
 
+// errKernelCopyUnsupported means this platform, kernel or filesystem cannot copy a
+// range in the kernel, so the caller should copy through userspace instead.
+var errKernelCopyUnsupported = errors.New("kernel range copy unsupported")
+
 // copyFile copies src to dst, preserving holes where it can, and returns the number of
 // logical bytes copied.
 //
@@ -827,6 +831,11 @@ func copyFile(src, dst string) (int64, error) {
 // copySparse writes only src's populated extents to dst, located with SEEK_DATA and
 // SEEK_HOLE, leaving the rest of dst unallocated. It reports errSparseUnsupported
 // before writing anything if the filesystem cannot report holes.
+//
+// Extents are copied in the kernel where possible. The dense io.Copy this replaces got
+// that for free (os.File's ReadFrom uses copy_file_range), so without it a fully
+// populated file — a guest that really did touch all its RAM — would copy slower than
+// before.
 func copySparse(src *os.File, dst sparseDest, size int64) error {
 	fd := int(src.Fd())
 
@@ -842,7 +851,14 @@ func copySparse(src *os.File, dst sparseDest, size int64) error {
 		return err
 	}
 
-	buf := make([]byte, 4<<20)
+	// A destination that exposes its descriptor can be written by the kernel; anything
+	// else (the test seam substitutes plain writers) goes through userspace.
+	dstFd := -1
+	if f, ok := dst.(interface{ Fd() uintptr }); ok {
+		dstFd = int(f.Fd())
+	}
+	var buf []byte
+
 	for off := int64(0); off < size; {
 		dataOff, err := unix.Seek(fd, off, unix.SEEK_DATA)
 		if err != nil {
@@ -859,6 +875,22 @@ func copySparse(src *os.File, dst sparseDest, size int64) error {
 			holeOff = size
 		}
 		for pos := dataOff; pos < holeOff; {
+			if dstFd >= 0 {
+				copied, err := kernelCopyRange(fd, dstFd, pos, holeOff-pos)
+				if err == nil {
+					pos += copied
+					continue
+				}
+				if !errors.Is(err, errKernelCopyUnsupported) {
+					return fmt.Errorf("copying %d bytes at %d: %w", holeOff-pos, pos, err)
+				}
+				// Give up on the kernel path for the rest of this file, but redo
+				// this chunk below: nothing was copied.
+				dstFd = -1
+			}
+			if buf == nil {
+				buf = make([]byte, 4<<20)
+			}
 			n := int64(len(buf))
 			if rem := holeOff - pos; rem < n {
 				n = rem

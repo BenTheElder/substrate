@@ -1000,6 +1000,17 @@ func allocatedBytes(t *testing.T, path string) int64 {
 	return st.Blocks * 512
 }
 
+// noFdFile hides the descriptor of an *os.File, forcing copySparse down its
+// userspace path.
+type noFdFile struct {
+	f *os.File
+}
+
+func (n noFdFile) Write(b []byte) (int, error)              { return n.f.Write(b) }
+func (n noFdFile) WriteAt(b []byte, off int64) (int, error) { return n.f.WriteAt(b, off) }
+func (n noFdFile) Truncate(size int64) error                { return n.f.Truncate(size) }
+func (n noFdFile) Close() error                             { return n.f.Close() }
+
 func TestCopyFilePreservesHoles(t *testing.T) {
 	const (
 		size     = 32 << 20
@@ -1086,5 +1097,63 @@ func TestCopyFileAllHoles(t *testing.T) {
 	}
 	if st.Size() != size {
 		t.Errorf("copy is %d bytes, want %d", st.Size(), int64(size))
+	}
+}
+
+// TestCopyFilePreservesHolesUserspace covers the fallback taken when the destination
+// does not expose a descriptor, so copy_file_range is unavailable.
+func TestCopyFilePreservesHolesUserspace(t *testing.T) {
+	orig := createDestFile
+	createDestFile = func(name string) (io.WriteCloser, error) {
+		f, err := os.Create(name)
+		if err != nil {
+			return nil, err
+		}
+		return noFdFile{f: f}, nil
+	}
+	t.Cleanup(func() { createDestFile = orig })
+
+	const size = 32 << 20
+	dir := t.TempDir()
+	src := filepath.Join(dir, "memory-ranges")
+	f, err := os.Create(src)
+	if err != nil {
+		t.Fatalf("creating src: %v", err)
+	}
+	if err := f.Truncate(size); err != nil {
+		t.Fatalf("sizing src: %v", err)
+	}
+	marker := bytes.Repeat([]byte{0xEF}, 4<<10)
+	if _, err := f.WriteAt(marker, 8<<20); err != nil {
+		t.Fatalf("writing marker: %v", err)
+	}
+	if err := errors.Join(f.Sync(), f.Close()); err != nil {
+		t.Fatalf("flushing src: %v", err)
+	}
+
+	dst := filepath.Join(dir, "copied")
+	if _, err := copyFile(src, dst); err != nil {
+		t.Fatalf("copyFile: %v", err)
+	}
+
+	want, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatalf("reading src: %v", err)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("reading dst: %v", err)
+	}
+	if !bytes.Equal(want, got) {
+		t.Fatal("userspace copy differs from source")
+	}
+
+	srcAlloc, dstAlloc := allocatedBytes(t, src), allocatedBytes(t, dst)
+	if srcAlloc >= size/2 {
+		t.Skipf("source did not end up sparse (%d of %d bytes allocated)", srcAlloc, int64(size))
+	}
+	if dstAlloc > srcAlloc*4 {
+		t.Errorf("userspace copy allocated %d bytes for a %d-byte source: holes were filled in",
+			dstAlloc, srcAlloc)
 	}
 }
