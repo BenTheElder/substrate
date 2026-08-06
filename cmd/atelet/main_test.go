@@ -988,3 +988,103 @@ func TestDrainOnShutdownForceStopsAfterTimeout(t *testing.T) {
 		t.Fatal("readiness should be not-ready after drain")
 	}
 }
+
+// allocatedBytes reports how much disk a file actually occupies, which is less than its
+// size when it has holes.
+func allocatedBytes(t *testing.T, path string) int64 {
+	t.Helper()
+	var st syscall.Stat_t
+	if err := syscall.Stat(path, &st); err != nil {
+		t.Fatalf("stat %q: %v", path, err)
+	}
+	return st.Blocks * 512
+}
+
+func TestCopyFilePreservesHoles(t *testing.T) {
+	const (
+		size     = 32 << 20
+		markerAt = 16 << 20
+	)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "memory-ranges")
+
+	// A stand-in for a guest memory image: mostly hole, with data at both the start
+	// and the middle.
+	f, err := os.Create(src)
+	if err != nil {
+		t.Fatalf("creating src: %v", err)
+	}
+	if err := f.Truncate(size); err != nil {
+		t.Fatalf("sizing src: %v", err)
+	}
+	head := bytes.Repeat([]byte{0xAB}, 4<<10)
+	middle := bytes.Repeat([]byte{0xCD}, 4<<10)
+	if _, err := f.WriteAt(head, 0); err != nil {
+		t.Fatalf("writing head: %v", err)
+	}
+	if _, err := f.WriteAt(middle, markerAt); err != nil {
+		t.Fatalf("writing middle: %v", err)
+	}
+	if err := errors.Join(f.Sync(), f.Close()); err != nil {
+		t.Fatalf("flushing src: %v", err)
+	}
+
+	dst := filepath.Join(dir, "copied")
+	n, err := copyFile(src, dst)
+	if err != nil {
+		t.Fatalf("copyFile: %v", err)
+	}
+	if n != size {
+		t.Errorf("copied %d logical bytes, want %d", n, size)
+	}
+
+	// The copy must be byte-identical, holes included.
+	want, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatalf("reading src: %v", err)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("reading dst: %v", err)
+	}
+	if !bytes.Equal(want, got) {
+		t.Fatal("copy differs from source")
+	}
+
+	srcAlloc, dstAlloc := allocatedBytes(t, src), allocatedBytes(t, dst)
+	if srcAlloc >= size/2 {
+		t.Skipf("source did not end up sparse (%d of %d bytes allocated); "+
+			"this filesystem cannot report holes", srcAlloc, int64(size))
+	}
+	// A dense copy would allocate the full logical size; a hole-preserving one stays
+	// near the source's footprint.
+	if dstAlloc > srcAlloc*4 {
+		t.Errorf("copy allocated %d bytes for a %d-byte source (logical %d): holes were filled in",
+			dstAlloc, srcAlloc, int64(size))
+	}
+}
+
+func TestCopyFileAllHoles(t *testing.T) {
+	const size = 8 << 20
+	dir := t.TempDir()
+	src := filepath.Join(dir, "empty")
+	f, err := os.Create(src)
+	if err != nil {
+		t.Fatalf("creating src: %v", err)
+	}
+	if err := errors.Join(f.Truncate(size), f.Close()); err != nil {
+		t.Fatalf("sizing src: %v", err)
+	}
+
+	dst := filepath.Join(dir, "copied")
+	if _, err := copyFile(src, dst); err != nil {
+		t.Fatalf("copyFile: %v", err)
+	}
+	st, err := os.Stat(dst)
+	if err != nil {
+		t.Fatalf("stat dst: %v", err)
+	}
+	if st.Size() != size {
+		t.Errorf("copy is %d bytes, want %d", st.Size(), int64(size))
+	}
+}

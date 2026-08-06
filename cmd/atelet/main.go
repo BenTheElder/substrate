@@ -54,6 +54,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sys/unix"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -765,6 +766,25 @@ func (s *AteomHerder) copyLocalCheckpoint(ctx context.Context, snapshotPrefix st
 
 var createDestFile = func(name string) (io.WriteCloser, error) { return os.Create(name) }
 
+// sparseDest is the part of *os.File a hole-preserving copy needs. Destinations that
+// do not implement it are copied densely instead.
+type sparseDest interface {
+	Truncate(size int64) error
+	WriteAt(b []byte, off int64) (int, error)
+}
+
+// errSparseUnsupported means the source filesystem cannot report holes, so the caller
+// should fall back to a dense copy.
+var errSparseUnsupported = errors.New("filesystem cannot report holes")
+
+// copyFile copies src to dst, preserving holes where it can, and returns the number of
+// logical bytes copied.
+//
+// Preserving holes matters because the biggest thing copied here is a guest memory
+// image, which is mostly unallocated: a plain io.Copy reads holes as zeroes and writes
+// them as data, inflating a snapshot to its full logical size. That costs disk on every
+// local checkpoint restore, and it destroys the sparseness that later stages rely on to
+// tell which parts of guest RAM actually hold anything.
 func copyFile(src, dst string) (int64, error) {
 	sourceFileStat, err := os.Stat(src)
 	if err != nil {
@@ -785,8 +805,75 @@ func copyFile(src, dst string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+
+	if sd, ok := destination.(sparseDest); ok {
+		switch err := copySparse(source, sd, sourceFileStat.Size()); {
+		case err == nil:
+			return sourceFileStat.Size(), destination.Close()
+		case !errors.Is(err, errSparseUnsupported):
+			return 0, errors.Join(err, destination.Close())
+		}
+		// Unsupported: nothing has been written yet, but probing moved the read
+		// offset, so rewind before the dense copy below.
+		if _, err := source.Seek(0, io.SeekStart); err != nil {
+			return 0, errors.Join(err, destination.Close())
+		}
+	}
+
 	nBytes, err := io.Copy(destination, source)
 	return nBytes, errors.Join(err, destination.Close())
+}
+
+// copySparse writes only src's populated extents to dst, located with SEEK_DATA and
+// SEEK_HOLE, leaving the rest of dst unallocated. It reports errSparseUnsupported
+// before writing anything if the filesystem cannot report holes.
+func copySparse(src *os.File, dst sparseDest, size int64) error {
+	fd := int(src.Fd())
+
+	// Probe first so an unsupported filesystem falls back with dst untouched. ENXIO
+	// means the seek ran but found no data at all, i.e. the file is one big hole.
+	if _, err := unix.Seek(fd, 0, unix.SEEK_DATA); err != nil {
+		if errors.Is(err, unix.ENXIO) {
+			return dst.Truncate(size)
+		}
+		return errSparseUnsupported
+	}
+	if err := dst.Truncate(size); err != nil {
+		return err
+	}
+
+	buf := make([]byte, 4<<20)
+	for off := int64(0); off < size; {
+		dataOff, err := unix.Seek(fd, off, unix.SEEK_DATA)
+		if err != nil {
+			if errors.Is(err, unix.ENXIO) {
+				break // no data past off; the tail is a hole
+			}
+			return fmt.Errorf("seeking to data at %d: %w", off, err)
+		}
+		holeOff, err := unix.Seek(fd, dataOff, unix.SEEK_HOLE)
+		if err != nil {
+			return fmt.Errorf("seeking to hole at %d: %w", dataOff, err)
+		}
+		if holeOff > size {
+			holeOff = size
+		}
+		for pos := dataOff; pos < holeOff; {
+			n := int64(len(buf))
+			if rem := holeOff - pos; rem < n {
+				n = rem
+			}
+			if _, err := src.ReadAt(buf[:n], pos); err != nil {
+				return fmt.Errorf("reading %d bytes at %d: %w", n, pos, err)
+			}
+			if _, err := dst.WriteAt(buf[:n], pos); err != nil {
+				return fmt.Errorf("writing %d bytes at %d: %w", n, pos, err)
+			}
+			pos += n
+		}
+		off = holeOff
+	}
+	return nil
 }
 
 // goldenOnlyFiles returns the golden snapshot files not shadowed by the
