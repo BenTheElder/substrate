@@ -57,16 +57,24 @@ const (
 // WorkerPoolNamespaceKey pairs with WorkerPoolNameKey: a WorkerPool is
 // namespaced, so the name alone does not identify one.
 const (
-	ActorOperationNameKey  = attribute.Key("ate.actor.operation.name")
-	WorkerPoolNamespaceKey = attribute.Key("ate.workerpool.namespace")
-	WorkerPoolNameKey      = attribute.Key("ate.workerpool.name")
-	WorkerStateKey         = attribute.Key("ate.worker.state")
-	SandboxClassKey        = attribute.Key("ate.sandbox.class")
-	SnapshotKindKey        = attribute.Key("ate.snapshot.kind")
-	SchedulerOutcomeKey    = attribute.Key("ate.scheduler.outcome")
-	RouterResumeKey        = attribute.Key("ate.router.resume")
-	RouterOutcomeKey       = attribute.Key("ate.router.outcome")
-	FailureReasonKey       = attribute.Key("ate.failure.reason")
+	ActorOperationNameKey   = attribute.Key("ate.actor.operation.name")
+	WorkerPoolNamespaceKey  = attribute.Key("ate.workerpool.namespace")
+	WorkerPoolNameKey       = attribute.Key("ate.workerpool.name")
+	WorkerStateKey          = attribute.Key("ate.worker.state")
+	SandboxClassKey         = attribute.Key("ate.sandbox.class")
+	SnapshotKindKey         = attribute.Key("ate.snapshot.kind")
+	SchedulerOutcomeKey     = attribute.Key("ate.scheduler.outcome")
+	SchedulingConstraintKey = attribute.Key("ate.scheduling.constraint")
+	RouterResumeKey         = attribute.Key("ate.router.resume")
+	RouterOutcomeKey        = attribute.Key("ate.router.outcome")
+	FailureReasonKey        = attribute.Key("ate.failure.reason")
+)
+
+// Values for SchedulingConstraintKey.
+const (
+	ConstraintNone          = "none"
+	ConstraintRequiredNodes = "required_nodes"
+	ConstraintSelector      = "selector"
 )
 
 // Control-plane failure reasons for ate.actor.crashes metric.
