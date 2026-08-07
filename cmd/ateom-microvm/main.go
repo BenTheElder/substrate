@@ -33,6 +33,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"cloud.google.com/go/compute/metadata"
@@ -41,6 +42,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/ateinterceptors"
 	"github.com/agent-substrate/substrate/internal/ateomnet"
 	"github.com/agent-substrate/substrate/internal/ateompath"
+	"github.com/agent-substrate/substrate/internal/ateomstats"
 	"github.com/agent-substrate/substrate/internal/atunnel"
 	"github.com/agent-substrate/substrate/internal/proto/ateompb"
 	"github.com/agent-substrate/substrate/internal/serverboot"
@@ -289,6 +291,32 @@ type AteomService struct {
 	// pause+snapshot+teardown the same sandbox (and RestoreWorkload can track the
 	// CH it relaunched).
 	running map[string]*runningActor
+
+	// activeActor is the actor whose workload this ateom is currently running,
+	// or nil when it is "available". An ateom serves one actor at a time, so a
+	// single slot is enough; running is keyed by UID for lookup, not because
+	// several actors can be live at once.
+	//
+	// Set by RunWorkload / RestoreWorkload and cleared by CheckpointWorkload, so
+	// it tracks exactly the available/executing state machine described on the
+	// Ateom service. GetWorkloadStats reads it to attribute its sample.
+	//
+	// Kept here rather than on runningActor, even though that struct already
+	// exists per actor: runningActor holds processes that do not exist until the
+	// guest is up (chCmd, vfsdCmd, logAgent), so it cannot be built before the
+	// boot, and an entry in running is what tells CheckpointWorkload a live VM is
+	// there. Attribution has to outlive both of those constraints — it is needed
+	// from the moment the ateom accepts the actor, including for a boot that
+	// never finishes. Same field, same timing, as the gVisor ateom's
+	// AteomService.activeActor.
+	//
+	// Atomic for the same reason as there, and it matters at least as much on
+	// this runtime: lock is held across a cold boot with its retry, across a
+	// snapshot write, and across a restore, so a lock-guarded read would park a
+	// poller through all of them. The writers keep holding lock; the point is the
+	// reader. As there, the type makes a lock-free read possible without making
+	// one happen — GetWorkloadStats must not take lock at all.
+	activeActor atomic.Pointer[ateomstats.ActorAttribution]
 }
 
 var _ ateompb.AteomServer = (*AteomService)(nil)

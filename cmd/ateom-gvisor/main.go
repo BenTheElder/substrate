@@ -28,6 +28,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"cloud.google.com/go/compute/metadata"
@@ -35,6 +36,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/ateinterceptors"
 	"github.com/agent-substrate/substrate/internal/ateomnet"
 	"github.com/agent-substrate/substrate/internal/ateompath"
+	"github.com/agent-substrate/substrate/internal/ateomstats"
 	"github.com/agent-substrate/substrate/internal/atunnel"
 	"github.com/agent-substrate/substrate/internal/contextlogging"
 	"github.com/agent-substrate/substrate/internal/imagecache"
@@ -49,7 +51,9 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/reflection"
+	"google.golang.org/grpc/status"
 )
 
 var (
@@ -254,6 +258,31 @@ type AteomService struct {
 	podIdentityTrustBundlePath string
 	// egressGatewayTrustBundlePath verifies the remote gateway's serving cert.
 	egressGatewayTrustBundlePath string
+
+	// activeActor is the actor whose workload this ateom is currently running,
+	// or nil when it is "available". An ateom serves one actor at a time, so a
+	// single slot is enough (the micro-VM ateom holds the same field, set and
+	// cleared at the same points).
+	//
+	// Set by RunWorkload / RestoreWorkload and cleared by CheckpointWorkload, so
+	// it tracks exactly the available/executing state machine described on the
+	// Ateom service. GetWorkloadStats reads it to attribute its sample.
+	//
+	// Atomic rather than guarded by lock, unlike every other RPC-visible field
+	// here. The three writers already hold lock for their whole bodies and keep
+	// doing so; the point is the reader. lock is held across an entire boot,
+	// restore, or checkpoint, so a lock-guarded read would park a poller for the
+	// full duration of each -- going quiet during exactly the phases whose usage
+	// is most interesting -- and holding it across the read would put a
+	// CheckpointWorkload behind telemetry instead. The field is only ever
+	// assigned or cleared as a whole pointer, never mutated in place, which is
+	// exactly what atomic.Pointer is for.
+	//
+	// The type makes a lock-free read possible; it does not make one happen.
+	// GetWorkloadStats must not take lock at all, including around whatever it
+	// does with the value. A regression test pins that once there is a handler
+	// with a body to pin.
+	activeActor atomic.Pointer[ateomstats.ActorAttribution]
 }
 
 var _ ateompb.AteomServer = (*AteomService)(nil)
@@ -282,6 +311,12 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	actorRef := resources.ActorRef{Atespace: req.GetAtespace(), Name: req.GetActorName()}
 	s.actorLogger.EmitLifecycleLog("Actor starting", actorRef, req.GetActorUid(), req.GetActorTemplateNamespace(), req.GetActorTemplateName())
 
+	// Retain the attribution before the boot rather than after it, so a sample
+	// taken against a workload that dies mid-boot is still attributable. The
+	// cleanup below drops it again if the boot fails outright.
+	attribution := ateomstats.ActorAttributionFromRequest(req)
+	s.activeActor.Store(&attribution)
+
 	// Contract with atelet:
 	//
 	//   * Correct runsc version is downloaded and placed on disk.
@@ -296,6 +331,9 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 		DumpNetInfo:        true,
 		EgressRedirectPort: s.egressRedirectPort(req.GetEgressGateway() != nil),
 	}); err != nil {
+		// Cleared here as well as in the deferred cleanup below, because that
+		// defer is not registered until after this check.
+		s.activeActor.Store(nil)
 		return nil, fmt.Errorf("while setting up actor network: %w", err)
 	}
 	rcmd := &runsc{
@@ -305,6 +343,7 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	var containersToDelete []string
 	defer func() {
 		if retErr != nil {
+			s.activeActor.Store(nil)
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cancel()
 			if err := s.deactivateActorNetworking(cleanupCtx); err != nil {
@@ -427,6 +466,19 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 		return nil, fmt.Errorf("unsupported snapshot scope: %v", req.GetScope())
 	}
 
+	// The sandbox is gone as of the checkpoint above, so the ateom is back to
+	// "available" from here on: there is nothing left to measure, and holding
+	// the attribution would let a later GetWorkloadStats report a checkpointed
+	// actor as though it were still running.
+	//
+	// Cleared here rather than at the end of the function because everything
+	// below is bookkeeping over a dead sandbox and can still fail (listing the
+	// snapshot files returns an error), which would otherwise leave the
+	// attribution behind. Conversely nothing above this point clears it: a
+	// checkpoint that failed may well have left the workload running, and
+	// reporting its usage is then the honest answer.
+	s.activeActor.Store(nil)
+
 	// After checkpointing the sandbox root, runsc may no longer have a usable
 	// control server for state/delete calls. Keep this as best-effort cleanup:
 	// atelet resets the actor runsc, bundle, pidfile, and checkpoint
@@ -462,6 +514,16 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 	s.actorLogger.EmitLifecycleLog("Actor checkpointed", actorRef, req.GetActorUid(), req.GetActorTemplateNamespace(), req.GetActorTemplateName())
 
 	return &ateompb.CheckpointWorkloadResponse{SnapshotFiles: snapshotFiles}, nil
+}
+
+// GetWorkloadStats implements ateompb.Ateom/GetWorkloadStats.
+//
+// The attribution half is wired up here; the measurement half is not. Reading the
+// sandbox's cgroup (/sys/fs/cgroup/pause) lands in the follow-up to
+// https://github.com/agent-substrate/substrate/issues/594, at which point this
+// stops returning Unimplemented.
+func (s *AteomService) GetWorkloadStats(ctx context.Context, req *ateompb.GetWorkloadStatsRequest) (*ateompb.GetWorkloadStatsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "GetWorkloadStats is not implemented yet")
 }
 
 // listSnapshotFiles returns the (relative) names of regular files directly under
@@ -517,6 +579,10 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	actorRef := resources.ActorRef{Atespace: req.GetAtespace(), Name: req.GetActorName()}
 	s.actorLogger.EmitLifecycleLog("Actor restoring", actorRef, req.GetActorUid(), req.GetActorTemplateNamespace(), req.GetActorTemplateName())
 
+	// Same as RunWorkload: retain before the boot, drop again if it fails.
+	attribution := ateomstats.ActorAttributionFromRequest(req)
+	s.activeActor.Store(&attribution)
+
 	// Contract with atelet:
 	//
 	//   * Correct runsc version is downloaded and placed on disk.
@@ -532,6 +598,8 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		DumpNetInfo:        true,
 		EgressRedirectPort: s.egressRedirectPort(req.GetEgressGateway() != nil),
 	}); err != nil {
+		// Same as the Run path: the defer below is not registered yet.
+		s.activeActor.Store(nil)
 		return nil, fmt.Errorf("while setting up actor network: %w", err)
 	}
 	rcmd := &runsc{
@@ -541,6 +609,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	var containersToDelete []string
 	defer func() {
 		if retErr != nil {
+			s.activeActor.Store(nil)
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cancel()
 			if err := s.deactivateActorNetworking(cleanupCtx); err != nil {

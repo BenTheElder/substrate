@@ -34,6 +34,7 @@ import (
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/kata"
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/third_party/kata/agentpb"
 	"github.com/agent-substrate/substrate/internal/ateompath"
+	"github.com/agent-substrate/substrate/internal/ateomstats"
 	"github.com/agent-substrate/substrate/internal/imagecache"
 	"github.com/agent-substrate/substrate/internal/proto/ateompb"
 	"github.com/agent-substrate/substrate/internal/readyz"
@@ -197,7 +198,7 @@ func writeGuestResolvConf(rootfs string) error {
 //   - The runtime assets (guest kernel, guest OS image, cloud-hypervisor, virtiofsd,
 //     base kata config) are on disk and passed as runtime asset paths.
 //   - The OCI bundle (config.json + populated rootfs/) is prepared per container.
-func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkloadRequest) (*ateompb.RunWorkloadResponse, error) {
+func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkloadRequest) (resp *ateompb.RunWorkloadResponse, retErr error) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	if err := s.deactivateActorNetworking(ctx); err != nil {
@@ -216,6 +217,21 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	}
 
 	s.actorLogger.EmitLifecycleLog("Actor starting", p.actorRef, p.actorUID, p.templateNS, p.templateName)
+
+	// Retain the attribution before the boot rather than after it, so a sample
+	// taken against a workload that dies mid-boot is still attributable. A cold
+	// boot can take a while and can be retried, and an actor that never reaches
+	// readyz is one whose usage is worth reporting rather than the one case that
+	// reports nothing. The defer drops it again if the boot fails outright.
+	// Matches ateom-gvisor's RunWorkload.
+	attribution := p.actorAttribution()
+	s.activeActor.Store(&attribution)
+	defer func() {
+		if retErr != nil {
+			s.activeActor.Store(nil)
+		}
+	}()
+
 	if err := s.coldBootActorRetrying(ctx, p); err != nil {
 		return nil, err
 	}
@@ -236,6 +252,17 @@ type actorBootParams struct {
 	assetPaths   map[string]string
 	// egressGateway is nil unless actor TCP should be redirected through atunnel.
 	egressGateway *ateompb.EgressGateway
+}
+
+// actorAttribution regroups the actor fields that arrived on the Run/Restore
+// request, for retention in AteomService.activeActor.
+func (p actorBootParams) actorAttribution() ateomstats.ActorAttribution {
+	return ateomstats.ActorAttribution{
+		Ref:               p.actorRef,
+		UID:               p.actorUID,
+		TemplateNamespace: p.templateNS,
+		TemplateName:      p.templateName,
+	}
 }
 
 // coldBootAttempts is how many times a cold boot is tried when the micro-VM
