@@ -99,6 +99,13 @@ const defaultExtProcMaxRequests = 2048
 // the ceiling on a single request from the ingress listener to the actor's
 // response. It bounds the actor's own handling time, not the resume that
 // precedes it — parking and the ext_proc timeout cover that part.
+//
+// The drain sequence also sizes its Envoy-drain window and derived
+// drain-timeout from this DEFAULT — deliberately not from the configured
+// --route-timeout, so raising the route ceiling for long-running actor turns
+// does not silently stretch every shutdown past terminationGracePeriodSeconds.
+// Operators who raise --route-timeout and want such turns to survive a drain
+// must raise --drain-timeout (and the grace period) explicitly.
 const defaultRouteTimeout = 10 * time.Second
 
 // envoyDefaultStreamIdleTimeout is the stream idle timeout Envoy applies when
@@ -440,7 +447,12 @@ func (x *XdsServer) Serve(ctx context.Context, lis net.Listener) error {
 
 	select {
 	case <-ctx.Done():
-		grpcServer.GracefulStop()
+		// Hard stop, deliberately: ADS streams are open-ended, so GracefulStop
+		// would block until Envoy disconnects — which during shutdown it only
+		// does by dying. xDS clients treat a control-plane disconnect as benign
+		// (reconnect with backoff, keep the last delivered config), and the
+		// drain sequence only cancels this context after Envoy has drained.
+		grpcServer.Stop()
 		return nil
 	case err := <-errChan:
 		return err
