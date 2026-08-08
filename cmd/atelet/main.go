@@ -867,9 +867,17 @@ func copySparse(src *os.File, dst sparseDest, size int64) error {
 			}
 			return fmt.Errorf("seeking to data at %d: %w", off, err)
 		}
+		if dataOff >= size {
+			break // data starts past the size we were asked to copy
+		}
 		holeOff, err := unix.Seek(fd, dataOff, unix.SEEK_HOLE)
 		if err != nil {
 			return fmt.Errorf("seeking to hole at %d: %w", dataOff, err)
+		}
+		// Refuse to spin: every iteration must move off forward, which a
+		// filesystem reporting a hole at or before where we started would not.
+		if holeOff <= off {
+			return fmt.Errorf("seeking to hole at %d returned non-advancing offset %d", dataOff, holeOff)
 		}
 		if holeOff > size {
 			holeOff = size

@@ -35,10 +35,22 @@ func kernelCopyRange(srcFd, dstFd int, off, length int64) (int64, error) {
 	if length > maxKernelCopy {
 		length = maxKernelCopy
 	}
-	roff, woff := off, off
-	n, err := unix.CopyFileRange(srcFd, &roff, dstFd, &woff, int(length), 0)
-	if err != nil {
+	for {
+		// The offsets are only advanced by bytes the call actually copied, so a
+		// retry after EINTR resumes from the right place.
+		roff, woff := off, off
+		n, err := unix.CopyFileRange(srcFd, &roff, dstFd, &woff, int(length), 0)
 		switch {
+		case err == nil:
+			if n == 0 {
+				// No error and no progress: treat as unsupported rather than spin.
+				return 0, errKernelCopyUnsupported
+			}
+			return int64(n), nil
+		case errors.Is(err, unix.EINTR):
+			// A copy this large is interruptible, and the Go runtime signals
+			// goroutines for preemption, so this is expected rather than fatal.
+			continue
 		case errors.Is(err, unix.ENOSYS), // pre-4.5 kernel, or blocked by seccomp
 			errors.Is(err, unix.EXDEV),      // different filesystems
 			errors.Is(err, unix.EOPNOTSUPP), // filesystem does not implement it
@@ -46,12 +58,8 @@ func kernelCopyRange(srcFd, dstFd int, off, length int64) (int64, error) {
 			errors.Is(err, unix.EINVAL),     // ranges or flags this kernel rejects
 			errors.Is(err, unix.EBADF):      // not both regular files
 			return 0, errKernelCopyUnsupported
+		default:
+			return 0, err
 		}
-		return 0, err
 	}
-	if n == 0 {
-		// No error and no progress: treat as unsupported rather than spin.
-		return 0, errKernelCopyUnsupported
-	}
-	return int64(n), nil
 }
