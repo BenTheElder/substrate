@@ -142,10 +142,9 @@ batch path. For a multi-line anchor, add `startLine` and `startSide`.
 Leave the review body alone whether it's empty or not. If the human started the draft,
 that text is theirs.
 
-The append and the single-comment delete below are written from the GraphQL schema and
-the REST endpoint, but haven't been exercised end to end yet. The first time you use
-them, read the review back and confirm the new comment shows up pending alongside the
-human's before relying on it.
+Appending this way is verified: the review keeps its id, stays pending, and the human's
+own comments come through untouched. The single-comment delete below hasn't been
+exercised — read the review back the first time you use it.
 
 ### Revising your own findings
 
@@ -162,6 +161,10 @@ gh api repos/<owner>/<repo>/pulls/comments/<comment_id> --method DELETE
 
 This is the second job the 🤖 marker does. In a shared draft it's the only thing that
 tells your comments apart from the human's.
+
+A finding the human has already edited may no longer start with 🤖, so the filter skips
+it. That's the safe direction — they've taken it over — but don't read a missing marker
+as proof a comment was never yours.
 
 ### Verify anchors landed correctly
 
