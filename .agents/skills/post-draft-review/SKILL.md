@@ -1,6 +1,6 @@
 ---
 name: post-draft-review
-description: Posts pull request review findings as GitHub draft (pending) inline comments for a human to finish and submit.
+description: Posts pull request review findings as GitHub draft (pending) inline comments for a human to edit and submit, instead of publishing them straight to the PR author. Use whenever asked to review a pull request or leave review comments on one, including phrasings like "review PR 764" or "take a look at this PR".
 ---
 
 # Post Draft Review Comments
@@ -9,9 +9,8 @@ A "draft review" on GitHub is a review left in the **`PENDING`** state. It is vi
 only to its author, accumulating comments, until the author explicitly **submits**
 (publishes) or **discards** it.
 
-Use this skill when asked to review a pull request. Findings go in as pending inline
-comments rather than individually published comments, so a human reviews them before
-anything reaches the PR author.
+Findings go in as pending inline comments rather than individually published comments, so
+a human reviews them before anything reaches the PR author.
 
 `gh pr review` can **not** create one — it always submits immediately
 (`--approve` / `--comment` / `--request-changes`). To stay in draft, hit the REST API:
@@ -133,35 +132,19 @@ decide: a short findings table (severity, one-line claim, `file:line` anchor) an
 checked-and-found-clean notes, meaning the verification work with no inline anchor. No
 paste-ready summary text — the summary is the human's to write.
 
-Close the hand-off with the review id, the comment count, and a pointer to the section
-below. Don't imply the review is finished — it isn't, and it can't be until someone has
-read the findings.
+Close the hand-off with the review id, the comment count, and these three points. A human
+who doesn't know them can publish the whole thing unread:
 
-## For the human: finishing the review
+- Nothing is published yet. The review is `PENDING` and visible only to them.
+- They should read each finding against the code before submitting, and delete anything
+  they don't stand behind. Deleting a pending comment costs nothing.
+- Submitting publishes every remaining comment at once, under their name. There is no
+  partial submit.
 
-The pending review is yours, not the agent's. Every comment publishes under your name.
-The 🤖 marker discloses that an agent *found* the issue; it does not say you didn't check
-it, and readers will reasonably assume you did.
-
-1. Open the PR's **Files changed** tab. The pending comments show a **Pending** badge,
-   with a **Finish your review** button at the top.
-2. Read each finding against the code it points at. Agents produce confident, well-worded
-   findings that are wrong often enough that this step is the entire reason the review is
-   posted as a draft.
-3. Edit or delete anything wrong, redundant, or not worth the author's time. Deleting a
-   pending comment costs nothing — it was never published.
-4. Write your summary in the "Finish your review" box.
-5. Submit.
-
-Two things to know before step 5:
-
-- **Submitting publishes every remaining pending comment at once.** There is no partial
-  submit. Anything you didn't delete goes out, so deleting is the only way to drop a
-  finding.
-- **The checked-and-found-clean notes in the chat hand-off are also agent claims.** They
-  read as reassurance and are the easiest thing to repeat verbatim into a summary. Spot-
-  check them first — an agent asserting it verified something is not the same as it
-  having verified it.
+Point them at [README.md](README.md), which is the full version of the above and the
+authoritative instructions for the human — keep it in sync if you change this section.
+Don't imply the review is finished. It isn't, and it can't be until someone has read the
+findings.
 
 To discard the whole draft instead:
 
