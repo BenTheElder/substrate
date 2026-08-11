@@ -45,18 +45,35 @@ import (
 // behaviour is being evaluated.
 var packRestoreRanges = os.Getenv("ATEOM_PACK_RESTORE_RANGES") == "1"
 
-// restoreMemMode selects how cloud-hypervisor loads guest RAM: "OnDemand"
-// (userfaultfd) or "Copy" (eager). Eager reads only the data extents of the memory
-// file and registers no userfaultfd at all, which matters on cloud-hypervisor
-// releases that background-prefault an on-demand restore and refuse to snapshot
-// until that finishes.
-var restoreMemMode = envOr("ATEOM_RESTORE_MEM_MODE", "OnDemand")
+// restoreMemModeOverride forces a guest-RAM restore mode ("OnDemand" or "Copy"),
+// bypassing the version check in restoreMemMode. For experiments; unset in normal use.
+var restoreMemModeOverride = os.Getenv("ATEOM_RESTORE_MEM_MODE")
 
-func envOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
+// restoreMemMode picks how cloud-hypervisor should load guest RAM, from what the VMM
+// just told us about itself over vmm.ping.
+//
+// OnDemand is what we want: it faults pages in as the guest touches them, so an idle
+// restored actor holds its working set rather than its whole snapshot — on the counter
+// demo, 16MiB against 158MiB. Eager gives that up, reading every populated extent up
+// front.
+//
+// It is still the right choice on a VMM that prefaults, where OnDemand is not merely
+// wasteful but unusable: the prefault storm starves the guest and its readiness probe
+// never passes.
+func restoreMemMode(ctx context.Context, info ch.VMMInfo) string {
+	if restoreMemModeOverride != "" {
+		return restoreMemModeOverride
 	}
-	return fallback
+	if !info.PrefaultsUnconditionally() {
+		return ch.MemRestoreOnDemand
+	}
+	if info.Version == "" && info.BuildVersion == "" {
+		// Unknown version: eager works everywhere, so prefer a bigger idle footprint
+		// over an actor that cannot start. Say so, because that cost is invisible.
+		slog.WarnContext(ctx, "cloud-hypervisor did not report a version; restoring eagerly",
+			slog.String("mode", ch.MemRestoreEager))
+	}
+	return ch.MemRestoreEager
 }
 
 // RestoreWorkload brings the actor back from a snapshot, on a possibly different
@@ -320,7 +337,10 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 			restoreFrom = packedDir
 		}
 	}
-	if err := client.RestoreWithNetFDs(ctx, restoreFrom, restoredNets, restoreMemMode); err != nil {
+	memMode := restoreMemMode(ctx, client.Info())
+	slog.InfoContext(ctx, "restoring guest memory",
+		slog.String("mode", memMode), slog.String("vmm_version", client.Info().Version))
+	if err := client.RestoreWithNetFDs(ctx, restoreFrom, restoredNets, memMode); err != nil {
 		return fmt.Errorf("while restoring VM with net FDs: %w", err)
 	}
 	if err := client.Resume(ctx); err != nil {
@@ -335,6 +355,7 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 	ra := &runningActor{
 		chCmd: chCmd, vfsdCmd: vfsdCmd, durableVfsdCmd: durableVfsdCmd,
 		apiSocket: apiSocket, baseID: srcID, restoreSourceDir: restoreDir,
+		snapshotIsSelfContained: memMode == ch.MemRestoreEager,
 	}
 
 	// Re-attach stdout/stderr forwarding for each container: the restored guest's
