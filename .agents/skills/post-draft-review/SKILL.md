@@ -68,6 +68,19 @@ Bias toward brevity. A human reads this, then decides. Concretely:
 
 ## Create the draft (PENDING) review
 
+**First check whether a pending review already exists.** You post under the human's
+account, and each author may have only one pending review per PR — so any existing draft
+is theirs, and it may hold comments they wrote by hand:
+
+```bash
+gh api repos/<owner>/<repo>/pulls/<num>/reviews \
+  --jq '.[] | select(.state == "PENDING") | {id, node_id}'
+```
+
+No output means there's no draft yet; create one as below. If it returns a review, skip
+to [Adding to a draft that already exists](#adding-to-a-draft-that-already-exists) and
+**do not delete it**.
+
 Write each comment body to a file and assemble the payload with `jq --rawfile`, which
 escapes markdown, backticks, and newlines correctly. The body is always empty:
 
@@ -102,16 +115,53 @@ Inline-comment notes:
 - Pin exact head line numbers from a checkout of the PR head (`gh pr checkout <num>`, or
   fetch `pull/<num>/head`). Don't eyeball them from the diff.
 
-### Editing a draft you already created
+### Adding to a draft that already exists
 
-There's no clean way to add or change inline comments on an existing PENDING review.
-**Delete and recreate** it with the full `comments` array. It's still a draft, so nothing
-was published. The review id changes:
+A pending review you didn't create is the human's, and it may already hold comments they
+wrote themselves. **Never delete it.** Deleting takes their comments with it, they aren't
+recoverable, and drafts are exactly where someone parks a half-finished thought.
+
+Append instead, one mutation per finding, using the review's `node_id` (the `PRR_…`
+value, not the numeric id):
 
 ```bash
-gh api repos/<owner>/<repo>/pulls/<num>/reviews/<old_id> --method DELETE
-gh api repos/<owner>/<repo>/pulls/<num>/reviews --method POST --input /tmp/review.json
+gh api graphql -f query='
+mutation($review: ID!, $path: String!, $line: Int!, $body: String!) {
+  addPullRequestReviewThread(input: {
+    pullRequestReviewId: $review,
+    path: $path, line: $line, side: RIGHT, body: $body
+  }) { thread { id } }
+}' -f review="PRR_kwDO..." \
+   -f path="cmd/ateom-microvm/restore.go" -F line=214 \
+   -f body="$(cat c1.md)"
 ```
+
+`-f body="$(cat c1.md)"` keeps the file-per-comment discipline that `--rawfile` gives the
+batch path. For a multi-line anchor, add `startLine` and `startSide`.
+
+Leave the review body alone whether it's empty or not. If the human started the draft,
+that text is theirs.
+
+The append and the single-comment delete below are written from the GraphQL schema and
+the REST endpoint, but haven't been exercised end to end yet. The first time you use
+them, read the review back and confirm the new comment shows up pending alongside the
+human's before relying on it.
+
+### Revising your own findings
+
+Delete your own comments one at a time. Don't delete the review — recreating it is only
+safe when you know the draft is entirely yours, and in a shared draft you don't:
+
+```bash
+# your findings are the 🤖-tagged ones
+gh api repos/<owner>/<repo>/pulls/<num>/reviews/<id>/comments \
+  --jq '.[] | select(.body | startswith("🤖")) | .id'
+
+gh api repos/<owner>/<repo>/pulls/comments/<comment_id> --method DELETE
+```
+
+This is the second job the 🤖 marker does. In a shared draft it's the only thing that
+tells your comments apart from the human's.
 
 ### Verify anchors landed correctly
 
@@ -152,9 +202,14 @@ To discard the whole draft instead:
 gh api repos/<owner>/<repo>/pulls/<num>/reviews/<review_id> --method DELETE
 ```
 
+This removes every comment in the review, including any the human wrote. Only reach for
+it on a draft you created and know is entirely yours.
+
 ## Gotchas
 
-- Each author may have only **one** pending review per PR at a time. A second
-  `POST .../reviews` while one is pending errors out. Submit or delete the first.
+- Each author may have only **one** pending review per PR at a time, and you post as the
+  human, so a second `POST .../reviews` errors out. Append to the existing draft rather
+  than clearing it — see [Adding to a draft that already
+  exists](#adding-to-a-draft-that-already-exists).
 - Relative markdown links in comment bodies (for example `[x](cmd/.../foo.go#L1)`) render
   oddly on GitHub. Prefer plain `` `path:line` `` in backticks for code references.

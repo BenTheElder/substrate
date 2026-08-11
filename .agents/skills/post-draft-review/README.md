@@ -15,6 +15,11 @@ A pending review is visible **only to you**. No one else can see it, the PR auth
 notified, and nothing is published until you submit it. That is the whole point — it
 gives you a checkpoint between an agent's findings and the author's inbox.
 
+**If you had already started your own draft on that PR, the agent added its findings to
+it.** GitHub allows you only one pending review per PR, and the agent posts as you, so
+there is no separate agent review to look at — your comments and its findings are now in
+the same draft, and yours are untouched. The 🤖 prefix is what tells them apart.
+
 ## What you have to do
 
 The pending review is yours, not the agent's. **Every comment publishes under your name.**
@@ -52,6 +57,9 @@ avoids the failure mode entirely.
 ```bash
 gh api repos/<owner>/<repo>/pulls/<num>/reviews/<review_id> --method DELETE
 ```
+
+This deletes **every** comment in the draft, including any you wrote yourself. To drop
+only the agent's findings and keep your own, delete them individually in the UI instead.
 
 ## For agents
 
