@@ -326,6 +326,21 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 		return fmt.Errorf("while waiting for container readyz: %w", err)
 	}
 
+	// An eager restore has read the whole snapshot into guest memory, and nothing
+	// merges against it afterwards, so the staged copy is dead weight from here on —
+	// a second ~160MiB per running actor on top of the checkpoint it will write.
+	// Drop the memory image but keep the directory: atelet re-stages it wholesale
+	// before any later restore, and the small files beside it stay cheap to keep.
+	if memMode == ch.MemRestoreEager {
+		staged := filepath.Join(restoreDir, "memory-ranges")
+		if err := os.Remove(staged); err != nil && !os.IsNotExist(err) {
+			// Not fatal: it only costs disk until the actor is torn down.
+			slog.WarnContext(ctx, "could not drop the staged memory image", "error", err)
+		} else {
+			slog.InfoContext(ctx, "dropped the staged memory image (eager restore needs no merge base)")
+		}
+	}
+
 	ra := &runningActor{
 		chCmd: chCmd, vfsdCmd: vfsdCmd, durableVfsdCmd: durableVfsdCmd,
 		apiSocket: apiSocket, baseID: srcID, restoreSourceDir: restoreDir,
