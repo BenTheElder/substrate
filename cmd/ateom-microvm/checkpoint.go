@@ -101,7 +101,7 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 		chSocket = ra.apiSocket
 	}
 	client := ch.NewClient(chSocket)
-	if err := client.WaitReady(ctx, 10*time.Second); err != nil {
+	if _, err := client.WaitReady(ctx, 10*time.Second); err != nil {
 		return nil, fmt.Errorf("while waiting for CH api-socket: %w", err)
 	}
 
