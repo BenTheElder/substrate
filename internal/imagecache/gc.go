@@ -251,7 +251,7 @@ func (s *Store) EvictUnused(ctx context.Context, targetBytes int64, dryRun bool)
 		// partial scan would retire layers a running actor still mounts.
 		// Not logged here — the caller logs the gated pass once, with its
 		// own context (see ErrIncompleteEnumeration).
-		return stats, errors.Join(ErrIncompleteEnumeration, rootsErr)
+		return stats, fmt.Errorf("%w: %w", ErrIncompleteEnumeration, rootsErr)
 	}
 	cutoff := time.Now().Add(-s.minAge)
 
@@ -261,11 +261,13 @@ func (s *Store) EvictUnused(ctx context.Context, targetBytes int64, dryRun bool)
 		// be retired while that record still names it. Fail the whole pass
 		// toward retention; the error names the records to repair or
 		// delete, and every later pass retries.
-		return stats, errors.Join(ErrIncompleteEnumeration, listErr)
+		return stats, fmt.Errorf("%w: %w", ErrIncompleteEnumeration, listErr)
 	}
 	stats.Candidates = len(candidates)
 
-	slog.InfoContext(ctx, "Image cache eviction pass",
+	// Debug: the driving caller logs the pass outcome once, and a
+	// no-target pass should be silent.
+	slog.DebugContext(ctx, "Image cache eviction pass",
 		slog.Int64("target_bytes", targetBytes),
 		slog.Bool("dry_run", dryRun),
 		slog.Int("rooted_images", stats.RootedImages),
@@ -489,12 +491,12 @@ func (s *Store) RecoverOrphans(ctx context.Context) (EvictStats, error) {
 
 	roots, rootsErr := s.InUse()
 	if rootsErr != nil {
-		return stats, errors.Join(ErrIncompleteEnumeration, rootsErr)
+		return stats, fmt.Errorf("%w: %w", ErrIncompleteEnumeration, rootsErr)
 	}
 	cutoff := time.Now().Add(-s.minAge)
 	_, refcount, complete, listErr := s.listEviction(roots, cutoff, &stats)
 	if !complete {
-		return stats, errors.Join(ErrIncompleteEnumeration, listErr)
+		return stats, fmt.Errorf("%w: %w", ErrIncompleteEnumeration, listErr)
 	}
 
 	retired, errs := s.sweepOrphanLayers(ctx, roots, refcount, cutoff, false, &stats)
@@ -599,10 +601,11 @@ func (s *Store) dryRunRetire(hex string, cutoff time.Time) (int64, retireStatus)
 // their references are what keep shared layers alive — counting
 // listing-stage vetoes into stats.
 //
-// complete reports whether every record was read and decoded. Refcounts
-// from a partial listing understate references — a layer shared with an
-// unread record looks unreferenced — so both callers gate on it and do
-// nothing with a partial listing.
+// complete reports whether every record was read and decoded, and is
+// false only alongside a non-nil err (the gates wrap that err with %w,
+// which a nil would garble). Refcounts from a partial listing understate
+// references — a layer shared with an unread record looks unreferenced —
+// so both callers gate on it and do nothing with a partial listing.
 func (s *Store) listEviction(roots RootSet, cutoff time.Time, stats *EvictStats) (cands []evictionCandidate, refcount map[string]int, complete bool, err error) {
 	refcount = map[string]int{}
 	entries, err := os.ReadDir(s.manifestsDir())
