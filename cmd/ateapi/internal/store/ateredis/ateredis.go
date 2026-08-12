@@ -62,6 +62,9 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+// globalAtespace in Substrate is represented by "".
+const globalAtespace = ""
+
 type workerPubSubMsg struct {
 	Type   int    `json:"t"`
 	Worker string `json:"w"` // protojson-encoded Worker
@@ -101,7 +104,7 @@ func actorDBKey(actorRef resources.ActorRef) string {
 // atespace lists across all atespaces (actor:*); a non-empty atespace scopes the
 // scan to that atespace (actor:<atespace>:*).
 func actorScanPattern(atespace string) string {
-	if atespace == "" {
+	if atespace == globalAtespace {
 		return "actor:*"
 	}
 	return "actor:" + atespace + ":*"
@@ -112,7 +115,7 @@ func actorSnapshotDBKey(atespace, name string) string {
 }
 
 func actorSnapshotScanPattern(atespace string) string {
-	if atespace == "" {
+	if atespace == globalAtespace {
 		return "actor-snapshot:*"
 	}
 	return "actor-snapshot:" + atespace + ":*"
@@ -135,7 +138,7 @@ func (s *Persistence) CreateAtespace(ctx context.Context, atespace *ateapipb.Ate
 
 	dbAtespace := proto.Clone(atespace).(*ateapipb.Atespace)
 	// Atespace is global-scoped: identity is the name alone (atespace stays empty).
-	dbAtespace.Metadata = newCreateMetadata("", atespace.GetMetadata().GetName())
+	dbAtespace.Metadata = newCreateMetadata(globalAtespace, atespace.GetMetadata().GetName())
 
 	dbBytes, err := protojson.Marshal(dbAtespace)
 	if err != nil {
@@ -197,8 +200,8 @@ func (s *Persistence) ListAtespaces(ctx context.Context, pageSize int32, pageTok
 }
 
 // DeleteAtespace deletes an empty atespace. Returns store.ErrNotFound if the
-// atespace does not exist, or store.ErrFailedPrecondition if any Actor or
-// ActorSnapshotTag still lives in it.
+// atespace does not exist, or store.ErrFailedPrecondition if any Actor,
+// ActorSnapshotTag, ActorTemplate or ActorTemplateVersion still lives in it.
 func (s *Persistence) DeleteAtespace(ctx context.Context, name string) (*ateapipb.Atespace, error) {
 	dbKey := atespaceDBKey(name)
 
@@ -232,6 +235,20 @@ func (s *Persistence) DeleteAtespace(ctx context.Context, name string) (*ateapip
 	if hasTags {
 		return nil, store.ErrFailedPrecondition
 	}
+	hasTemplates, err := s.hasMatching(ctx, actorTemplateScanPattern(name))
+	if err != nil {
+		return nil, fmt.Errorf("while checking ActorTemplates: %w", err)
+	}
+	if hasTemplates {
+		return nil, store.ErrFailedPrecondition
+	}
+	hasVersions, err := s.hasMatching(ctx, actorTemplateVersionScanPattern(name))
+	if err != nil {
+		return nil, fmt.Errorf("while checking ActorTemplateVersions: %w", err)
+	}
+	if hasVersions {
+		return nil, store.ErrFailedPrecondition
+	}
 	if err := s.rdb.Del(ctx, dbKey).Err(); err != nil {
 		return nil, fmt.Errorf("while deleting atespace key %q: %w", dbKey, err)
 	}
@@ -258,6 +275,327 @@ func (s *Persistence) hasMatching(ctx context.Context, pattern string) (bool, er
 		}
 	}
 	return false, nil
+}
+
+func actorTemplateDBKey(templateRef resources.ActorTemplateRef) string {
+	return "actor-template:" + templateRef.Atespace + ":" + templateRef.Name
+}
+
+func actorTemplateScanPattern(atespace string) string {
+	if atespace == globalAtespace {
+		return "actor-template:*"
+	}
+	return "actor-template:" + atespace + ":*"
+}
+
+func actorTemplateVersionDBKey(versionRef resources.ActorTemplateVersionRef) string {
+	return "actor-template-version:" + versionRef.Atespace + ":" + versionRef.Name
+}
+
+func actorTemplateVersionScanPattern(atespace string) string {
+	if atespace == globalAtespace {
+		return "actor-template-version:*"
+	}
+	return "actor-template-version:" + atespace + ":*"
+}
+
+func (s *Persistence) CreateActorTemplate(ctx context.Context, template *ateapipb.ActorTemplate) (*ateapipb.ActorTemplate, error) {
+	dbKey := actorTemplateDBKey(resources.ActorTemplateRefFromActorTemplate(template))
+
+	dbTemplate := proto.Clone(template).(*ateapipb.ActorTemplate)
+	dbTemplate.Metadata = newCreateMetadata(template.GetMetadata().GetAtespace(), template.GetMetadata().GetName())
+
+	dbBytes, err := protojson.Marshal(dbTemplate)
+	if err != nil {
+		return nil, fmt.Errorf("in protojson.Marshal: %w", err)
+	}
+	ok, err := s.rdb.SetNX(ctx, dbKey, dbBytes, 0).Result()
+	if err != nil {
+		return nil, fmt.Errorf("while executing redis set: %w", err)
+	}
+	if !ok {
+		return nil, store.ErrAlreadyExists
+	}
+	return dbTemplate, nil
+}
+
+func (s *Persistence) GetActorTemplate(ctx context.Context, templateRef resources.ActorTemplateRef) (*ateapipb.ActorTemplate, error) {
+	dbKey := actorTemplateDBKey(templateRef)
+	dbBytes, err := s.rdb.Get(ctx, dbKey).Bytes()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return nil, store.ErrNotFound
+		}
+		return nil, fmt.Errorf("while getting actor template key %q: %w", dbKey, err)
+	}
+	template := &ateapipb.ActorTemplate{}
+	if err := protojson.Unmarshal(dbBytes, template); err != nil {
+		return nil, fmt.Errorf("while unmarshaling actor template: %w", err)
+	}
+	if resources.ActorTemplateRefFromActorTemplate(template) != templateRef {
+		return nil, fmt.Errorf("(impossible) mismatch between stored identity and key %q", dbKey)
+	}
+	return template, nil
+}
+
+// ActorTemplateExists reports whether the ActorTemplate exists. This is a
+// plain EXISTS check and is NOT atomic with respect to a concurrent
+// DeleteActorTemplate.
+func (s *Persistence) ActorTemplateExists(ctx context.Context, templateRef resources.ActorTemplateRef) (bool, error) {
+	n, err := s.rdb.Exists(ctx, actorTemplateDBKey(templateRef)).Result()
+	if err != nil {
+		return false, fmt.Errorf("while checking actor template existence: %w", err)
+	}
+	return n > 0, nil
+}
+
+// validateUpdateActorTemplateMutation reports whether a template mutation left
+// the fields it does not own alone.
+func validateUpdateActorTemplateMutation(storedTemplate, mutatedTemplate *ateapipb.ActorTemplate) error {
+	if stored, mutated := storedTemplate.GetMetadata().GetAtespace(), mutatedTemplate.GetMetadata().GetAtespace(); stored != mutated {
+		return fmt.Errorf("metadata.atespace is immutable: mutation changed it from %q to %q", stored, mutated)
+	}
+	if stored, mutated := storedTemplate.GetMetadata().GetName(), mutatedTemplate.GetMetadata().GetName(); stored != mutated {
+		return fmt.Errorf("metadata.name is immutable: mutation changed it from %q to %q", stored, mutated)
+	}
+	return nil
+}
+
+func (s *Persistence) UpdateActorTemplate(ctx context.Context, templateRef resources.ActorTemplateRef, mutate func(*ateapipb.ActorTemplate) error) (*ateapipb.ActorTemplate, error) {
+	dbKey := actorTemplateDBKey(templateRef)
+	for range updateMaxAttempts {
+		var dbTemplate *ateapipb.ActorTemplate
+		var abortErr error
+
+		err := s.rdb.Watch(ctx, func(tx *redis.Tx) error {
+			currentVal, err := tx.Get(ctx, dbKey).Bytes()
+			if err != nil {
+				if errors.Is(err, redis.Nil) {
+					return store.ErrNotFound
+				}
+				return fmt.Errorf("while getting actor template: %w", err)
+			}
+
+			currentTemplate := &ateapipb.ActorTemplate{}
+			if err := protojson.Unmarshal(currentVal, currentTemplate); err != nil {
+				return fmt.Errorf("in protojson.Unmarshal: %w", err)
+			}
+
+			// Snapshot the stored state before handing the template to mutate.
+			// mutate is free to edit anything it is given.
+			templateBeforeMutation := proto.Clone(currentTemplate).(*ateapipb.ActorTemplate)
+			if err := mutate(currentTemplate); err != nil {
+				abortErr = err
+				return err
+			}
+			if err := validateUpdateActorTemplateMutation(templateBeforeMutation, currentTemplate); err != nil {
+				abortErr = err
+				return err
+			}
+			// The stored metadata is authoritative; derive the next metadata
+			// from it, discarding whatever mutate made of it.
+			currentTemplate.Metadata = newUpdateMetadata(templateBeforeMutation.GetMetadata())
+
+			newVal, err := protojson.Marshal(currentTemplate)
+			if err != nil {
+				return fmt.Errorf("in protojson.Marshal: %w", err)
+			}
+
+			if _, err := tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+				pipe.Set(ctx, dbKey, newVal, 0)
+				return nil
+			}); err != nil {
+				return err
+			}
+			dbTemplate = currentTemplate
+			return nil
+		}, dbKey)
+
+		switch {
+		case err == nil:
+			return dbTemplate, nil
+		case abortErr != nil:
+			return nil, abortErr
+		case errors.Is(err, store.ErrNotFound):
+			return nil, store.ErrNotFound
+		case errors.Is(err, redis.TxFailedErr):
+			// A concurrent write landed between WATCH and EXEC, so mutate never
+			// saw it. Re-read and run it against the newer state.
+			continue
+		default:
+			return nil, fmt.Errorf("while executing update actor template transaction: %w", err)
+		}
+	}
+
+	// Only the TxFailedErr branch continues the loop, so getting here means every
+	// attempt lost the race.
+	return nil, store.ErrVersionConflict
+}
+
+func (s *Persistence) ListActorTemplates(ctx context.Context, atespace string, pageSize int32, pageTokenStr string) ([]*ateapipb.ActorTemplate, string, error) {
+	var result []*ateapipb.ActorTemplate
+	nextToken, err := s.listPage(ctx, actorTemplateScanPattern(atespace), pageSize, pageTokenStr, func(ctx context.Context, master *redis.Client, keys []string) (int, error) {
+		templates, err := fetchProtos(ctx, master, keys, func() *ateapipb.ActorTemplate { return &ateapipb.ActorTemplate{} })
+		if err != nil {
+			return 0, err
+		}
+		result = append(result, templates...)
+		return len(templates), nil
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	return result, nextToken, nil
+}
+
+// DeleteActorTemplate deletes an ActorTemplate with no remaining versions.
+// Returns store.ErrNotFound if the template does not exist, or
+// store.ErrFailedPrecondition while any ActorTemplateVersion still names it
+// as parent.
+func (s *Persistence) DeleteActorTemplate(ctx context.Context, templateRef resources.ActorTemplateRef) (*ateapipb.ActorTemplate, error) {
+	dbKey := actorTemplateDBKey(templateRef)
+
+	// Read first, so a missing template returns NotFound (not a silent no-op)
+	// and so we can return the deleted resource.
+	currentVal, err := s.rdb.Get(ctx, dbKey).Bytes()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return nil, store.ErrNotFound
+		}
+		return nil, fmt.Errorf("while getting actor template key %q: %w", dbKey, err)
+	}
+
+	deleted := &ateapipb.ActorTemplate{}
+	if err := protojson.Unmarshal(currentVal, deleted); err != nil {
+		return nil, fmt.Errorf("in protojson.Unmarshal: %w", err)
+	}
+
+	// Reject while any version still names this template as parent. The
+	// parent lives in the stored value, not the key, so probe via the
+	// filtered list (pageSize 1 stops at the first match).
+	versions, _, err := s.ListActorTemplateVersions(ctx, globalAtespace, templateRef, 1, "")
+	if err != nil {
+		return nil, fmt.Errorf("while checking for remaining versions: %w", err)
+	}
+	if len(versions) > 0 {
+		return nil, store.ErrFailedPrecondition
+	}
+	if err := s.rdb.Del(ctx, dbKey).Err(); err != nil {
+		return nil, fmt.Errorf("while deleting actor template key %q: %w", dbKey, err)
+	}
+	return deleted, nil
+}
+
+func (s *Persistence) CreateActorTemplateVersion(ctx context.Context, atv *ateapipb.ActorTemplateVersion) (*ateapipb.ActorTemplateVersion, error) {
+	dbKey := actorTemplateVersionDBKey(resources.ActorTemplateVersionRefFromActorTemplateVersion(atv))
+
+	dbVersion := proto.Clone(atv).(*ateapipb.ActorTemplateVersion)
+	dbVersion.Metadata = newCreateMetadata(atv.GetMetadata().GetAtespace(), atv.GetMetadata().GetName())
+
+	dbBytes, err := protojson.Marshal(dbVersion)
+	if err != nil {
+		return nil, fmt.Errorf("in protojson.Marshal: %w", err)
+	}
+	ok, err := s.rdb.SetNX(ctx, dbKey, dbBytes, 0).Result()
+	if err != nil {
+		return nil, fmt.Errorf("while executing redis set: %w", err)
+	}
+	if !ok {
+		return nil, store.ErrAlreadyExists
+	}
+	return dbVersion, nil
+}
+
+func (s *Persistence) GetActorTemplateVersion(ctx context.Context, versionRef resources.ActorTemplateVersionRef) (*ateapipb.ActorTemplateVersion, error) {
+	dbKey := actorTemplateVersionDBKey(versionRef)
+	dbBytes, err := s.rdb.Get(ctx, dbKey).Bytes()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return nil, store.ErrNotFound
+		}
+		return nil, fmt.Errorf("while getting actor template version key %q: %w", dbKey, err)
+	}
+	version := &ateapipb.ActorTemplateVersion{}
+	if err := protojson.Unmarshal(dbBytes, version); err != nil {
+		return nil, fmt.Errorf("while unmarshaling actor template version: %w", err)
+	}
+	if resources.ActorTemplateVersionRefFromActorTemplateVersion(version) != versionRef {
+		return nil, fmt.Errorf("(impossible) mismatch between stored identity and key %q", dbKey)
+	}
+	return version, nil
+}
+
+// ListActorTemplateVersions lists ActorTemplateVersions in an atespace (all
+// atespaces when atespace is ""), filtered to one parent template when
+// actorTemplateRef is non-zero. atespace scopes the versions scanned, not the
+// parent: stored parent refs are fully qualified, so the filter matches the
+// parent's atespace and name.
+func (s *Persistence) ListActorTemplateVersions(ctx context.Context, atespace string, actorTemplateRef resources.ActorTemplateRef, pageSize int32, pageTokenStr string) ([]*ateapipb.ActorTemplateVersion, string, error) {
+	var result []*ateapipb.ActorTemplateVersion
+	nextToken, err := s.listPage(ctx, actorTemplateVersionScanPattern(atespace), pageSize, pageTokenStr, func(ctx context.Context, master *redis.Client, keys []string) (int, error) {
+		versions, err := fetchProtos(ctx, master, keys, func() *ateapipb.ActorTemplateVersion { return &ateapipb.ActorTemplateVersion{} })
+		if err != nil {
+			return 0, err
+		}
+		matched := 0
+		for _, v := range versions {
+			if actorTemplateRef != (resources.ActorTemplateRef{}) && resources.ActorTemplateRefFromObjectRef(v.GetActorTemplate()) != actorTemplateRef {
+				continue
+			}
+			result = append(result, v)
+			matched++
+		}
+		return matched, nil
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	return result, nextToken, nil
+}
+
+// DeleteActorTemplateVersion deletes an ActorTemplateVersion together with
+// its recorded golden snapshot, if any. Returns store.ErrNotFound if
+// the version does not exist, or store.ErrFailedPrecondition while it is its
+// parent's default_version_on_create.
+func (s *Persistence) DeleteActorTemplateVersion(ctx context.Context, versionRef resources.ActorTemplateVersionRef) (*ateapipb.ActorTemplateVersion, error) {
+	dbKey := actorTemplateVersionDBKey(versionRef)
+
+	currentVal, err := s.rdb.Get(ctx, dbKey).Bytes()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return nil, store.ErrNotFound
+		}
+		return nil, fmt.Errorf("while getting actor template version key %q: %w", dbKey, err)
+	}
+
+	deleted := &ateapipb.ActorTemplateVersion{}
+	if err := protojson.Unmarshal(currentVal, deleted); err != nil {
+		return nil, fmt.Errorf("in protojson.Unmarshal: %w", err)
+	}
+
+	// Reject while the parent still names this version as its default.
+	parent, err := s.GetActorTemplate(ctx, resources.ActorTemplateRef{Atespace: versionRef.Atespace, Name: deleted.GetActorTemplate().GetName()})
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return nil, fmt.Errorf("while getting parent actor template: %w", err)
+	}
+	if resources.ActorTemplateVersionRefFromObjectRef(parent.GetDefaultVersionOnCreate()) == versionRef {
+		return nil, store.ErrFailedPrecondition
+	}
+	// TODO(actor-template-versions): also reject while any Actor or
+	// ActorSnapshot references this version, once those resources carry
+	// template-version fields.
+
+	if golden := deleted.GetGoldenSnapshot(); golden != nil {
+		goldenKey := actorSnapshotDBKey(golden.GetAtespace(), golden.GetName())
+		if err := s.rdb.Del(ctx, goldenKey).Err(); err != nil {
+			return nil, fmt.Errorf("while deleting golden snapshot key %q: %w", goldenKey, err)
+		}
+	}
+
+	if err := s.rdb.Del(ctx, dbKey).Err(); err != nil {
+		return nil, fmt.Errorf("while deleting actor template version key %q: %w", dbKey, err)
+	}
+	return deleted, nil
 }
 
 func workerDBKey(namespace, poolName, podName string) string {
@@ -818,13 +1156,13 @@ func validateUpdateActorMutation(storedActor, mutatedActor *ateapipb.Actor) erro
 	return nil
 }
 
-// updateActorMaxAttempts bounds how many times UpdateActor re-runs its
+// updateMaxAttempts bounds how many times UpdateActor or UpdateActorTemplate re-runs its
 // read-modify-write after a concurrent writer invalidates the transaction.
-const updateActorMaxAttempts = 5
+const updateMaxAttempts = 5
 
 func (s *Persistence) UpdateActor(ctx context.Context, actorRef resources.ActorRef, mutate func(*ateapipb.Actor) error) (*ateapipb.Actor, error) {
 	dbKey := actorDBKey(actorRef)
-	for range updateActorMaxAttempts {
+	for range updateMaxAttempts {
 		var dbActor *ateapipb.Actor
 		var abortErr error
 
