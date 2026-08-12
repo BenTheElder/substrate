@@ -54,7 +54,12 @@ avoids the failure mode entirely.
 
 ## To throw the whole thing away
 
+Find the draft's id, then delete it:
+
 ```bash
+gh api repos/<owner>/<repo>/pulls/<num>/reviews \
+  --jq '.[] | select(.state == "PENDING") | .id'
+
 gh api repos/<owner>/<repo>/pulls/<num>/reviews/<review_id> --method DELETE
 ```
 

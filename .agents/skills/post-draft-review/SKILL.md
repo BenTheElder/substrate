@@ -85,8 +85,11 @@ Write each comment body to a file and assemble the payload with `jq --rawfile`, 
 escapes markdown, backticks, and newlines correctly. The body is always empty:
 
 ```bash
-jq -n --rawfile c1 c1.md --rawfile c2 c2.md '{
+commit_id=$(gh pr view <num> --repo <owner>/<repo> --json headRefOid --jq '.headRefOid')
+
+jq -n --arg commit "$commit_id" --rawfile c1 c1.md --rawfile c2 c2.md '{
   body: "",
+  commit_id: $commit,
   comments: [
     {path:"cmd/ateapi/internal/store/ateredis/ateredis.go", line:849, side:"RIGHT", body:$c1},
     {path:"cmd/ateapi/main.go", line:57, side:"RIGHT", body:$c2}
@@ -112,8 +115,15 @@ Inline-comment notes:
   take an inline comment. Anchor the point on a *changed* line nearby, such as the struct
   field that the untouched caller fails to populate, and reference the real location in
   prose. Otherwise leave it to the chat hand-off.
+- One bad anchor rejects the **whole batch**, and the error doesn't say which one. If the
+  POST fails, create the review with a single comment and append the rest one at a time
+  (see below) — the offender is then the one call that fails.
 - Pin exact head line numbers from a checkout of the PR head (`gh pr checkout <num>`, or
   fetch `pull/<num>/head`). Don't eyeball them from the diff.
+- `commit_id` pins the review to the head you actually read. Without it GitHub anchors
+  against whatever is current when the POST lands, so a push between your fetch and your
+  post silently moves every comment to lines you never looked at. The GraphQL append below
+  has no equivalent field, so re-check the head SHA before appending to an older draft.
 
 ### Adding to a draft that already exists
 
@@ -133,11 +143,13 @@ mutation($review: ID!, $path: String!, $line: Int!, $body: String!) {
   }) { thread { id } }
 }' -f review="PRR_kwDO..." \
    -f path="cmd/ateom-microvm/restore.go" -F line=214 \
-   -f body="$(cat c1.md)"
+   -F body=@c1.md
 ```
 
-`-f body="$(cat c1.md)"` keeps the file-per-comment discipline that `--rawfile` gives the
-batch path. For a multi-line anchor, add `startLine` and `startSide`.
+`-F body=@c1.md` reads the body straight from the file, keeping the file-per-comment
+discipline that `--rawfile` gives the batch path. Prefer it over `-f body="$(cat c1.md)"`:
+command substitution strips trailing newlines, so the last line of the comment loses its
+break. For a multi-line anchor, add `startLine` and `startSide`.
 
 Leave the review body alone whether it's empty or not. If the human started the draft,
 that text is theirs.
