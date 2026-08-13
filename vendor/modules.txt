@@ -1866,6 +1866,11 @@ k8s.io/kube-openapi/pkg/spec3
 k8s.io/kube-openapi/pkg/util
 k8s.io/kube-openapi/pkg/util/proto
 k8s.io/kube-openapi/pkg/validation/spec
+# k8s.io/kubelet v0.36.1
+## explicit; go 1.26.0
+k8s.io/kubelet/config/v1
+k8s.io/kubelet/pkg/apis/credentialprovider
+k8s.io/kubelet/pkg/apis/credentialprovider/v1
 # k8s.io/metrics v0.36.1
 ## explicit; go 1.26.0
 k8s.io/metrics/pkg/apis/metrics
