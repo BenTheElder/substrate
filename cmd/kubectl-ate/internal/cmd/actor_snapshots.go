@@ -58,7 +58,7 @@ var getActorSnapshotsCmd = &cobra.Command{
 		}
 
 		ctx := cmd.Context()
-		client, err := ateclient.NewClient(ctx, kubeconfig, k8sContext, endpoint, traceEnabled)
+		client, err := ateclient.NewClient(ctx, kubeconfig, k8sContext, endpoint, tokenFile, traceEnabled)
 		if err != nil {
 			return fmt.Errorf("failed to connect to ate-api-server: %w", err)
 		}
@@ -110,7 +110,7 @@ var createActorSnapshotTagCmd = &cobra.Command{
 			return err
 		}
 		ctx := cmd.Context()
-		client, err := ateclient.NewClient(ctx, kubeconfig, k8sContext, endpoint, traceEnabled)
+		client, err := ateclient.NewClient(ctx, kubeconfig, k8sContext, endpoint, tokenFile, traceEnabled)
 		if err != nil {
 			return fmt.Errorf("failed to connect to ate-api-server: %w", err)
 		}
@@ -141,7 +141,7 @@ var updateActorSnapshotTagCmd = &cobra.Command{
 			return err
 		}
 		ctx := cmd.Context()
-		client, err := ateclient.NewClient(ctx, kubeconfig, k8sContext, endpoint, traceEnabled)
+		client, err := ateclient.NewClient(ctx, kubeconfig, k8sContext, endpoint, tokenFile, traceEnabled)
 		if err != nil {
 			return fmt.Errorf("failed to connect to ate-api-server: %w", err)
 		}
@@ -168,7 +168,7 @@ var deleteActorSnapshotTagCmd = &cobra.Command{
 	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmd.Context()
-		client, err := ateclient.NewClient(ctx, kubeconfig, k8sContext, endpoint, traceEnabled)
+		client, err := ateclient.NewClient(ctx, kubeconfig, k8sContext, endpoint, tokenFile, traceEnabled)
 		if err != nil {
 			return fmt.Errorf("failed to connect to ate-api-server: %w", err)
 		}
