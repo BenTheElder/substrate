@@ -216,7 +216,6 @@ func (s *RouterServer) Run(ctx context.Context) error {
 
 	slog.InfoContext(ctx, "Starting substrate router subsystem",
 		slog.String("mode", string(s.cfg.Mode)),
-		slog.Bool("standalone", s.cfg.Standalone),
 		slog.String("atenet_router", string(s.cfg.atenetRouter())))
 
 	g, ctx := errgroup.WithContext(ctx)

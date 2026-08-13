@@ -74,7 +74,7 @@ func (s *RouterServer) startEnvoyDataplane(ctx context.Context, g *errgroup.Grou
 
 	xdsSrv.SetTlsConfig(s.cfg.HttpsPort, s.cfg.EnvoyCertPath)
 	xdsSrv.SetUpstreamTls(s.cfg.UpstreamCredentialBundlePath, s.cfg.UpstreamTrustBundlePath, s.cfg.UpstreamSpiffePrefix)
-	ctrl := NewController(s.k8sClient, s.clientset, s.cfg, xdsSrv)
+	ctrl := NewController(s.atStore, xdsSrv)
 
 	// Envoy receives all routing configuration from the local xDS server.
 	g.Go(func() error {

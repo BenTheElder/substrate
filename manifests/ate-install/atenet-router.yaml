@@ -169,7 +169,6 @@ spec:
         # Deployment (manifests/ate-install/atenet-egress.yaml), because the two
         # directions scale independently.
         - "--mode=ingress"
-        - "--standalone"
         - "--namespace=ate-system"
         - "--port-http=8080"
         - "--port-xds=18000"

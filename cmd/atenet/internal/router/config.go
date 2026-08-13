@@ -83,7 +83,6 @@ type authConfig struct {
 type routerConfig struct {
 	// Mode restricts the instance to one traffic direction. Empty means ModeAll.
 	Mode           Mode
-	Standalone     bool
 	AtenetRouter   string
 	Namespace      string
 	Kubeconfig     string
@@ -92,7 +91,6 @@ type routerConfig struct {
 	XdsPort        int
 	ExtprocPort    int
 	ExtprocAddr    string
-	EnvoyImage     string
 	TemplatesFile  string
 	StatusPort     int
 	HealthInterval time.Duration
