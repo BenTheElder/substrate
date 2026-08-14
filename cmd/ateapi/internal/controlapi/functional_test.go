@@ -491,14 +491,14 @@ func createActorSnapshot(t *testing.T, tc *testContext, name string) *ateapipb.O
 func tagActorSnapshot(t *testing.T, tc *testContext, snapshotRef *ateapipb.ObjectRef, tagName string) *ateapipb.ActorSnapshotTag {
 	t.Helper()
 	tag, err := tc.client.CreateActorSnapshotTag(context.Background(), &ateapipb.CreateActorSnapshotTagRequest{
-		Snapshot: snapshotRef,
-		Tag: &ateapipb.ActorSnapshotTag{
+		ActorSnapshotTag: &ateapipb.ActorSnapshotTag{
 			Metadata: &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: tagName},
+			Snapshot: snapshotRef,
 			Scope:    ateapipb.ActorSnapshotTagScope_ACTOR_SNAPSHOT_TAG_SCOPE_ATESPACE,
 		},
 	})
 	if err != nil {
-		t.Fatalf("TagActorSnapshot(%s) failed: %v", tagName, err)
+		t.Fatalf("CreateActorSnapshotTag(%s) failed: %v", tagName, err)
 	}
 	return tag
 }
@@ -2120,23 +2120,23 @@ func TestSuspendActor(t *testing.T) {
 	}
 	tagRef := &ateapipb.ObjectRef{Atespace: testAtespace, Name: "before-upgrade"}
 	tagged, err := tc.client.CreateActorSnapshotTag(context.Background(), &ateapipb.CreateActorSnapshotTagRequest{
-		Snapshot: snapshotRef,
-		Tag: &ateapipb.ActorSnapshotTag{
+		ActorSnapshotTag: &ateapipb.ActorSnapshotTag{
 			Metadata: &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "before-upgrade"},
+			Snapshot: snapshotRef,
 			Scope:    ateapipb.ActorSnapshotTagScope_ACTOR_SNAPSHOT_TAG_SCOPE_ATESPACE,
 		},
 	})
 	if err != nil || !proto.Equal(tagged.GetSnapshot(), ref) {
-		t.Fatalf("TagActorSnapshot = (%v, %v), want tag for snapshot", tagged, err)
+		t.Fatalf("CreateActorSnapshotTag = (%v, %v), want tag for snapshot", tagged, err)
 	}
 	if _, err := tc.client.CreateActorSnapshotTag(context.Background(), &ateapipb.CreateActorSnapshotTagRequest{
-		Snapshot: snapshotRef,
-		Tag: &ateapipb.ActorSnapshotTag{
+		ActorSnapshotTag: &ateapipb.ActorSnapshotTag{
 			Metadata: &ateapipb.ResourceMetadata{Atespace: "other", Name: "cross-atespace"},
+			Snapshot: snapshotRef,
 			Scope:    ateapipb.ActorSnapshotTagScope_ACTOR_SNAPSHOT_TAG_SCOPE_ATESPACE,
 		},
 	}); status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("cross-atespace TagActorSnapshot status = %v, want FailedPrecondition", status.Code(err))
+		t.Fatalf("cross-atespace CreateActorSnapshotTag status = %v, want FailedPrecondition", status.Code(err))
 	}
 	if _, err := tc.client.CreateActor(context.Background(), &ateapipb.CreateActorRequest{
 		Actor: &ateapipb.Actor{
