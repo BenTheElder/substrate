@@ -720,9 +720,14 @@ func (s *AteomService) guestSize(sz sizing.SandboxSize) (sizing.SandboxSize, err
 // buildVMConfig assembles the cloud-hypervisor VmConfig. The kernel cmdline replicates
 // kata's clh boot cmdline; beyond the base params it must set
 // systemd.unit=kata-containers.target (else the guest powers off ~6s in) and mask
-// systemd-networkd (the agent owns eth0). The console is arch-specific: ttyAMA0 on
-// arm64, ttyS0 on amd64. /dev/vda is the RO guest image; the actor rootfs's RO lower is
-// the virtio-fs device on PCI segment 1 (hence num_pci_segments=2), with no actor disks.
+// systemd-networkd (the agent owns eth0) and systemd-journald (the guest keeps no logs:
+// container output leaves over ttrpc, and every page journald touches is a page the
+// snapshot carries forever). The console is arch-specific: ttyAMA0 on arm64, ttyS0 on
+// amd64. /dev/vda is the RO guest image; the actor rootfs's RO lower is the virtio-fs
+// device on PCI segment 1 (hence num_pci_segments=2), with no actor disks.
+//
+// Note chronyd stays: it disciplines the guest clock from the KVM PTP clock, which is
+// what repairs the guest's notion of time after a resume.
 //
 // withDurable adds a second virtio-fs device for the actor's writable durable-dir
 // volumes (see durable.go), served by its own virtiofsd on the same PCI segment.
@@ -731,9 +736,14 @@ func buildVMConfig(id, kernel, image, kparams, serialLog string, memMiB, vcpus i
 	if runtime.GOARCH == "arm64" {
 		console = "ttyAMA0"
 	}
+	// Each service is masked along with its socket units, else systemd just
+	// socket-activates it straight back up.
 	cmdline := "root=/dev/vda1 rootflags=data=ordered,errors=remount-ro ro rootfstype=ext4 " +
 		"panic=1 no_timer_check noreplace-smp console=" + console + ",115200n8 " +
-		"systemd.unit=kata-containers.target systemd.mask=systemd-networkd.service systemd.mask=systemd-networkd.socket"
+		"systemd.unit=kata-containers.target " +
+		"systemd.mask=systemd-networkd.service systemd.mask=systemd-networkd.socket " +
+		"systemd.mask=systemd-journald.service systemd.mask=systemd-journald.socket " +
+		"systemd.mask=systemd-journald-dev-log.socket systemd.mask=systemd-journald-audit.socket"
 	if kparams != "" {
 		cmdline += " " + kparams
 	}
