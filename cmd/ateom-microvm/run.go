@@ -134,11 +134,15 @@ const vmmMemReserveMiB = 256
 // minGuestMemMiB is the floor for guest RAM (the declared limit minus the VMM
 // reserve); a declared memory limit that leaves less is rejected at cold boot with a
 // clear error instead of being silently honored (see resolveGuestMemMiB), since too
-// little RAM makes the guest hang on boot rather than fail cleanly. It is a
-// conservative estimate; calibrate against a measured kata boot minimum if a tighter
-// bound is needed, and keep the admission floor on ActorTemplate.spec.resources in
-// sync (it is this value + vmmMemReserveMiB).
-const minGuestMemMiB = 256
+// little RAM makes the guest hang on boot rather than fail cleanly. Keep the admission
+// floor on ActorTemplate.spec.resources in sync (it is this value + vmmMemReserveMiB).
+//
+// Measured against the counter demo on a guest booting the agent as PID 1: 32MiB never
+// reaches Ready, 64MiB boots but idles with 1.1MB free (it only survives because page
+// cache is reclaimable), and 128MiB idles with 43MiB free. So 128 is the smallest size
+// with real headroom, not the smallest that boots — a workload heavier than a static Go
+// binary needs more, and this floor cannot know how much.
+const minGuestMemMiB = 128
 
 // maxActorContainers is a sanity cap on containers per actor (all share the one
 // micro-VM + virtiofsd). 25 is far above any real pod.
