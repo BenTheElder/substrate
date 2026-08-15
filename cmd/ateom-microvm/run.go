@@ -129,7 +129,20 @@ const kataAgentPath = "/usr/bin/kata-agent"
 // for the cloud-hypervisor VMM + virtiofsd, which run as host processes in the same
 // pod cgroup as the guest RAM; without a margin the pod OOMs. Overridable per
 // deployment via --vmm-mem-reserve-mib (see AteomService.memReserveMiB).
-const vmmMemReserveMiB = 256
+//
+// Measured on the worker pod's cgroup with one 256MiB-guest actor: the VMM stack's own
+// cost is ~12MiB (anon 8.1 + kernel 3.7; the rest of cloud-hypervisor's RSS is the guest
+// memfd, already accounted as guest RAM), and two virtiofsds are ~3MiB each. What needs
+// the rest of the margin is transient: a pause/resume cycle took the cgroup from 94MiB
+// to 153MiB, and the 57MiB difference was page cache from writing and reading the
+// snapshot.
+//
+// That transient scales with snapshot size, so no fixed reserve is right for every guest
+// size — this one is halved rather than cut to the ~32MiB the steady state would justify.
+// The fix that would let it drop that far is keeping snapshot I/O out of the page cache
+// (posix_fadvise(DONTNEED) after the checkpoint write and the restore read); until then
+// the margin absorbs it, and a deployment running large guests can raise the flag.
+const vmmMemReserveMiB = 128
 
 // minGuestMemMiB is the floor for guest RAM (the declared limit minus the VMM
 // reserve); a declared memory limit that leaves less is rejected at cold boot with a
