@@ -186,6 +186,13 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 		return nil, fmt.Errorf("while listing snapshot files: %w", err)
 	}
 
+	// Nothing in this pod reads the snapshot back (atelet ships it from its own),
+	// so drop the page cache cloud-hypervisor's write left behind rather than make
+	// the VMM reserve carry a second copy of the guest's memory. See pagecache.go.
+	tCache := time.Now()
+	dropSnapshotPageCache(ctx, checkpointDir, snapshotFiles)
+	dCache := time.Since(tCache)
+
 	// Tear down: the actor returns to "available". Best-effort; the snapshot is
 	// already on disk for atelet to ship.
 	tTeardown := time.Now()
@@ -219,6 +226,7 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 		// snapshot: the paused window costs max(snapshot, durable_dir,
 		// rootfs_upper), and the tar durations scale with the actor's data.
 		slog.Duration("durable_dir", dDurable), slog.Duration("rootfs_upper", dUpper),
+		slog.Duration("page_cache", dCache),
 		slog.Duration("teardown", dTeardown))
 	return &ateompb.CheckpointWorkloadResponse{SnapshotFiles: snapshotFiles}, nil
 }
