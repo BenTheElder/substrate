@@ -743,7 +743,10 @@ func buildVMConfig(id, kernel, image, kparams, serialLog string, memMiB, vcpus i
 		"systemd.unit=kata-containers.target " +
 		"systemd.mask=systemd-networkd.service systemd.mask=systemd-networkd.socket " +
 		"systemd.mask=systemd-journald.service systemd.mask=systemd-journald.socket " +
-		"systemd.mask=systemd-journald-dev-log.socket systemd.mask=systemd-journald-audit.socket"
+		"systemd.mask=systemd-journald-dev-log.socket systemd.mask=systemd-journald-audit.socket " +
+		// journal-flush exists only to copy the runtime journal to disk; with journald
+		// masked it fails at every boot.
+		"systemd.mask=systemd-journal-flush.service"
 	if kparams != "" {
 		cmdline += " " + kparams
 	}
