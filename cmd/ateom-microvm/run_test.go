@@ -21,6 +21,7 @@ import (
 	"errors"
 	"net"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -172,5 +173,28 @@ func TestGuestSize(t *testing.T) {
 	tooSmall := sizing.SandboxSize{MilliCPU: 1000, MemoryBytes: (reserve + 1) * mib}
 	if gotErr, err := s.guestSize(tooSmall); err == nil {
 		t.Errorf("guestSize(%dMiB) = %+v, nil; want an error", reserve+1, gotErr)
+	}
+}
+
+func TestInitParams(t *testing.T) {
+	// The agent path must be the one the kata guest image actually ships, since the
+	// kernel silently panics on an init= that does not exist.
+	if got := initParams(true); got != "init=/usr/bin/kata-agent" {
+		t.Errorf("initParams(true) = %q", got)
+	}
+	// Without the agent as PID 1, systemd needs kata's target — it powers the guest
+	// off within seconds otherwise — and networkd must stay masked, the agent owns eth0.
+	systemd := initParams(false)
+	for _, want := range []string{
+		"systemd.unit=kata-containers.target",
+		"systemd.mask=systemd-networkd.service",
+		"systemd.mask=systemd-networkd.socket",
+	} {
+		if !strings.Contains(systemd, want) {
+			t.Errorf("initParams(false) = %q, missing %q", systemd, want)
+		}
+	}
+	if strings.Contains(systemd, "init=") {
+		t.Errorf("initParams(false) = %q, must not override init", systemd)
 	}
 }
