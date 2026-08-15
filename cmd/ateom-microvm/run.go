@@ -41,6 +41,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/internal/sizing"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -425,36 +426,21 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 		return fmt.Errorf("while creating VM dir: %w", err)
 	}
 
-	// Stage the overlay RO lowers (bind each image into the shared dir) + start the
-	// virtiofsd that serves them. CH connects to it at vm.create and demand-pages for
-	// the actor's lifetime, so ateom owns the process (killed in teardownActor).
-	vfsdCmd, err := s.stageOverlayLowers(ctx, rr, actorUID, ctrs)
+	// Stage the actor's virtio-fs shares + start the virtiofsd serving each: the
+	// overlay RO lowers (bind each image into the shared dir) and, if the actor has
+	// durable-dir volumes, the one writable share they live in. CH connects to both at
+	// vm.create and demand-pages for the actor's lifetime, so ateom owns the processes
+	// (killed in teardownActor).
+	durable := hasDurableVolumes(containers)
+	shares, err := s.stageActorShares(ctx, rr, actorUID, ctrs, durable)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		if retErr != nil && vfsdCmd.Process != nil {
-			_ = vfsdCmd.Process.Kill()
-			_, _ = vfsdCmd.Process.Wait()
+		if retErr != nil {
+			shares.kill()
 		}
 	}()
-
-	// Durable-dir volumes (if any) share one writable virtio-fs share, served by
-	// a second virtiofsd from the host directory atelet prepared; each volume is
-	// a subdirectory of it.
-	durable := hasDurableVolumes(containers)
-	var durableVfsdCmd *exec.Cmd
-	if durable {
-		if durableVfsdCmd, err = s.stageDurableShare(ctx, rr, actorUID); err != nil {
-			return err
-		}
-		defer func() {
-			if retErr != nil && durableVfsdCmd.Process != nil {
-				_ = durableVfsdCmd.Process.Kill()
-				_, _ = durableVfsdCmd.Process.Wait()
-			}
-		}()
-	}
 
 	// Launch a bare VMM (CH + api-socket); ateom owns this process for teardown.
 	apiSocket := filepath.Join(kata.VMDir(actorUID), "clh-api.sock")
@@ -542,7 +528,7 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 		return fmt.Errorf("while waiting for container readyz: %w", err)
 	}
 
-	ra := &runningActor{chCmd: chCmd, vfsdCmd: vfsdCmd, durableVfsdCmd: durableVfsdCmd, apiSocket: apiSocket, baseID: actorUID, guestAgent: ac}
+	ra := &runningActor{chCmd: chCmd, vfsdCmd: shares.lower, durableVfsdCmd: shares.durable, apiSocket: apiSocket, baseID: actorUID, guestAgent: ac}
 	if err := s.activateActorNetworking(p.actorRef.Atespace, p.actorRef.Name, egress); err != nil {
 		return err
 	}
@@ -609,6 +595,56 @@ func (s *AteomService) buildActorContainers(actorUID string, containers []*ateom
 		}
 	}
 	return ctrs, nil
+}
+
+// actorShares are the virtiofsd processes serving the actor's virtio-fs shares:
+// the overlay RO lower's, and the writable durable-dir share's when the actor
+// declares volumes (nil when it declares none). Both outlive the call that starts
+// them — CH talks to them for the VM's lifetime — so the caller owns them, records
+// them on the runningActor and kills them in teardownActor.
+type actorShares struct {
+	lower   *exec.Cmd
+	durable *exec.Cmd
+}
+
+// kill stops whichever shares are running, for a boot or restore that failed
+// before they reached a runningActor.
+func (a actorShares) kill() {
+	for _, cmd := range []*exec.Cmd{a.lower, a.durable} {
+		if cmd != nil && cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_, _ = cmd.Process.Wait()
+		}
+	}
+}
+
+// stageActorShares stages the actor's virtio-fs shares and starts a virtiofsd for
+// each, concurrently. The two are independent — different shared dirs, different
+// sockets — and starting one waits for its virtiofsd to bind, so doing them in
+// sequence pays both waits back to back for nothing. On failure it kills whichever
+// one did come up, so the caller owns the processes only on success.
+//
+// Must run AFTER CleanupSandboxState (which wipes SharedDir) and the VM dir exists.
+// The errgroup deliberately carries no shared context: a failure on one side must
+// not cancel the other's mount subprocesses mid-flight.
+func (s *AteomService) stageActorShares(ctx context.Context, rr resolvedRuntime, actorUID string, ctrs []actorContainer, durable bool) (actorShares, error) {
+	var shares actorShares
+	var g errgroup.Group
+	g.Go(func() (err error) {
+		shares.lower, err = s.stageOverlayLowers(ctx, rr, actorUID, ctrs)
+		return err
+	})
+	if durable {
+		g.Go(func() (err error) {
+			shares.durable, err = s.stageDurableShare(ctx, rr, actorUID)
+			return err
+		})
+	}
+	if err := g.Wait(); err != nil {
+		shares.kill()
+		return actorShares{}, err
+	}
+	return shares, nil
 }
 
 // stageOverlayLowers makes each container's RO lower available to virtiofsd by

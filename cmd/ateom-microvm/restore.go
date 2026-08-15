@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -217,33 +216,20 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 	if err != nil {
 		return err
 	}
-	vfsdCmd, err := s.stageOverlayLowers(ctx, rr, actorUID, ctrs)
+	// Both shares come up together (stageActorShares): the lowers', and — when the
+	// actor has durable-dir volumes — the durable share's, restarted over the
+	// contents the caller restored. The guest reattaches to each by the socket path
+	// rewritten into the snapshot config below; find-paths re-opens whatever files it
+	// still holds open against the same paths, which the restored tar reproduces exactly.
+	shares, err := s.stageActorShares(ctx, rr, actorUID, ctrs, hasDurableVolumes(containers))
 	if err != nil {
 		return err
 	}
 	defer func() {
-		if retErr != nil && vfsdCmd.Process != nil {
-			_ = vfsdCmd.Process.Kill()
-			_, _ = vfsdCmd.Process.Wait()
+		if retErr != nil {
+			shares.kill()
 		}
 	}()
-
-	// Restart the durable-dir share's virtiofsd over the contents the caller
-	// restored. The guest reattaches to it by the socket path rewritten into the
-	// snapshot config below; find-paths re-opens whatever files it still holds open
-	// against the same paths, which the restored tar reproduces exactly.
-	var durableVfsdCmd *exec.Cmd
-	if hasDurableVolumes(containers) {
-		if durableVfsdCmd, err = s.stageDurableShare(ctx, rr, actorUID); err != nil {
-			return err
-		}
-		defer func() {
-			if retErr != nil && durableVfsdCmd.Process != nil {
-				_ = durableVfsdCmd.Process.Kill()
-				_, _ = durableVfsdCmd.Process.Wait()
-			}
-		}()
-	}
 
 	// Networking: rebuild the per-activation veth + tap; the snapshot's virtio-net
 	// is fd-backed, so CH needs fresh tap FDs (net_fds) on restore.
@@ -351,7 +337,7 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 	}
 
 	ra := &runningActor{
-		chCmd: chCmd, vfsdCmd: vfsdCmd, durableVfsdCmd: durableVfsdCmd,
+		chCmd: chCmd, vfsdCmd: shares.lower, durableVfsdCmd: shares.durable,
 		apiSocket: apiSocket, baseID: srcID, restoreSourceDir: restoreDir,
 		snapshotIsSelfContained: memMode == ch.MemRestoreEager,
 	}
