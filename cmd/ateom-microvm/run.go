@@ -543,15 +543,18 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 	// the guest's init reaches kata-containers.target — well after CH creates the
 	// vsock socket file — so poll the CONNECT until it answers (as the kata shim
 	// does), rather than dialing once.
+	tBooted := time.Now()
 	vsockPath := kata.VsockSocketPath(actorUID)
 	if !waitForFile(vsockPath, 15*time.Second) {
 		return fmt.Errorf("kata-agent vsock socket %q did not appear", vsockPath)
 	}
+	tVsock := time.Now()
 	ac, err := dialAgentRetry(ctx, vsockPath, 60*time.Second)
 	if err != nil {
 		logGuestBootDiagnostics(ctx, actorUID, serialLog)
 		return fmt.Errorf("while dialing kata-agent: %w", err)
 	}
+	tDialed := time.Now()
 	// The agent client must stay open past this RPC: the stdout/stderr forwarding
 	// goroutines (started below) read over it for the actor's lifetime. It is stored
 	// on the runningActor and closed by teardownActor. Close it here only if Run
@@ -566,11 +569,21 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 	if err := s.startActorContainers(ctx, ac, actorUID, vsockPath, ctrs, durable); err != nil {
 		return err
 	}
+	tContainers := time.Now()
 
 	// Block until every readyz-enabled container reports 200.
 	if err := readyz.WaitAll(ctx, containers, ateomnet.ActorVethIP); err != nil {
 		return fmt.Errorf("while waiting for container readyz: %w", err)
 	}
+
+	// Everything from BootVM onward, split. ateom used to log only the total, which
+	// hid where a cold boot actually goes: it is not the guest booting.
+	slog.InfoContext(ctx, "Actor boot phases", slog.String("id", actorUID),
+		slog.Duration("vsock_wait", tVsock.Sub(tBooted)),
+		slog.Duration("agent_dial", tDialed.Sub(tVsock)),
+		slog.Duration("containers", tContainers.Sub(tDialed)),
+		slog.Duration("readyz", time.Since(tContainers)),
+		slog.Duration("since_boot", time.Since(tBooted)))
 
 	ra := &runningActor{chCmd: chCmd, vfsdCmd: vfsdCmd, durableVfsdCmd: durableVfsdCmd, apiSocket: apiSocket, baseID: actorUID, guestAgent: ac, workloadIDs: workloadIDs(ctrs)}
 	if err := s.activateActorNetworking(p.actorRef.Atespace, p.actorRef.Name, egress); err != nil {
@@ -855,12 +868,14 @@ func (s *AteomService) startActorContainers(ctx context.Context, ac *kata.AgentC
 	// Establish the agent sandbox + the kataShared virtio-fs mount (every
 	// container's merged rootfs). All containers share it, so use the first
 	// container's hostname.
+	tStart := time.Now()
 	sbCtx, sbCancel := context.WithTimeout(ctx, 20*time.Second)
 	err := ac.CreateSandboxForActor(sbCtx, id, ctrs[0].spec.Hostname, durable)
 	sbCancel()
 	if err != nil {
 		return fmt.Errorf("while creating agent sandbox: %w", err)
 	}
+	tSandbox := time.Now()
 
 	// Configure guest networking (the shim's job): eth0 IP/MAC/MTU, routes, ARP.
 	mtu := uint64(s.actorVethMTU(ctx))
@@ -873,11 +888,18 @@ func (s *AteomService) startActorContainers(ctx context.Context, ac *kata.AgentC
 		return fmt.Errorf("while configuring guest network: %w", err)
 	}
 
+	tNetwork := time.Now()
+
 	for _, c := range ctrs {
 		if err := startRootfsContainer(ctx, ac, vsockPath, c); err != nil {
 			return err
 		}
 	}
+	slog.InfoContext(ctx, "Agent setup phases", slog.String("id", id),
+		slog.Duration("sandbox", tSandbox.Sub(tStart)),
+		slog.Duration("network", tNetwork.Sub(tSandbox)),
+		slog.Duration("containers", time.Since(tNetwork)),
+		slog.Int("container_count", len(ctrs)))
 	return nil
 }
 
@@ -927,12 +949,26 @@ func (s *AteomService) startActorLogForwarding(ac *kata.AgentClient, actorRef re
 // effects until the agent runs the containers) retry on it.
 var errGuestStopped = errors.New("micro-VM stopped before the kata-agent answered")
 
+// Bounds on the kata-agent dial poll. What they set is the window between the agent
+// starting to listen and us noticing: an attempt already in flight when the agent
+// comes up cannot succeed (cloud-hypervisor has answered that CONNECT), so the wait
+// is the attempt plus the interval.
+//
+// They were 5s and 500ms, i.e. one attempt a second. What dominates this phase is
+// the guest not listening yet — measured at 1.37s on GKE — so the poll should cost
+// a fraction of that, not add half a second of its own.
+const (
+	agentDialAttemptTimeout = 300 * time.Millisecond
+	agentDialInterval       = 20 * time.Millisecond
+)
+
 // dialAgentRetry polls DialAgent until the kata-agent answers the hybrid-vsock
-// CONNECT (the socket file exists at boot, but the agent only listens once the
-// guest reaches kata-containers.target) or the overall timeout elapses. Each
-// attempt is capped at 5s (usually it fails fast with connection-refused while
-// the agent isn't listening yet; the cap only bounds a rare hung dial), then
-// waits 500ms before retrying — so steady-state polling is ~every 500ms, not 5s.
+// CONNECT (the socket file exists as soon as cloud-hypervisor boots, but the agent
+// only listens once the guest's init reaches it) or the overall timeout elapses.
+//
+// Poll fast. A failed attempt is cheap — cloud-hypervisor answers the CONNECT of a
+// port nothing is listening on straight away — while a slow poll adds its whole
+// interval to every cold boot, for nothing.
 //
 // A dial that fails with ENOENT ends the poll immediately as errGuestStopped:
 // callers wait for the socket to appear before dialing, and cloud-hypervisor
@@ -941,16 +977,25 @@ var errGuestStopped = errors.New("micro-VM stopped before the kata-agent answere
 // of the timeout to report a bare "no such file or directory".
 func dialAgentRetry(ctx context.Context, vsockPath string, timeout time.Duration) (*kata.AgentClient, error) {
 	deadline := time.Now().Add(timeout)
+	start := time.Now()
 	var lastErr error
-	for {
-		dctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	for attempt := 1; ; attempt++ {
+		dctx, cancel := context.WithTimeout(ctx, agentDialAttemptTimeout)
 		ac, err := kata.DialAgent(dctx, vsockPath)
 		cancel()
 		if err == nil {
+			slog.InfoContext(ctx, "kata-agent answered", slog.Int("attempts", attempt),
+				slog.Duration("elapsed", time.Since(start)))
 			return ac, nil
 		}
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, fmt.Errorf("%w (cloud-hypervisor removed %q): %w", errGuestStopped, vsockPath, err)
+		}
+		if lastErr == nil {
+			// The first failure is the interesting one: it says why the agent is not
+			// answering yet. Later attempts repeat it until it succeeds.
+			slog.DebugContext(ctx, "kata-agent not answering yet", slog.Any("err", err),
+				slog.Duration("attempt_took", time.Since(start)))
 		}
 		lastErr = err
 		if time.Now().After(deadline) {
@@ -959,7 +1004,7 @@ func dialAgentRetry(ctx context.Context, vsockPath string, timeout time.Duration
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(agentDialInterval):
 		}
 	}
 }
