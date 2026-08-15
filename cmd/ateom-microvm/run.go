@@ -132,17 +132,18 @@ const kataAgentPath = "/usr/bin/kata-agent"
 //
 // Measured on the worker pod's cgroup with one 256MiB-guest actor: the VMM stack's own
 // cost is ~12MiB (anon 8.1 + kernel 3.7; the rest of cloud-hypervisor's RSS is the guest
-// memfd, already accounted as guest RAM), and two virtiofsds are ~3MiB each. What needs
-// the rest of the margin is transient: a pause/resume cycle took the cgroup from 94MiB
-// to 153MiB, and the 57MiB difference was page cache from writing and reading the
-// snapshot.
+// memfd, already accounted as guest RAM), and two virtiofsds are ~3MiB each.
 //
-// That transient scales with snapshot size, so no fixed reserve is right for every guest
-// size — this one is halved rather than cut to the ~32MiB the steady state would justify.
-// The fix that would let it drop that far is keeping snapshot I/O out of the page cache
-// (posix_fadvise(DONTNEED) after the checkpoint write and the restore read); until then
-// the margin absorbs it, and a deployment running large guests can raise the flag.
-const vmmMemReserveMiB = 128
+// What used to need the rest of the margin was transient — a checkpoint left the pod
+// holding the snapshot as page cache on top of the same bytes as guest RAM, peaking at
+// 197MiB against a 94MiB steady state. Dropping that cache once the snapshot is written
+// (see pagecache.go) takes the peak to 98.6MiB, i.e. guest RAM plus this reserve, which
+// is what lets the reserve stop tracking snapshot size and shrink.
+//
+// 64 rather than the ~12MiB the steady state alone would justify: a large durable-dir
+// volume still moves through the page cache when it is tarred, and restore staging is
+// not covered either. A deployment that hits those can raise --vmm-mem-reserve-mib.
+const vmmMemReserveMiB = 64
 
 // minGuestMemMiB is the floor for guest RAM (the declared limit minus the VMM
 // reserve); a declared memory limit that leaves less is rejected at cold boot with a
