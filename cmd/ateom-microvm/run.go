@@ -122,6 +122,10 @@ const (
 	assetVirtiofsd = "virtiofsd"
 )
 
+// kataAgentPath is where the kata guest image keeps the agent binary. buildVMConfig
+// boots it as PID 1 (init=), so it is the guest's entire userspace.
+const kataAgentPath = "/usr/bin/kata-agent"
+
 // vmmMemReserveMiB is the DEFAULT guest RAM held back from the pod's memory limit
 // for the cloud-hypervisor VMM + virtiofsd, which run as host processes in the same
 // pod cgroup as the guest RAM; without a margin the pod OOMs. Overridable per
@@ -508,7 +512,8 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 	// host-side overlay upper through the shared mount). serialLog is also read on a
 	// failed agent dial below, so keep it here.
 	serialLog := filepath.Join(kata.VMDir(actorUID), "serial.log")
-	vmCfg := buildVMConfig(actorUID, kernel, image, kparams, serialLog, memMiB, vcpus, durable)
+	vmCfg := buildVMConfig(actorUID, kernel, image, kparams, serialLog, memMiB, vcpus, durable,
+		agentInit(ctx, client.Info()))
 	if err := client.CreateVM(ctx, vmCfg); err != nil {
 		return fmt.Errorf("while creating VM: %w", err)
 	}
@@ -752,24 +757,66 @@ func (s *AteomService) guestSize(sz sizing.SandboxSize) (sizing.SandboxSize, err
 	return sz, nil
 }
 
-// buildVMConfig assembles the cloud-hypervisor VmConfig. The kernel cmdline replicates
-// kata's clh boot cmdline; beyond the base params it must set
-// systemd.unit=kata-containers.target (else the guest powers off ~6s in) and mask
-// systemd-networkd (the agent owns eth0). The console is arch-specific: ttyAMA0 on
-// arm64, ttyS0 on amd64. /dev/vda is the RO guest image; the actor rootfs's RO lower is
-// the virtio-fs device on PCI segment 1 (hence num_pci_segments=2), with no actor disks.
+// agentInit reports whether to boot the kata agent as the guest's PID 1, from what
+// the VMM just told us about itself over vmm.ping.
+//
+// Booting the agent directly skips systemd entirely, which is most of what the guest
+// reads at boot and most of what its snapshot carries. The catch is that it also drops
+// chronyd (kata-containers.target wants it), and chronyd is what repairs the guest
+// clock after a resume — so this is only safe on a VMM that advances the guest clock
+// across a restore itself. On an older or unreadable version, boot systemd instead and
+// keep the guest correct at the cost of the memory.
+func agentInit(ctx context.Context, info ch.VMMInfo) bool {
+	if info.AdvancesGuestClockOnRestore() {
+		return true
+	}
+	slog.InfoContext(ctx, "VMM does not advance the guest clock on restore; booting systemd to keep chronyd",
+		slog.String("vmm_version", info.Version), slog.String("vmm_build_version", info.BuildVersion))
+	return false
+}
+
+// initParams returns the kernel cmdline parameters that select the guest's PID 1.
+// The systemd path must name kata's target (else the guest powers off ~6s in) and
+// mask systemd-networkd, since the agent owns eth0.
+func initParams(agentInit bool) string {
+	if agentInit {
+		return "init=" + kataAgentPath
+	}
+	return "systemd.unit=kata-containers.target " +
+		"systemd.mask=systemd-networkd.service systemd.mask=systemd-networkd.socket"
+}
+
+// buildVMConfig assembles the cloud-hypervisor VmConfig. The console is arch-specific:
+// ttyAMA0 on arm64, ttyS0 on amd64. /dev/vda is the RO guest image; the actor rootfs's RO
+// lower is the virtio-fs device on PCI segment 1 (hence num_pci_segments=2), with no
+// actor disks.
+//
+// init=kataAgentPath boots the kata agent as PID 1 instead of systemd. The agent detects
+// that it is PID 1 and does the init work itself: it mounts /proc, /sys, devtmpfs /dev,
+// /dev/shm, /dev/pts, tmpfs /run and the cgroup hierarchy, then serves ttrpc over vsock.
+// Nothing else in the guest image is ours to run — the workload is a container the agent
+// starts — so systemd only cost us. Measured on the counter demo, dropping it took the
+// guest's boot-time reads from this disk from 58.6MiB to 35.0MiB, the snapshot from 145MiB
+// to 106.6MiB at the same guest RAM, and a cold boot from 15.9s to 10.3s: the agent is
+// PID 1 rather than a unit systemd reaches several seconds in, so ateom stops waiting for
+// it (the dial phase goes 10.4s -> 4.7s).
+//
+// Dropping systemd also drops chronyd (kata-containers.target wants it), which is what
+// used to repair the guest clock after a resume. That is safe only from cloud-hypervisor
+// v53, which advances the guest clock across a restore itself; on v52 a restored guest
+// stays frozen at the instant it was snapshotted.
 //
 // withDurable adds a second virtio-fs device for the actor's writable durable-dir
 // volumes (see durable.go), served by its own virtiofsd on the same PCI segment.
 // The disk-backed rootfs upper share (see rootfsupper.go) is always present.
-func buildVMConfig(id, kernel, image, kparams, serialLog string, memMiB, vcpus int, withDurable bool) ch.VmConfig {
+func buildVMConfig(id, kernel, image, kparams, serialLog string, memMiB, vcpus int, withDurable, agentInit bool) ch.VmConfig {
 	console := "ttyS0"
 	if runtime.GOARCH == "arm64" {
 		console = "ttyAMA0"
 	}
 	cmdline := "root=/dev/vda1 rootflags=data=ordered,errors=remount-ro ro rootfstype=ext4 " +
 		"panic=1 no_timer_check noreplace-smp console=" + console + ",115200n8 " +
-		"systemd.unit=kata-containers.target systemd.mask=systemd-networkd.service systemd.mask=systemd-networkd.socket"
+		initParams(agentInit)
 	if kparams != "" {
 		cmdline += " " + kparams
 	}
