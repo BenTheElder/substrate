@@ -216,7 +216,7 @@ func TestGetWorkloadStats(t *testing.T) {
 }
 
 // TestGetWorkloadStatsSumsContainers covers the multi-container actor: the
-// guest gives one cgroup per container (see StartOverlayWorkload), and the
+// guest gives one cgroup per container (see StartRootfsContainer), and the
 // proto reports one figure for the actor.
 func TestGetWorkloadStatsSumsContainers(t *testing.T) {
 	agent := &fakeAgent{stats: map[string]*agentpb.CgroupStats{

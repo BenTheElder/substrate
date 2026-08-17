@@ -136,22 +136,17 @@ const minGuestMemMiB = 256
 // micro-VM + virtiofsd). 25 is far above any real pod.
 const maxActorContainers = 25
 
-// overlayWorkloadID is the kata containerID of a container's overlay WORKLOAD,
-// distinct from its carrier container (the carrier keeps the bare container name so
-// the agent binds the RO base to /run/kata-containers/<name>/rootfs; the workload
-// overlays on top). Stable across the restore lineage (container names don't change).
-//
-// The "_ovl" separator is deliberately a character that is invalid in a Kubernetes
-// container name (DNS-1123 labels are [a-z0-9-]): the carrier id is the bare name, so a
-// workload id can never equal a carrier id (a bare name has no "_") nor another workload
-// id (names are unique within an actor) — even for containers named "x" and "x-ovl". A
-// "-ovl" suffix would let "x"'s workload id collide with the "x-ovl" carrier id.
+// overlayWorkloadID is the kata containerID the RETIRED guest-overlay
+// arrangement gave a container's workload (the bare name went to a "carrier"
+// container; the workload overlaying it was <name>_ovl). Containers now run
+// under their bare name, but guests restored from legacy snapshots still hold
+// the _ovl containers, so log forwarding for those lineages keys on this.
 func overlayWorkloadID(name string) string { return name + "_ovl" }
 
 // actorContainer is one of the actor's containers prepared for the shared micro-VM:
-// its name (also the kata containerID + the overlay lower's find-paths subdir), the
-// host OCI bundle rootfs that backs the RO lower, and its OCI spec. The writable
-// overlay upper is a guest tmpfs (OverlayUpperBase(name)), so there is no host disk.
+// its name (also the kata containerID + the merged rootfs's find-paths subdir), the
+// host OCI bundle rootfs that backs the overlay lower, and its OCI spec. The writable
+// upper is a host directory (see rootfsupper.go); the host kernel merges the two.
 type actorContainer struct {
 	name         string
 	bundleRootfs string
@@ -213,9 +208,9 @@ func writeGuestResolvConf(rootfs string) error {
 
 // RunWorkload boots the actor as a cloud-hypervisor micro-VM and starts its containers.
 //
-// ateom boots cloud-hypervisor directly (no kata shim) and gives each container an
-// overlay rootfs: its OCI image read-only over virtio-fs (the lower) plus a guest
-// tmpfs (the writable upper). It drives the kata clh boot (vm.create kernel+image+fs,
+// ateom boots cloud-hypervisor directly (no kata shim) and gives each container a
+// rootfs merged ON THE HOST: overlay(image lower + host-disk upper), served over the
+// one kataShared virtio-fs share. It drives the kata clh boot (vm.create kernel+image+fs,
 // add-net, vm.boot) and the post-boot setup the shim would otherwise do (agent
 // CreateSandbox + guest network config) before having the kata-agent assemble and
 // start each container.
@@ -406,8 +401,8 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 		return err
 	}
 
-	// Prepare each container's OCI spec + record its bundle rootfs (the overlay RO
-	// lower). No host disk — the rootfs is overlay(virtio-fs lower + guest-tmpfs upper).
+	// Prepare each container's OCI spec + record its bundle rootfs (the overlay
+	// lower the host merges under the container's writable upper).
 	// Size the guest container cgroup to the post-reserve guest RAM (matching memMiB)
 	// so the in-guest cgroup limit binds against actual guest memory.
 	guestSize, err := s.guestSize(sz)
@@ -425,10 +420,17 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 		return fmt.Errorf("while creating VM dir: %w", err)
 	}
 
-	// Stage the overlay RO lowers (bind each image into the shared dir) + start the
-	// virtiofsd that serves them. CH connects to it at vm.create and demand-pages for
-	// the actor's lifetime, so ateom owns the process (killed in teardownActor).
-	vfsdCmd, err := s.stageOverlayLowers(ctx, rr, actorUID, ctrs)
+	// A cold boot starts from the bare image: give it a pristine host upper dir
+	// (atelet's actor-dir reset does not know this directory; see rootfsupper.go).
+	if err := resetRootfsUpperDir(actorUID); err != nil {
+		return err
+	}
+
+	// Assemble each container's merged rootfs on the host (overlay of image lower +
+	// host upper, mounted into the shared dir) + start the ONE virtiofsd that serves
+	// them. CH connects to it at vm.create and demand-pages for the actor's
+	// lifetime, so ateom owns the process (killed in teardownActor).
+	vfsdCmd, err := s.stageMergedRootfs(ctx, rr, actorUID, ctrs)
 	if err != nil {
 		return err
 	}
@@ -475,9 +477,9 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 	}()
 
 	// Assemble the CH VmConfig (kata-compatible cmdline, RO kata image on /dev/vda +
-	// the virtio-fs device for the overlay RO lower; no actor virtio-blk disks — the
-	// writable upper is a guest tmpfs). serialLog is also read on a failed agent dial
-	// below, so keep it here.
+	// the virtio-fs devices; no actor virtio-blk disks — rootfs writes land in the
+	// host-side overlay upper through the shared mount). serialLog is also read on a
+	// failed agent dial below, so keep it here.
 	serialLog := filepath.Join(kata.VMDir(actorUID), "serial.log")
 	vmCfg := buildVMConfig(actorUID, kernel, image, kparams, serialLog, memMiB, vcpus, durable)
 	if err := client.CreateVM(ctx, vmCfg); err != nil {
@@ -548,14 +550,14 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 	}
 	s.running[actorUID] = ra
 
-	// Forward each container's stdout/stderr into the pod logs. The overlay workload's
-	// container/exec id is <name>_ovl (see startOverlayContainer), so key the streams by
-	// that and tag with the display container name. The goroutines read over ac for the
-	// actor's lifetime and exit (io.EOF) when teardownActor closes ac.
+	// Forward each container's stdout/stderr into the pod logs, keyed by the
+	// container id (== the name; see StartRootfsContainer). The goroutines read
+	// over ac for the actor's lifetime and exit (io.EOF) when teardownActor
+	// closes ac.
 	workloadIDs := make([]string, 0, len(ctrs))
 	for _, c := range ctrs {
-		s.startActorLogForwarding(ac, p.actorRef, actorUID, templateNS, templateName, overlayWorkloadID(c.name), c.name)
-		workloadIDs = append(workloadIDs, overlayWorkloadID(c.name))
+		s.startActorLogForwarding(ac, p.actorRef, actorUID, templateNS, templateName, c.name, c.name)
+		workloadIDs = append(workloadIDs, c.name)
 	}
 
 	// Publish the guest to GetWorkloadStats, past every error return above: a
@@ -571,9 +573,8 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 // buildActorContainers prepares each of the actor's containers for the shared
 // micro-VM: it loads the OCI spec from the per-container bundle, injects guest DNS,
 // and records the bundle rootfs that backs the overlay's RO lower. No host disk is
-// built — the rootfs is overlay(virtio-fs RO lower + guest-tmpfs upper); the lowers
-// are bound into virtiofsd's shared dir in stageOverlayLowers after the sandbox state
-// is clean. Both RunWorkload and RestoreWorkload go through here.
+// mounted here — the merged overlays are assembled in stageMergedRootfs after the
+// sandbox state is clean. Both RunWorkload and RestoreWorkload go through here.
 func (s *AteomService) buildActorContainers(actorUID string, containers []*ateompb.Container, size sizing.SandboxSize) ([]actorContainer, error) {
 	netnsPath := ateompath.AteomNetNSPath(s.podUID)
 	ctrs := make([]actorContainer, len(containers))
@@ -589,7 +590,7 @@ func (s *AteomService) buildActorContainers(actorUID string, containers []*ateom
 		// overlay spec). Everything downstream — the resolv.conf write below,
 		// the bind into virtiofsd's shared dir, the read-only remount — then
 		// sees the composed tree, with host-side writes landing in the bundle's
-		// private upper. The guest still builds its own tmpfs upper on top.
+		// private upper. The guest still builds its own writable upper on top.
 		if err := imagecache.SetupBundleRootfs(bundle); err != nil {
 			return nil, fmt.Errorf("while composing rootfs for %q: %w", cn, err)
 		}
@@ -611,16 +612,19 @@ func (s *AteomService) buildActorContainers(actorUID string, containers []*ateom
 	return ctrs, nil
 }
 
-// stageOverlayLowers makes each container's RO lower available to virtiofsd by
-// bind-mounting its OCI image rootfs into virtiofsd's find-paths location
-// (SharedDir(id)/<cid>/rootfs), then starts the one virtiofsd that serves them all.
-// Must run AFTER CleanupSandboxState (which wipes SharedDir) and the VM dir exists.
-// The returned virtiofsd cmd outlives this call (CH demand-pages from it); the caller
-// owns it (tracked on runningActor, killed in teardownActor).
-func (s *AteomService) stageOverlayLowers(ctx context.Context, rr resolvedRuntime, id string, ctrs []actorContainer) (*exec.Cmd, error) {
+// stageMergedRootfs assembles each container's merged rootfs on the host
+// (overlay: image lower + the actor's rootfs-upper dirs) at virtiofsd's
+// find-paths location (SharedDir(id)/<cid>/rootfs), then starts the ONE
+// virtiofsd that serves them all. Must run AFTER CleanupSandboxState (which
+// wipes SharedDir) and resetRootfsUpperDir/untarRootfsUpper (which own the
+// upper contents). The returned virtiofsd cmd outlives this call (CH
+// demand-pages from it); the caller owns it (tracked on runningActor, killed
+// in teardownActor).
+func (s *AteomService) stageMergedRootfs(ctx context.Context, rr resolvedRuntime, id string, ctrs []actorContainer) (*exec.Cmd, error) {
+	upperBase := rootfsUpperDir(id)
 	for _, c := range ctrs {
-		if err := kata.ReconstructSharedDirFromImage(ctx, c.bundleRootfs, id, c.name); err != nil {
-			return nil, fmt.Errorf("while staging overlay lower for %q: %w", c.name, err)
+		if err := kata.StageMergedRootfs(ctx, c.bundleRootfs, upperBase, id, c.name); err != nil {
+			return nil, fmt.Errorf("while staging merged rootfs for %q: %w", c.name, err)
 		}
 	}
 	vfsdLog, _ := os.OpenFile(virtiofsdLogPath(id), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
@@ -628,7 +632,11 @@ func (s *AteomService) stageOverlayLowers(ctx context.Context, rr resolvedRuntim
 		Binary:     rr.virtiofsd,
 		SocketPath: kata.VirtiofsdSocketPath(id),
 		SharedDir:  kata.SharedDir(id),
-		Log:        vfsdLog,
+		// Writable share whose host contents also change on restore (the upper
+		// is re-materialized from the snapshot tar) — same reasoning as the
+		// durable-dir share.
+		Cache: "auto",
+		Log:   vfsdLog,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("while starting virtiofsd: %w", err)
@@ -726,6 +734,7 @@ func (s *AteomService) guestSize(sz sizing.SandboxSize) (sizing.SandboxSize, err
 //
 // withDurable adds a second virtio-fs device for the actor's writable durable-dir
 // volumes (see durable.go), served by its own virtiofsd on the same PCI segment.
+// The disk-backed rootfs upper share (see rootfsupper.go) is always present.
 func buildVMConfig(id, kernel, image, kparams, serialLog string, memMiB, vcpus int, withDurable bool) ch.VmConfig {
 	console := "ttyS0"
 	if runtime.GOARCH == "arm64" {
@@ -752,9 +761,9 @@ func buildVMConfig(id, kernel, image, kparams, serialLog string, memMiB, vcpus i
 	}
 }
 
-// buildFsConfigs returns the VM's virtio-fs devices: the overlay RO lower's
-// share, plus the writable durable-dir share when the actor has one. Both sit on
-// PCI segment 1 (the segment buildVMConfig reserves for virtio-fs).
+// buildFsConfigs returns the VM's virtio-fs devices: the merged rootfs share,
+// plus the writable durable-dir share when the actor has one. Both sit on PCI
+// segment 1 (the segment buildVMConfig reserves for virtio-fs).
 func buildFsConfigs(id string, withDurable bool) []ch.FsConfig {
 	fs := []ch.FsConfig{{
 		Tag: kata.FsTag, Socket: kata.VirtiofsdSocketPath(id),
@@ -777,8 +786,8 @@ func buildFsConfigs(id string, withDurable bool) []ch.FsConfig {
 // durable says the actor has durable-dir volumes: the sandbox then also mounts
 // the writable durable share, and each container binds the volumes it declared.
 func (s *AteomService) startActorContainers(ctx context.Context, ac *kata.AgentClient, id, vsockPath string, ctrs []actorContainer, durable bool) error {
-	// Establish the agent sandbox + the kataShared virtio-fs mount (the RO base for
-	// every container's overlay lower). All containers share it, so use the first
+	// Establish the agent sandbox + the kataShared virtio-fs mount (every
+	// container's merged rootfs). All containers share it, so use the first
 	// container's hostname.
 	sbCtx, sbCancel := context.WithTimeout(ctx, 20*time.Second)
 	err := ac.CreateSandboxForActor(sbCtx, id, ctrs[0].spec.Hostname, durable)
@@ -799,41 +808,31 @@ func (s *AteomService) startActorContainers(ctx context.Context, ac *kata.AgentC
 	}
 
 	for _, c := range ctrs {
-		if err := startOverlayContainer(ctx, ac, vsockPath, c); err != nil {
+		if err := startRootfsContainer(ctx, ac, vsockPath, c); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// startOverlayContainer brings up one container's rootfs as overlay(virtio-fs RO
-// lower + guest-tmpfs upper): a carrier container (id == name) eager-binds the RO base
-// to /run/kata-containers/<name>/rootfs, then the workload (id == <name>_ovl) overlays
-// it with a tmpfs upper. On failure it dumps the guest overlay state.
+// startRootfsContainer brings up one container on its host-merged rootfs (the
+// stock kata flow: create + start against shared/<name>/rootfs). On failure it
+// dumps the guest's view of the shared tree.
 //
-// With a durable-dir volume, the WORKLOAD also binds it at the container's declared
-// mount paths. The carrier deliberately does not: its rootfs is the read-only lower,
-// where the agent could not create a missing mount point.
-func startOverlayContainer(ctx context.Context, ac *kata.AgentClient, vsockPath string, c actorContainer) error {
-	carrierCtx, carrierCancel := context.WithTimeout(ctx, 30*time.Second)
-	err := ac.CreateCarrier(carrierCtx, c.name, c.spec)
-	carrierCancel()
-	if err != nil {
-		dump := kata.DebugConsoleDump(ctx, vsockPath, "echo '== shared/containers =='; ls -la /run/kata-containers/shared/containers/ 2>&1 | head -40")
-		slog.ErrorContext(ctx, "carrier create failed; dump", slog.String("container", c.name), slog.String("dump", dump))
-		return fmt.Errorf("while creating carrier %q: %w", c.name, err)
-	}
-
-	upperBase := kata.OverlayUpperBase(c.name)
-	wlCtx, wlCancel := context.WithTimeout(ctx, 30*time.Second)
-	err = ac.StartOverlayWorkload(wlCtx, c.name, overlayWorkloadID(c.name), upperBase, workloadSpec(c))
-	wlCancel()
+// With a durable-dir volume, the container also binds it at its declared mount
+// paths (workloadSpec) — the merged rootfs is writable, so the agent can create
+// missing mount points.
+func startRootfsContainer(ctx context.Context, ac *kata.AgentClient, vsockPath string, c actorContainer) error {
+	cCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	err := ac.StartRootfsContainer(cCtx, c.name, workloadSpec(c))
+	cancel()
 	if err != nil {
 		dump := kata.DebugConsoleDump(ctx, vsockPath,
-			"echo '== upper =='; ls -la "+upperBase+" 2>&1; echo '== lower =='; ls /run/kata-containers/"+c.name+"/rootfs/ 2>&1 | head; "+
-				"echo '== mounts =='; grep -E 'kata|overlay' /proc/mounts 2>&1")
-		slog.ErrorContext(ctx, "overlay workload failed; dump", slog.String("container", c.name), slog.String("dump", dump))
-		return fmt.Errorf("while starting overlay workload %q: %w", c.name, err)
+			"echo '== shared/containers =='; ls -la /run/kata-containers/shared/containers/ 2>&1 | head -40; "+
+				"echo '== rootfs =='; ls /run/kata-containers/shared/containers/"+c.name+"/rootfs/ 2>&1 | head; "+
+				"echo '== mounts =='; grep -E 'kata|virtiofs' /proc/mounts 2>&1")
+		slog.ErrorContext(ctx, "rootfs container failed; dump", slog.String("container", c.name), slog.String("dump", dump))
+		return fmt.Errorf("while starting rootfs container %q: %w", c.name, err)
 	}
 	return nil
 }

@@ -137,7 +137,7 @@ func (a *AgentClient) Close() error {
 // CreateContainer asks the agent to create a container: mount its storages (in
 // order) and build the rootfs, then fork the parked init process. This is the
 // hook point — the agent mounts storages[] (here: a bind of the virtio-fs lower
-// followed by the tmpfs-upper overlay) before init_rootfs consumes the rootfs.
+// followed by the disk-backed-upper overlay) before init_rootfs consumes the rootfs.
 // Mirrors grpc.AgentService/CreateContainer (returns google.protobuf.Empty).
 func (a *AgentClient) CreateContainer(ctx context.Context, req *agentpb.CreateContainerRequest) error {
 	if err := a.client.Call(ctx, "grpc.AgentService", "CreateContainer", req, &emptypb.Empty{}); err != nil {
