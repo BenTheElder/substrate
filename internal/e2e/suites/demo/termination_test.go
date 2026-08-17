@@ -16,6 +16,7 @@ package demo
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -115,6 +116,31 @@ func TestGracefulWorkerTermination(t *testing.T) {
 	}
 	if pod := actor.GetWorkerAssignment().GetWorkerPod(); pod != "" {
 		t.Errorf("actor still bound to worker pod %q, expected empty", pod)
+	}
+}
+
+// waitForWorkerDraining polls ListWorkers until the named worker reports
+// STATE_DRAINING, i.e. the control plane has seen the pod's DeletionTimestamp and
+// the graceful shutdown is under way. Tests that want to act "during termination"
+// synchronise on this rather than on a duration: how long the drain takes to start
+// — and how long the actor survives it — differs by sandbox class.
+func waitForWorkerDraining(ctx context.Context, t *testing.T, clients *e2e.Clients, podName string, timeout time.Duration) error {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		resp, err := clients.SubstrateAPI.ListWorkers(ctx, &ateapipb.ListWorkersRequest{})
+		if err == nil {
+			for _, w := range resp.GetWorkers() {
+				if w.GetWorkerPod() == podName && w.GetState() == ateapipb.Worker_STATE_DRAINING {
+					t.Logf("Worker %s is DRAINING", podName)
+					return nil
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("worker %s did not reach DRAINING within %s", podName, timeout)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -295,8 +321,14 @@ func TestGracefulWorkerTerminationSuspend(t *testing.T) {
 		t.Fatalf("failed to delete worker pod %s/%s: %v", podNS, podName, err)
 	}
 
-	// Wait 2 seconds to make sure the SIGTERM was sent and the container is in its sleep phase.
-	time.Sleep(2 * time.Second)
+	// Wait for the control plane to observe the deletion and mark the worker
+	// DRAINING, which is the point from which a suspend is meant to be served
+	// mid-drain. Sleeping a fixed interval instead raced the actor's own progress
+	// to CRASHED — on micro-VM it lost, and the suspend below was rejected with
+	// "MarkSuspending prerequisite not met ... (got: STATUS_CRASHED)".
+	if err := waitForWorkerDraining(ctx, t, clients, podName, 60*time.Second); err != nil {
+		t.Fatalf("worker %s not DRAINING after pod deletion: %v", podName, err)
+	}
 
 	// Suspend the actor.
 	t.Logf("Suspending actor %q during termination", actorID)
