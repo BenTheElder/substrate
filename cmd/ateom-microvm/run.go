@@ -94,6 +94,11 @@ type runningActor struct {
 	// post-restore dial), which loses both log forwarding and guest stats for
 	// this activation.
 	guestAgent *kata.AgentClient
+
+	// workloadIDs are the kata overlay-workload container ids (overlayWorkloadID of
+	// each container name) running in the guest. The SIGTERM handler signals and
+	// waits on these to gracefully stop the actor before the VM is torn down.
+	workloadIDs []string
 }
 
 // baseIDFile is a tiny snapshot file (under the checkpoint/restore dir) holding
@@ -142,6 +147,17 @@ const maxActorContainers = 25
 // under their bare name, but guests restored from legacy snapshots still hold
 // the _ovl containers, so log forwarding for those lineages keys on this.
 func overlayWorkloadID(name string) string { return name + "_ovl" }
+
+// overlayWorkloadIDs returns the overlay-workload container ids for the actor's
+// containers, in order. Recorded on runningActor so the SIGTERM handler knows
+// which guest workloads to signal and wait on.
+func overlayWorkloadIDs(ctrs []actorContainer) []string {
+	ids := make([]string, 0, len(ctrs))
+	for _, c := range ctrs {
+		ids = append(ids, overlayWorkloadID(c.name))
+	}
+	return ids
+}
 
 // actorContainer is one of the actor's containers prepared for the shared micro-VM:
 // its name (also the kata containerID + the merged rootfs's find-paths subdir), the
@@ -222,6 +238,17 @@ func writeGuestResolvConf(rootfs string) error {
 func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkloadRequest) (resp *ateompb.RunWorkloadResponse, retErr error) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
+	if err := s.rejectIfDraining(); err != nil {
+		return nil, err
+	}
+
+	// Register the boot so a SIGTERM arriving mid-cold-boot cancels it rather than
+	// waiting out the whole thing holding lock.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	s.setActiveRPC(rpcRunWorkload, cancel)
+	defer s.clearActiveRPC()
+
 	if err := s.deactivateActorNetworking(ctx); err != nil {
 		return nil, err
 	}
@@ -544,7 +571,7 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 		return fmt.Errorf("while waiting for container readyz: %w", err)
 	}
 
-	ra := &runningActor{chCmd: chCmd, vfsdCmd: vfsdCmd, durableVfsdCmd: durableVfsdCmd, apiSocket: apiSocket, baseID: actorUID, guestAgent: ac}
+	ra := &runningActor{chCmd: chCmd, vfsdCmd: vfsdCmd, durableVfsdCmd: durableVfsdCmd, apiSocket: apiSocket, baseID: actorUID, guestAgent: ac, workloadIDs: overlayWorkloadIDs(ctrs)}
 	if err := s.activateActorNetworking(p.actorRef.Atespace, p.actorRef.Name, egress); err != nil {
 		return err
 	}
