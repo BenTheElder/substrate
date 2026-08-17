@@ -129,16 +129,33 @@ const kataAgentPath = "/usr/bin/kata-agent"
 // for the cloud-hypervisor VMM + virtiofsd, which run as host processes in the same
 // pod cgroup as the guest RAM; without a margin the pod OOMs. Overridable per
 // deployment via --vmm-mem-reserve-mib (see AteomService.memReserveMiB).
-const vmmMemReserveMiB = 256
+//
+// Measured on the worker pod's cgroup with one 256MiB-guest actor: the VMM stack's own
+// cost is ~12MiB (anon 8.1 + kernel 3.7; the rest of cloud-hypervisor's RSS is the guest
+// memfd, already accounted as guest RAM), and two virtiofsds are ~3MiB each. What needs
+// the rest of the margin is transient: a pause/resume cycle took the cgroup from 94MiB
+// to 153MiB, and the 57MiB difference was page cache from writing and reading the
+// snapshot.
+//
+// That transient scales with snapshot size, so no fixed reserve is right for every guest
+// size — this one is halved rather than cut to the ~32MiB the steady state would justify.
+// The fix that would let it drop that far is keeping snapshot I/O out of the page cache
+// (posix_fadvise(DONTNEED) after the checkpoint write and the restore read); until then
+// the margin absorbs it, and a deployment running large guests can raise the flag.
+const vmmMemReserveMiB = 128
 
 // minGuestMemMiB is the floor for guest RAM (the declared limit minus the VMM
 // reserve); a declared memory limit that leaves less is rejected at cold boot with a
 // clear error instead of being silently honored (see resolveGuestMemMiB), since too
-// little RAM makes the guest hang on boot rather than fail cleanly. It is a
-// conservative estimate; calibrate against a measured kata boot minimum if a tighter
-// bound is needed, and keep the admission floor on ActorTemplate.spec.resources in
-// sync (it is this value + vmmMemReserveMiB).
-const minGuestMemMiB = 256
+// little RAM makes the guest hang on boot rather than fail cleanly. Keep the admission
+// floor on ActorTemplate.spec.resources in sync (it is this value + vmmMemReserveMiB).
+//
+// Measured against the counter demo on a guest booting the agent as PID 1: 32MiB never
+// reaches Ready, 64MiB boots but idles with 1.1MB free (it only survives because page
+// cache is reclaimable), and 128MiB idles with 43MiB free. So 128 is the smallest size
+// with real headroom, not the smallest that boots — a workload heavier than a static Go
+// binary needs more, and this floor cannot know how much.
+const minGuestMemMiB = 128
 
 // maxActorContainers is a sanity cap on containers per actor (all share the one
 // micro-VM + virtiofsd). 25 is far above any real pod.
