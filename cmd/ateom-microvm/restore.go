@@ -200,6 +200,7 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 	if err := os.MkdirAll(kata.VMDir(actorUID), 0o700); err != nil {
 		return fmt.Errorf("while creating VM dir: %w", err)
 	}
+	tPrep := time.Now()
 
 	// Merged-rootfs snapshots carry the upper as rootfs-upper.tar (the tar's
 	// presence is what says which model the guest expects). Start
@@ -249,6 +250,7 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 	if err != nil {
 		return err
 	}
+	tBundles := time.Now()
 	// The overlay mounts need the upper on disk: join the background untar (still
 	// overlapped with the bundle preparation above), then assemble the merged trees
 	// and serve them.
@@ -257,6 +259,7 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 	if untarErr != nil {
 		return untarErr
 	}
+	tUpper := time.Now()
 	vfsdCmd, err := s.stageMergedRootfs(ctx, rr, actorUID, ctrs)
 	if err != nil {
 		return err
@@ -267,6 +270,8 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 			_, _ = vfsdCmd.Process.Wait()
 		}
 	}()
+
+	tLowers := time.Now()
 
 	// Restart the durable-dir share's virtiofsd over the contents the caller
 	// restored. The guest reattaches to it by the socket path rewritten into the
@@ -284,6 +289,8 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 			}
 		}()
 	}
+
+	tDurable := time.Now()
 
 	// Networking: rebuild the per-activation veth + tap; the snapshot's virtio-net
 	// is fd-backed, so CH needs fresh tap FDs (net_fds) on restore.
@@ -339,6 +346,7 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 	// Relaunch CH and restore with the tap FDs attached (SCM_RIGHTS). CH reopens
 	// /dev/vda (image) + each /dev/vd{b+i} (actor rootfs) from the snapshot config paths.
 	apiSocket := filepath.Join(kata.VMDir(actorUID), "clh-api-restore.sock")
+	tTap := time.Now()
 	chCmd, client, err := ch.LaunchVMM(ctx, ch.LaunchVMMOptions{
 		Binary: rr.chBinary, APISocket: apiSocket, Stdout: slogWriter{ctx}, Stderr: slogWriter{ctx},
 	})
@@ -360,20 +368,40 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 	//   - Eager: every populated extent is read here and now. Nothing pages from the
 	//     source afterwards and nothing merges against it, so it is dropped below and
 	//     the next snapshot stands on its own.
+	tLaunch := time.Now()
 	memMode := restoreMemMode(ctx, client.Info())
 	slog.InfoContext(ctx, "restoring guest memory",
 		slog.String("mode", memMode), slog.String("vmm_version", client.Info().Version))
 	if err := client.RestoreWithNetFDs(ctx, restoreDir, restoredNets, memMode); err != nil {
 		return fmt.Errorf("while restoring VM with net FDs: %w", err)
 	}
+	tVMRestore := time.Now()
 	if err := client.Resume(ctx); err != nil {
 		return fmt.Errorf("while resuming restored guest: %w", err)
 	}
+	tResume := time.Now()
 
 	// Block until every readyz-enabled container reports 200.
 	if err := readyz.WaitAll(ctx, containers, ateomnet.ActorVethIP); err != nil {
 		return fmt.Errorf("while waiting for container readyz: %w", err)
 	}
+
+	// Where a resume goes. Like the boot phases, this used to be a single total,
+	// which hid that a first (cold) restore and a later (warm) one differ by more
+	// than 5x on the same actor. upper/lowers is the host reassembling the rootfs;
+	// vm_restore is cloud-hypervisor reading guest RAM back.
+	slog.InfoContext(ctx, "Actor restore phases", slog.String("id", actorUID),
+		slog.Duration("prep", tPrep.Sub(tStart)),
+		slog.Duration("bundles", tBundles.Sub(tPrep)),
+		slog.Duration("upper_join", tUpper.Sub(tBundles)),
+		slog.Duration("lowers", tLowers.Sub(tUpper)),
+		slog.Duration("durable", tDurable.Sub(tLowers)),
+		slog.Duration("tap", tTap.Sub(tDurable)),
+		slog.Duration("vmm_launch", tLaunch.Sub(tTap)),
+		slog.Duration("vm_restore", tVMRestore.Sub(tLaunch)),
+		slog.Duration("resume", tResume.Sub(tVMRestore)),
+		slog.Duration("readyz", time.Since(tResume)),
+		slog.Duration("total", time.Since(tStart)))
 
 	// An eager restore has read the whole snapshot into guest memory, and nothing
 	// merges against it afterwards, so the staged copy is dead weight from here on —

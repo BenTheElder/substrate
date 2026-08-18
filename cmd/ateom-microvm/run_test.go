@@ -203,9 +203,6 @@ func TestInitParams(t *testing.T) {
 // The SIGTERM path signals these ids over ttrpc, and the agent rejects an id it
 // does not know with InvalidContainerId — which aborts the whole graceful
 // shutdown, so a stale id here silently costs the guest its clean exit.
-// The SIGTERM path signals these ids over ttrpc, and the agent rejects an id it
-// does not know with InvalidContainerId — which aborts the whole graceful
-// shutdown, so a stale id here silently costs the guest its clean exit.
 func TestWorkloadIDs(t *testing.T) {
 	ctrs := []actorContainer{{name: "counter"}, {name: "sidecar"}}
 	got := workloadIDs(ctrs)
