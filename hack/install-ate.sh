@@ -122,6 +122,18 @@ run_kubectl() {
     "$@"
 }
 
+# run_kubectl_fatal runs kubectl and aborts the install if it fails. Demo
+# handlers need this: the dispatcher below calls them from an `if` condition,
+# which suppresses errexit for everything they run, so a plain run_kubectl that
+# fails is silently ignored -- a broken wait then costs its whole timeout and
+# lets the install "succeed" anyway.
+run_kubectl_fatal() {
+  if ! run_kubectl "$@"; then
+    echo "error: kubectl $* failed" >&2
+    exit 1
+  fi
+}
+
 run_kubectl_ate() {
   go run ./cmd/kubectl-ate \
     ${KUBECTL_CONTEXT:+--context=${KUBECTL_CONTEXT}} \
