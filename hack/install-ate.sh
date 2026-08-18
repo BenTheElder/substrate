@@ -280,6 +280,18 @@ apply_otel_config() {
   fi
 }
 
+# Apply the opt-in PostgreSQL StatefulSet. On kind it goes through an overlay
+# that right-sizes the CPU request for a 4-vCPU node; see
+# manifests/ate-install/kind/postgres/kustomization.yaml.
+apply_postgres() {
+  if [[ "${ATE_INSTALL_KIND:-false}" == "true" ]]; then
+    kubectl kustomize manifests/ate-install/kind/postgres \
+      --load-restrictor LoadRestrictionsNone | run_kubectl apply -f -
+  else
+    run_kubectl apply -f manifests/ate-install/postgres.yaml
+  fi
+}
+
 # --otlp-endpoint sends all control plane telemetry to a different collector for
 # the duration of a measurement. One patch is sufficient: each component reads
 # this ConfigMap through envFrom, and ate-controller copies the values to the
@@ -377,7 +389,7 @@ deploy_postgres() {
   run_kubectl rollout status deployment/podcertificate-controller \
     -n podcertificate-controller-system --timeout=120s
   wait_for_podcertificate_trust_bundles
-  run_kubectl apply -f manifests/ate-install/postgres.yaml
+  apply_postgres
   run_kubectl rollout status statefulset/postgres -n ate-system --timeout=120s
 }
 
@@ -583,7 +595,7 @@ deploy_ate_system() {
   # Store-specific overlay composition can remove the unused Valkey resources
   # in a separate change.
   if [[ "$(store_backend)" == "postgres" ]]; then
-    run_kubectl apply -f manifests/ate-install/postgres.yaml
+    apply_postgres
   fi
 
   local manifests=""
