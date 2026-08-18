@@ -184,11 +184,13 @@ func TestCreateActor_RejectsDifferentTemplateForDataSnapshot(t *testing.T) {
 		t.Fatalf("Get source ActorTemplate: %v", err)
 	}
 	snapshot, err := tc.persistence.CreateActorSnapshot(context.Background(), &ateapipb.ActorSnapshot{
-		Metadata:         &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "data-snapshot"},
-		SourceActor:      &ateapipb.ObjectRef{Atespace: testAtespace, Name: "source"},
-		ActorTemplateUid: string(tmpl.GetUID()),
-		ContentScope:     ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA,
-		SnapshotUri:      "gs://snapshots/snapshots/" + testAtespace + "/data-snapshot",
+		Metadata: &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "data-snapshot"},
+		Status: &ateapipb.ActorSnapshotStatus{
+			SourceActor:      &ateapipb.ObjectRef{Atespace: testAtespace, Name: "source"},
+			ActorTemplateUid: string(tmpl.GetUID()),
+			ContentScope:     ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA,
+			SnapshotUri:      "gs://snapshots/snapshots/" + testAtespace + "/data-snapshot",
+		},
 	})
 	if err != nil {
 		t.Fatalf("CreateActorSnapshot: %v", err)
@@ -205,7 +207,7 @@ func TestCreateActor_RejectsDifferentTemplateForDataSnapshot(t *testing.T) {
 			Metadata:               &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "clone"},
 			ActorTemplateNamespace: ns,
 			ActorTemplateName:      "tmpl2",
-			SourceSnapshot:         &ateapipb.ActorSnapshotSource{Tag: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "data-snapshot"}},
+			SourceSnapshotTag:      &ateapipb.ObjectRef{Atespace: testAtespace, Name: "data-snapshot"},
 		},
 	})
 	if status.Code(err) != codes.FailedPrecondition {
@@ -242,9 +244,11 @@ func TestCreateActor_RejectsSnapshotWithExternalVolumes(t *testing.T) {
 		t.Fatalf("wait for ActorTemplate update: %v", err)
 	}
 	snapshot, err := tc.persistence.CreateActorSnapshot(context.Background(), &ateapipb.ActorSnapshot{
-		Metadata:         &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "external-volume-snapshot"},
-		ActorTemplateUid: string(template.GetUID()),
-		SnapshotUri:      "gs://snapshots/snapshots/" + testAtespace + "/external-volume-snapshot",
+		Metadata: &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "external-volume-snapshot"},
+		Status: &ateapipb.ActorSnapshotStatus{
+			ActorTemplateUid: string(template.GetUID()),
+			SnapshotUri:      "gs://snapshots/snapshots/" + testAtespace + "/external-volume-snapshot",
+		},
 	})
 	if err != nil {
 		t.Fatalf("CreateActorSnapshot: %v", err)
@@ -262,7 +266,7 @@ func TestCreateActor_RejectsSnapshotWithExternalVolumes(t *testing.T) {
 			Metadata:               &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "clone"},
 			ActorTemplateNamespace: ns,
 			ActorTemplateName:      "tmpl1",
-			SourceSnapshot:         &ateapipb.ActorSnapshotSource{Tag: tagRef},
+			SourceSnapshotTag:      tagRef,
 		},
 	})
 	if status.Code(err) != codes.FailedPrecondition {
@@ -595,8 +599,10 @@ func TestUpdateActor_DeleteRecreateRace(t *testing.T) {
 		Metadata:               &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: testActorID},
 		ActorTemplateNamespace: "ns1",
 		ActorTemplateName:      "tmpl1",
-		Status:                 ateapipb.Actor_STATUS_RUNNING,
-		WorkerAssignment:       &ateapipb.WorkerAssignment{WorkerPod: "pod-a"},
+		Status: &ateapipb.ActorStatus{
+			State:            ateapipb.ActorState_ACTOR_STATE_RUNNING,
+			WorkerAssignment: &ateapipb.WorkerAssignment{WorkerPod: "pod-a"},
+		},
 	})
 	if err != nil {
 		t.Fatalf("seed CreateActor: %v", err)
@@ -610,7 +616,7 @@ func TestUpdateActor_DeleteRecreateRace(t *testing.T) {
 		Interface: persistence,
 		inject: func() {
 			if _, err := persistence.UpdateActor(ctx, actorRef, func(toUpdate *ateapipb.Actor) error {
-				toUpdate.Status = ateapipb.Actor_STATUS_DELETING
+				toUpdate.Status.State = ateapipb.ActorState_ACTOR_STATE_DELETING
 				return nil
 			}); err != nil {
 				t.Fatalf("racing writer: mark deleting: %v", err)
@@ -622,7 +628,7 @@ func TestUpdateActor_DeleteRecreateRace(t *testing.T) {
 				Metadata:               &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: testActorID},
 				ActorTemplateNamespace: "ns1",
 				ActorTemplateName:      "tmpl1",
-				Status:                 ateapipb.Actor_STATUS_SUSPENDED,
+				Status:                 &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED},
 			})
 			if err != nil {
 				t.Fatalf("racing writer: recreate CreateActor: %v", err)
@@ -657,11 +663,11 @@ func TestUpdateActor_DeleteRecreateRace(t *testing.T) {
 	}
 	// The stored record must still be actor B as its creator left it. Any of A's
 	// state showing up here is the clobber.
-	if got := stored.GetStatus(); got != ateapipb.Actor_STATUS_SUSPENDED {
-		t.Errorf("stored status = %v, want %v: recreated actor was overwritten with the deleted actor's state",
-			got, ateapipb.Actor_STATUS_SUSPENDED)
+	if got := stored.GetStatus().GetState(); got != ateapipb.ActorState_ACTOR_STATE_SUSPENDED {
+		t.Errorf("stored state = %v, want %v: recreated actor was overwritten with the deleted actor's state",
+			got, ateapipb.ActorState_ACTOR_STATE_SUSPENDED)
 	}
-	if got := stored.GetWorkerAssignment(); got != nil {
+	if got := stored.GetStatus().GetWorkerAssignment(); got != nil {
 		t.Errorf("stored worker_assignment = %v, want nil: recreated actor inherited the deleted actor's worker", got)
 	}
 	if got := stored.GetWorkerSelector(); got != nil {
@@ -682,18 +688,18 @@ func TestUpdateActor_ConcurrentDisjointUpdates(t *testing.T) {
 		Metadata:               &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: testActorID},
 		ActorTemplateNamespace: "ns1",
 		ActorTemplateName:      "tmpl1",
-		Status:                 ateapipb.Actor_STATUS_RUNNING,
+		Status:                 &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING},
 	}); err != nil {
 		t.Fatalf("seed CreateActor: %v", err)
 	}
 
-	// A suspend workflow bumps status (a field that a later update operation will not touch)
+	// A suspend workflow bumps state (a field that a later update operation will not touch)
 	// inside the handler's read-modify-write window.
 	racing := &conflictInjectingStore{
 		Interface: persistence,
 		inject: func() {
 			if _, err := persistence.UpdateActor(ctx, actorRef, func(toUpdate *ateapipb.Actor) error {
-				toUpdate.Status = ateapipb.Actor_STATUS_SUSPENDING
+				toUpdate.Status.State = ateapipb.ActorState_ACTOR_STATE_SUSPENDING
 				return nil
 			}); err != nil {
 				t.Fatalf("racing writer: mark suspending: %v", err)
@@ -702,7 +708,7 @@ func TestUpdateActor_ConcurrentDisjointUpdates(t *testing.T) {
 	}
 	svc := &Service{persistence: racing}
 
-	// Update operation is changing the worker_selector field, not the actor's status (like the concurrent op)
+	// Update operation is changing the worker_selector field, not the actor's state (like the concurrent op)
 	if _, err := svc.UpdateActor(ctx, &ateapipb.UpdateActorRequest{
 		Actor: &ateapipb.Actor{
 			Metadata:       &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: testActorID},
@@ -717,12 +723,12 @@ func TestUpdateActor_ConcurrentDisjointUpdates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetActor: %v", err)
 	}
-	// Both worker selector and status updates survive
+	// Both worker selector and state updates survive
 	if got := stored.GetWorkerSelector().GetMatchLabels()["tier"]; got != "paid" {
 		t.Errorf("stored worker_selector[tier] = %q, want %q", got, "paid")
 	}
-	if got := stored.GetStatus(); got != ateapipb.Actor_STATUS_SUSPENDING {
-		t.Errorf("stored status = %v, want %v: the concurrent writer's field must survive", got, ateapipb.Actor_STATUS_SUSPENDING)
+	if got := stored.GetStatus().GetState(); got != ateapipb.ActorState_ACTOR_STATE_SUSPENDING {
+		t.Errorf("stored state = %v, want %v: the concurrent writer's field must survive", got, ateapipb.ActorState_ACTOR_STATE_SUSPENDING)
 	}
 }
 
@@ -833,7 +839,7 @@ func TestValidateDeleteActorRequest(t *testing.T) {
 	}
 }
 
-func TestDeleteActor_StatusDeleting(t *testing.T) {
+func TestDeleteActor_StateDeleting(t *testing.T) {
 	ns := namespaceForTest("ns-delete-deleting")
 	tc := setupTest(t, ns)
 	defer tc.cleanup()
@@ -844,7 +850,7 @@ func TestDeleteActor_StatusDeleting(t *testing.T) {
 			Atespace: testAtespace,
 			Name:     "deleting-actor",
 		},
-		Status:                 ateapipb.Actor_STATUS_DELETING,
+		Status:                 &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_DELETING},
 		ActorTemplateNamespace: ns,
 		ActorTemplateName:      "tmpl1",
 	}
@@ -855,7 +861,7 @@ func TestDeleteActor_StatusDeleting(t *testing.T) {
 	if _, err := tc.service.DeleteActor(context.Background(), &ateapipb.DeleteActorRequest{
 		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "deleting-actor"},
 	}); err != nil {
-		t.Fatalf("DeleteActor on STATUS_DELETING actor failed: %v", err)
+		t.Fatalf("DeleteActor on ACTOR_STATE_DELETING actor failed: %v", err)
 	}
 
 	if _, err := tc.persistence.GetActor(context.Background(), resources.ActorRef{Atespace: testAtespace, Name: "deleting-actor"}); err == nil {
@@ -863,7 +869,7 @@ func TestDeleteActor_StatusDeleting(t *testing.T) {
 	}
 }
 
-func TestDeleteActor_WrongStatus(t *testing.T) {
+func TestDeleteActor_WrongState(t *testing.T) {
 	ns := namespaceForTest("ns-delete-wrong-status")
 	tc := setupTest(t, ns)
 	defer tc.cleanup()
@@ -874,7 +880,7 @@ func TestDeleteActor_WrongStatus(t *testing.T) {
 			Atespace: testAtespace,
 			Name:     "running-actor",
 		},
-		Status:                 ateapipb.Actor_STATUS_RUNNING,
+		Status:                 &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING},
 		ActorTemplateNamespace: ns,
 		ActorTemplateName:      "tmpl1",
 	}
@@ -886,7 +892,7 @@ func TestDeleteActor_WrongStatus(t *testing.T) {
 		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "running-actor"},
 	})
 	if err == nil {
-		t.Fatalf("expected DeleteActor on STATUS_RUNNING actor to fail, but it succeeded")
+		t.Fatalf("expected DeleteActor on ACTOR_STATE_RUNNING actor to fail, but it succeeded")
 	}
 }
 
@@ -916,12 +922,14 @@ func TestDeleteActor_MultipleVolumeDeletionFailures(t *testing.T) {
 			Atespace: testAtespace,
 			Name:     "multi-vol-actor",
 		},
-		Status:                 ateapipb.Actor_STATUS_SUSPENDED,
 		ActorTemplateNamespace: ns,
 		ActorTemplateName:      "tmpl1",
-		ActorVolumes: []*ateapipb.ExternalVolume{
-			{VolumeName: "vol1", StorageVolumeId: "storage-vol-1", Status: ateapipb.ExternalVolume_STATUS_CREATED, VolumeType: "substrate.io/mock"},
-			{VolumeName: "vol2", StorageVolumeId: "storage-vol-2", Status: ateapipb.ExternalVolume_STATUS_CREATED, VolumeType: "substrate.io/mock"},
+		Status: &ateapipb.ActorStatus{
+			State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED,
+			ActorVolumes: []*ateapipb.ExternalVolume{
+				{VolumeName: "vol1", StorageVolumeId: "storage-vol-1", Status: ateapipb.ExternalVolume_STATUS_CREATED, VolumeType: "substrate.io/mock"},
+				{VolumeName: "vol2", StorageVolumeId: "storage-vol-2", Status: ateapipb.ExternalVolume_STATUS_CREATED, VolumeType: "substrate.io/mock"},
+			},
 		},
 	}
 	if _, err := tc.persistence.CreateActor(context.Background(), actor); err != nil {
