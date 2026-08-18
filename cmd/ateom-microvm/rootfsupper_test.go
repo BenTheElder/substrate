@@ -19,6 +19,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -41,11 +42,14 @@ func upperDirWith(t *testing.T, files map[string]string) string {
 }
 
 func TestRootfsUpperRoundTrip(t *testing.T) {
-	// Checkpoint: every container's upper/work, archived while the guest is
-	// paused. The layout under the dir is exactly what find-paths re-opens.
+	// Checkpoint: every container's upper, archived while the guest is paused.
+	// The fs/ layout under the dir is exactly what find-paths re-opens; the
+	// workdirs are deliberately left out of the archive (inert with index=off,
+	// recreated at mount).
 	files := map[string]string{
 		"app_ovl/fs/home/agent/notes.txt": "rootfs write",
 		"app_ovl/work/index":              "",
+		"app_ovl/work/#1/tmp.bin":         "in-flight copy-up temp",
 		"sidecar_ovl/fs/var/log/s.log":    "sidecar write",
 	}
 	src := upperDirWith(t, files)
@@ -60,6 +64,9 @@ func TestRootfsUpperRoundTrip(t *testing.T) {
 		t.Fatalf("untarRootfsUpper: %v", err)
 	}
 	for rel, want := range files {
+		if strings.Contains(rel, "/work/") {
+			continue // asserted absent below
+		}
 		got, err := os.ReadFile(filepath.Join(dst, rel))
 		if err != nil {
 			t.Errorf("reading restored %q: %v", rel, err)
@@ -68,6 +75,11 @@ func TestRootfsUpperRoundTrip(t *testing.T) {
 		if string(got) != want {
 			t.Errorf("restored %q = %q, want %q", rel, got, want)
 		}
+	}
+	// The workdirs must NOT survive the round trip: they are excluded from the
+	// archive (dead weight; overlayfs rebuilds them at mount).
+	if _, err := os.Stat(filepath.Join(dst, "app_ovl/work")); !os.IsNotExist(err) {
+		t.Errorf("workdir survived the snapshot round trip (stat err = %v), want it excluded", err)
 	}
 	if _, err := os.Stat(filepath.Join(dst, "app_ovl/fs/stale.txt")); !os.IsNotExist(err) {
 		t.Errorf("stale pre-restore content survived untarRootfsUpper (stat err = %v), want it wiped", err)

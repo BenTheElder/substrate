@@ -48,16 +48,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/tarutil"
 	"github.com/agent-substrate/substrate/internal/ateompath"
 )
 
 // rootfsUpperTarFile is the snapshot file holding the tar of the actor's
-// rootfs uppers. Its entries are <containerID>/fs/... and <containerID>/work/...
-// relative to rootfsUpperDir — the same layout kata.UpperWorkDirs mounts — so
-// extraction restores exactly the tree the merged overlays (and the guest's
-// find-paths) expect.
+// rootfs uppers. Its entries are <containerID>/fs/... relative to
+// rootfsUpperDir — the upperdir half of the layout kata.UpperWorkDirs mounts —
+// so extraction restores exactly the tree the merged overlays (and the guest's
+// find-paths) expect. The workdir half is deliberately absent (see
+// tarRootfsUpper); StageMergedRootfs recreates it at mount.
 const rootfsUpperTarFile = "rootfs-upper.tar"
 
 // rootfsUpperDir is the host directory backing the actor's rootfs overlay
@@ -87,8 +89,19 @@ func resetRootfsUpperDir(actorUID string) error {
 // directory. The caller must have paused the guest first: virtiofsd is
 // write-through, so a completed guest write has reached the host overlay's
 // upper by then, but a running guest could still add more after the walk.
+//
+// Each container's overlay WORKDIR (<cid>/work) is excluded: with index=off
+// pinned on the mount (see kata.StageMergedRootfs) a restored workdir is
+// inert — overlayfs wipes and rebuilds it at mount, and StageMergedRootfs
+// recreates the directory regardless — so archiving it is dead weight on the
+// suspend path. Not always trivial weight, either: a copy-up in flight when
+// the guest paused can leave file-sized temp data there.
 func tarRootfsUpper(ctx context.Context, dir, checkpointDir string) error {
-	if err := tarutil.Create(ctx, filepath.Join(checkpointDir, rootfsUpperTarFile), dir); err != nil {
+	skipWorkdir := func(rel string) bool {
+		parts := strings.Split(rel, "/")
+		return len(parts) == 2 && parts[1] == "work"
+	}
+	if err := tarutil.CreateFiltered(ctx, filepath.Join(checkpointDir, rootfsUpperTarFile), dir, skipWorkdir); err != nil {
 		return fmt.Errorf("while archiving rootfs uppers from %q: %w", dir, err)
 	}
 	return nil
