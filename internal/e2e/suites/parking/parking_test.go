@@ -172,7 +172,8 @@ func createParkingFixture(ctx context.Context, t *testing.T, clients *e2e.Client
 		t.Fatalf("CheckEnv failed: %v", err)
 	}
 
-	srcNS, srcName := "ate-demo-counter", "counter"
+	src := e2e.CounterFixture()
+	srcNS, srcName := src.Namespace, src.Name
 	existingWp, err := clients.SubstrateK8s.ApiV1alpha1().WorkerPools(srcNS).Get(ctx, srcName, metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("failed to get source WorkerPool %s/%s: %v", srcNS, srcName, err)
@@ -210,6 +211,10 @@ func createParkingFixture(ctx context.Context, t *testing.T, clients *e2e.Client
 			},
 			SandboxClass: existingAt.Spec.SandboxClass,
 			Containers:   existingAt.Spec.Containers,
+			// The source's limits size the sandbox. Copying them matters most on
+			// micro-VM, where an ActorTemplate that declares none boots the guest
+			// at the kata config default (2GiB) instead of the demo's 512Mi.
+			Resources: existingAt.Spec.Resources,
 			SnapshotsConfig: v1alpha1.SnapshotsConfig{
 				Location: "gs://" + env["BUCKET_NAME"] + "/e2e-parking-" + nsObj.Name,
 			},
@@ -221,7 +226,7 @@ func createParkingFixture(ctx context.Context, t *testing.T, clients *e2e.Client
 	}
 
 	t.Logf("Waiting for ActorTemplate %s to be Ready...", at.Name)
-	tmplCtx, tmplCancel := context.WithTimeout(ctx, 90*time.Second)
+	tmplCtx, tmplCancel := context.WithTimeout(ctx, e2e.TemplateReadyTimeout(t))
 	defer tmplCancel()
 	var lastPhase v1alpha1.PhaseType
 	for {

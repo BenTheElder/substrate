@@ -19,9 +19,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -59,9 +57,10 @@ type resourcesResponse struct {
 // honors them, by resuming an actor and asking it (via the probe /resources
 // endpoint) what compute envelope it sees from the inside.
 //
-// gVisor is the default (and only) runtime in the macOS/colima kind
-// environment, so the assertions target what runsc --cpu-num-from-quota and the
-// cgroup memory limit produce inside the sentry.
+// Both runtimes reach the declared numbers by different routes, and the
+// assertions below are written to hold for either: gVisor sizes the sentry from
+// the CPU quota and the cgroup memory limit, while the micro-VM sizes the guest
+// VM itself (see internal/sizing).
 func TestActorSizing_SandboxObservesDeclaredLimits(t *testing.T) {
 	env, err := e2e.CheckEnv("BUCKET_NAME", "KO_DOCKER_REPO")
 	if err != nil {
@@ -87,15 +86,19 @@ func TestActorSizing_SandboxObservesDeclaredLimits(t *testing.T) {
 		got.NumCPU, got.MemTotalBytes, got.CPUMax, got.MemoryMax, got.MemTotalError)
 
 	// CPU: runsc provisions the sentry's vCPU count from the CPU quota
-	// (--cpu-num-from-quota), so the sandbox must see exactly the declared limit.
+	// (--cpu-num-from-quota) and the micro-VM boots the guest with
+	// SandboxSize.VCPUs(); either way the sandbox must see exactly the declared
+	// limit.
 	if got.NumCPU != wantCPU {
 		t.Errorf("sandbox NumCPU = %d, want %d (declared limits.cpu=%d) — sandbox not sized to actor limits", got.NumCPU, wantCPU, wantCPU)
 	}
 
-	// Memory: the sandbox must be bounded by the declared limit. gVisor may
-	// report slightly under the limit (reserved overhead) but must never see
-	// more; a value near the node's full RAM means the limit was not applied.
-	// Allow 10% headroom above the limit for accounting differences.
+	// Memory: the sandbox must be bounded by the declared limit. Both runtimes
+	// report under it — gVisor by its reserved overhead, the micro-VM by the
+	// 128MiB VMM reserve held back from the guest plus what the guest kernel
+	// takes — but neither may see more; a value near the node's full RAM means
+	// the limit was not applied. Allow 10% headroom above the limit for
+	// accounting differences, and half the limit below it for those overheads.
 	if got.MemTotalError != "" {
 		t.Errorf("probe could not read MemTotal: %s", got.MemTotalError)
 	} else if got.MemTotalBytes > wantMemBytes*11/10 {
@@ -112,17 +115,9 @@ func deploySizedProbe(t *testing.T, bucket string) {
 		t.Fatalf("FindRepoRoot: %v", err)
 	}
 
-	// Render the manifest template to a file so both apply and delete can
-	// consume it without any shell involved (mirrors the identity suite).
-	tmpl, err := os.ReadFile(filepath.Join(root, "internal/e2e/fixtures/probe/probe-sized.yaml.tmpl"))
-	if err != nil {
-		t.Fatalf("reading sized probe manifest template: %v", err)
-	}
-	manifest := filepath.Join(t.TempDir(), "probe-sized.yaml")
-	rendered := strings.ReplaceAll(string(tmpl), "${BUCKET_NAME}", bucket)
-	if err := os.WriteFile(manifest, []byte(rendered), 0o644); err != nil {
-		t.Fatalf("writing rendered sized probe manifest: %v", err)
-	}
+	// One manifest, rendered for the sandbox class under test (mirrors the
+	// identity suite).
+	manifest := e2e.RenderFixtureManifest(t, "internal/e2e/fixtures/probe/probe-sized.yaml.tmpl", bucket)
 
 	// Build/push the probe image and apply through the repo's pinned ko. See the
 	// identity suite's deployProbe for why KO_CONFIG_PATH and the trailing
@@ -144,7 +139,7 @@ func deploySizedProbe(t *testing.T, bucket string) {
 
 func waitForTemplateReady(t *testing.T, ctx context.Context, clients *e2e.Clients) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Minute)
+	deadline := time.Now().Add(e2e.TemplateReadyTimeout(t))
 	for time.Now().Before(deadline) {
 		at, err := clients.SubstrateK8s.ApiV1alpha1().ActorTemplates(sizingNamespace).Get(ctx, sizingTemplate, metav1.GetOptions{})
 		if err == nil {

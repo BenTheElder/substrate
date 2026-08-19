@@ -73,6 +73,14 @@ spec:
   containers:
   - name: counter
     image: ko://github.com/agent-substrate/substrate/demos/counter
+    command:
+    - /ko-app/counter
+    # Exercises atenet-router's arbitrary-port ingress support: a second
+    # listener a test can address by CONNECTing to <actor-dns>:9090, distinct
+    # from the primary port 80 every other assertion in this demo uses. Kept in
+    # step with counter.yaml.tmpl — the networking suite runs against whichever
+    # of the two the sandbox class under test selects.
+    - --extra-port=9090
     readyz:
       httpGet:
         path: /readyz

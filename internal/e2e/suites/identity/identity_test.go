@@ -19,9 +19,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -98,17 +96,9 @@ func deployProbe(t *testing.T, bucket string) {
 		t.Fatalf("FindRepoRoot: %v", err)
 	}
 
-	// Render the manifest template to a file so both apply and delete can
-	// consume it without any shell involved.
-	tmpl, err := os.ReadFile(filepath.Join(root, "internal/e2e/fixtures/probe/probe.yaml.tmpl"))
-	if err != nil {
-		t.Fatalf("reading probe manifest template: %v", err)
-	}
-	manifest := filepath.Join(t.TempDir(), "probe.yaml")
-	rendered := strings.ReplaceAll(string(tmpl), "${BUCKET_NAME}", bucket)
-	if err := os.WriteFile(manifest, []byte(rendered), 0o644); err != nil {
-		t.Fatalf("writing rendered probe manifest: %v", err)
-	}
+	// One manifest, rendered for the sandbox class under test, so both apply and
+	// delete consume the same file without any shell involved.
+	manifest := e2e.RenderFixtureManifest(t, "internal/e2e/fixtures/probe/probe.yaml.tmpl", bucket)
 
 	// Build/push the probe image and apply the manifest through the repo's
 	// pinned ko (hack/run-tool.sh ko); CI does not install ko on PATH, and every
@@ -140,7 +130,7 @@ func deployProbe(t *testing.T, bucket string) {
 
 func waitForGolden(t *testing.T, ctx context.Context, clients *e2e.Clients) string {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Minute)
+	deadline := time.Now().Add(e2e.TemplateReadyTimeout(t))
 	for time.Now().Before(deadline) {
 		at, err := clients.SubstrateK8s.ApiV1alpha1().ActorTemplates(probeNamespace).Get(ctx, probeTemplate, metav1.GetOptions{})
 		if err == nil {
