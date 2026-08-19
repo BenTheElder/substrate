@@ -1486,6 +1486,7 @@ func (s *AteomHerder) prepareOCIBundles(
 			"", // pause is sandbox infra; it gets no actor identity mount.
 			nil,
 			nil,
+			nil, // pause only reaps; it needs no capabilities.
 		); err != nil {
 			return wrapFileSystemErr("while creating pause OCI bundle", err)
 		}
@@ -1518,6 +1519,7 @@ func (s *AteomHerder) prepareOCIBundles(
 				identityDir,
 				spec.GetVolumes(),
 				ctr.GetVolumeMounts(),
+				resolveCapabilities(ctr.GetSecurityContext().GetCapabilities()),
 			); err != nil {
 				return wrapFileSystemErr(fmt.Sprintf("while creating %q OCI bundle", ctr.GetName()), err)
 			}
