@@ -67,7 +67,7 @@ function usage() {
   echo "  --delete-ate-system                    Delete core system"
   echo "  --delete-all                           Delete core system and all registered demos"
   echo "  --ateapi-client-auth=cert|token        Select how in-cluster clients authenticate to ateapi for --deploy-ate-system (default: cert; the server always accepts both)"
-  echo "  --atenet-router=envoy|agentgateway     Select the atenet router dataplane (default: envoy)"
+  echo "  --atenet-router=envoy|agentgateway     Select the ingress and egress dataplane (default: envoy)"
   echo "  --store-backend=redis|postgres         Configure the ateapi store backend (default: redis)"
   echo "  --otlp-endpoint URL                    Send all control plane telemetry to URL, not to the cluster default (see benchmarking/telemetry/README.md)"
   echo ""
@@ -267,6 +267,15 @@ atenet_egress_manifest() {
   fi
 }
 
+render_atenet_egress_manifest() {
+  if [[ "$(atenet_router)" == "agentgateway" ]]; then
+    kubectl kustomize manifests/ate-install/agentgateway-egress \
+      --load-restrictor LoadRestrictionsNone | run_ko resolve -f -
+  else
+    run_ko resolve -f "$(atenet_egress_manifest)"
+  fi
+}
+
 # Apply the ate-otel-config ConfigMap that every control plane component reads
 # via envFrom. The full install gets it through render_ate_system_manifests, but
 # the targeted single-component redeploys below apply raw manifests with no
@@ -452,6 +461,7 @@ create_egress_mitm_ca_pool_secret() {
 
 # Only the sdsmint egress variant mounts this pool.
 ensure_egress_mitm_ca_pool_secret() {
+  [[ "$(atenet_router)" != "agentgateway" ]] || return 0
   [[ "${ATE_EXPERIMENTAL_USE_SDSMINT:-false}" == "true" ]] || return 0
   run_kubectl get secret -n ate-system egress-mitm-ca-pool >/dev/null 2>&1 \
     || create_egress_mitm_ca_pool_secret
@@ -628,7 +638,9 @@ deploy_ate_system() {
   # --experimental-use-sdsmint composes with every overlay instead of needing a
   # variant of each.
   ensure_egress_mitm_ca_pool_secret
-  run_ko apply -f "$(atenet_egress_manifest)"
+  local egress_manifests=""
+  egress_manifests="$(render_atenet_egress_manifest)"
+  echo "${egress_manifests}" | run_kubectl apply -f -
 
   log_step "Waiting for ATE system components to be ready..."
   case "$(store_backend)" in
@@ -726,7 +738,9 @@ deploy_atenet() {
   echo "${router_manifest}" | run_kubectl apply -f -
 
   ensure_egress_mitm_ca_pool_secret
-  run_ko apply -f "$(atenet_egress_manifest)"
+  local egress_manifests=""
+  egress_manifests="$(render_atenet_egress_manifest)"
+  echo "${egress_manifests}" | run_kubectl apply -f -
   run_ko apply -f manifests/ate-install/atenet-dns.yaml
   run_kubectl rollout status deployment/atenet-router -n ate-system --timeout=120s
   run_kubectl rollout status deployment/atenet-egress -n ate-system --timeout=120s
