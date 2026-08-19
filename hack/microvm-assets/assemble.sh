@@ -21,7 +21,10 @@
 # Produces, under $OUT, the five assets named as the SandboxConfig expects:
 #   cloud-hypervisor  virtiofsd  vmlinux  rootfs.img  configuration-clh.toml
 # The DOWNLOADED assets are reproducible, so paste their sha256 sums into the
-# manifest (demos/counter/counter-microvm.yaml.tmpl). That now includes virtiofsd on
+# manifest (demos/counter/counter-microvm.yaml.tmpl). rootfs.img is NOT one of them
+# unless SLIM_AGENT=no: by default the guest agent is rebuilt without the features we
+# do not use and patched in (slim-agent.sh), so the image is locally built and its
+# sha is injected at deploy by install-microvm-deps.sh. That now includes virtiofsd on
 # amd64 (upstream prebuilt); on arm64 virtiofsd is still built from source
 # (non-reproducible bytes), so its sha is NOT pinned there — run-microvm-demo.sh
 # computes it from the staged binary and injects it at deploy.
@@ -35,7 +38,8 @@
 # tag, which needs rust (rustup) + libcap-ng-dev libseccomp-dev pkg-config.
 #
 # Env: ARCH (arm64|amd64, default arm64), KATA_VER (4.0.0), CH_VER (v53.0),
-#      OUT (default ./bin/microvm-assets/$ARCH, under the gitignored bin/).
+#      OUT (default ./bin/microvm-assets/$ARCH, under the gitignored bin/),
+#      SLIM_AGENT (default yes; "no" ships kata's stock agent unmodified).
 #
 # Always re-downloads and overwrites — there is no incremental mode. It clears
 # $OUT/.asset-versions before the first write and re-stamps it with the versions that
@@ -54,6 +58,7 @@ CH_VER="${CH_VER:-v53.0}"
 # Not env-overridable: the amd64 prebuilt zip URL and its sha below are pinned to
 # this exact release, so bumping it means editing all three together.
 VIRTIOFSD_VER="v1.14.0"
+SLIM_AGENT="${SLIM_AGENT:-yes}"
 OUT="${OUT:-${ROOT}/bin/microvm-assets/$ARCH}"
 
 case "$ARCH" in
@@ -69,8 +74,11 @@ esac
 # indistinguishable from a current one.
 STAMP_FILE=".asset-versions"
 asset_stamp() {
-  printf 'arch=%s\nkata=%s\ncloud-hypervisor=%s\nvirtiofsd=%s\n' \
-    "$ARCH" "$KATA_VER" "$CH_VER" "$VIRTIOFSD_VER"
+  # SLIM_AGENT belongs here even though it is not a version: it changes the bytes of
+  # rootfs.img under an unchanged kata pin, so without it a cached stock dir looks
+  # current to a slim build and vice versa.
+  printf 'arch=%s\nkata=%s\ncloud-hypervisor=%s\nvirtiofsd=%s\nslim-agent=%s\n' \
+    "$ARCH" "$KATA_VER" "$CH_VER" "$VIRTIOFSD_VER" "$SLIM_AGENT"
 }
 
 if [ "${1:-}" = "--print-stamp" ]; then
@@ -98,6 +106,18 @@ KROOT="kata/opt/kata"
 
 cp "$(readlink -f "${KROOT}/share/kata-containers/vmlinux.container")" "${OUT}/vmlinux"
 cp "$(readlink -f "${KROOT}/share/kata-containers/kata-containers.img")" "${OUT}/rootfs.img"
+
+# Rebuild the guest agent without the policy engine and initdata support kata's
+# release pipeline enables but ateom never uses, and patch it into the image. Worth
+# ~41 ms of a ~500 ms cold boot and ~3.5 MiB of the compressed golden snapshot; see
+# slim-agent.sh for the measurements. SLIM_AGENT=no keeps kata's stock agent, at the
+# cost of shipping a guest that spends 69 ms of every boot loading a policy we do not
+# set. NOTE: this makes rootfs.img locally built rather than a reproducible download,
+# so its sha256 is injected at deploy (install-microvm-deps.sh) like arm64 virtiofsd.
+if [ "${SLIM_AGENT}" != "no" ]; then
+  ARCH="${ARCH}" KATA_VER="${KATA_VER}" IMAGE="${OUT}/rootfs.img" \
+    "${ROOT}/hack/microvm-assets/slim-agent.sh"
+fi
 cp "${KROOT}/share/defaults/kata-containers/configuration-clh.toml" "${OUT}/configuration-clh.toml"
 
 echo ">> Downloading cloud-hypervisor ${CH_VER} (${CH_ASSET})..."
