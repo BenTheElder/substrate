@@ -27,6 +27,10 @@
 # Optional `sandboxClass` (default "gvisor") picks the sandbox runtime for
 # the benchmark WorkerPool. Allowed values: "gvisor" | "microvm".
 #
+# Optional `actorMemory` (default "256Mi", the smallest size microvm admits)
+# sets the memory limit on the benchmark ActorTemplates. Raise it for suites
+# that exercise glutton's WriteRAM path.
+#
 # Required `targetCluster` names a config file under
 # /etc/orchestrator/target-clusters/ (e.g. `targetCluster: dev` ->
 # /etc/orchestrator/target-clusters/dev.sh). The orchestrator copies that
