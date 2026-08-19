@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -324,7 +323,7 @@ func TestDurableDirLifecycle(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if test.tc.microVMOnly && !isMicroVMEnvironment() {
+			if test.tc.microVMOnly && !e2e.IsMicroVM() {
 				t.Skipf("Skipping %s: micro-VM-only case (Golden resume source, or durable-data extraction from a Full capture)", test.name)
 			}
 			t.Parallel()
@@ -389,7 +388,7 @@ func TestMultipleDurableDirLifecycle(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if test.tc.microVMOnly && !isMicroVMEnvironment() {
+			if test.tc.microVMOnly && !e2e.IsMicroVM() {
 				t.Skipf("Skipping %s: the Golden resume source is micro-VM only", test.name)
 			}
 			t.Parallel()
@@ -873,17 +872,11 @@ func createActorTemplateInternal(ctx context.Context, t *testing.T, clients *e2e
 		t.Fatalf("CheckEnv failed: %v", err)
 	}
 
-	// The source WorkerPool+ActorTemplate to copy the resolved runtime (sandbox class,
-	// ateom image, container images) from. Defaults to the gVisor counter demo; CI
-	// overrides these to point this same lifecycle test at the micro-VM counter.
-	srcNS := "ate-demo-counter"
-	if v := os.Getenv("E2E_TEMPLATE_NAMESPACE"); v != "" {
-		srcNS = v
-	}
-	srcName := "counter"
-	if v := os.Getenv("E2E_TEMPLATE_NAME"); v != "" {
-		srcName = v
-	}
+	// The source WorkerPool+ActorTemplate to copy the resolved runtime (sandbox
+	// class, ateom image, container images, sandbox size) from: the counter demo
+	// for the sandbox class under test, so this one lifecycle test covers both.
+	src := e2e.CounterFixture()
+	srcNS, srcName := src.Namespace, src.Name
 
 	// Query existing WorkerPool and ActorTemplate to get the resolved container images
 	existingWp, err := clients.SubstrateK8s.ApiV1alpha1().WorkerPools(srcNS).Get(ctx, srcName, metav1.GetOptions{})
@@ -932,6 +925,10 @@ func createActorTemplateInternal(ctx context.Context, t *testing.T, clients *e2e
 			// "microvm"; the gVisor source leaves it "" — copying keeps both correct.
 			SandboxClass: existingAt.Spec.SandboxClass,
 			Containers:   existingAt.Spec.Containers,
+			// The source's limits size the sandbox. Copying them matters most on
+			// micro-VM, where an ActorTemplate that declares none boots the guest
+			// at the kata config default (2GiB) instead of the demo's 512Mi.
+			Resources: existingAt.Spec.Resources,
 			SnapshotsConfig: v1alpha1.SnapshotsConfig{
 				Location: "gs://" + env["BUCKET_NAME"] + "/ate-demo-" + name,
 				OnPause:  onPause,
@@ -949,18 +946,11 @@ func createActorTemplateInternal(ctx context.Context, t *testing.T, clients *e2e
 		t.Fatalf("failed to create ActorTemplate: %v", err)
 	}
 
-	// Wait for ActorTemplate to be Ready (golden snapshot created) before creating an actor.
-	// The micro-VM golden (CH boot + checkpoint on nested KVM) is slower than gVisor, so
-	// CI raises this via E2E_TEMPLATE_READY_TIMEOUT.
+	// Wait for ActorTemplate to be Ready (golden snapshot created) before creating
+	// an actor. TemplateReadyTimeout budgets for the micro-VM golden (a CH cold
+	// boot plus checkpoint on nested KVM) being slower than the gVisor one.
 	t.Logf("Waiting for ActorTemplate %s to be Ready...", at.Name)
-	tmplTimeout := 90 * time.Second
-	if v := os.Getenv("E2E_TEMPLATE_READY_TIMEOUT"); v != "" {
-		d, perr := time.ParseDuration(v)
-		if perr != nil {
-			t.Fatalf("invalid E2E_TEMPLATE_READY_TIMEOUT %q: %v", v, perr)
-		}
-		tmplTimeout = d
-	}
+	tmplTimeout := e2e.TemplateReadyTimeout(t)
 	tmplCtx, tmplCancel := context.WithTimeout(ctx, tmplTimeout)
 	defer tmplCancel()
 	var lastPhase v1alpha1.PhaseType
@@ -1219,13 +1209,6 @@ func callActorPathOnce(t *testing.T, actorRef resources.ActorRef, method, path s
 	}
 
 	return string(body), nil
-}
-
-// isMicroVMEnvironment reports whether the suite is running against the
-// micro-VM demo template, which does not support every volume type yet (see
-// TestExternalVolumeLifecycle).
-func isMicroVMEnvironment() bool {
-	return os.Getenv("E2E_TEMPLATE_NAMESPACE") == "ate-demo-counter-microvm"
 }
 
 func TestWorkerPodDeletion(t *testing.T) {
