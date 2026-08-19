@@ -19,6 +19,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	"sigs.k8s.io/yaml"
 )
 
@@ -28,44 +29,49 @@ var fixtureManifests = []string{
 	"internal/e2e/fixtures/probe/probe-sized.yaml.tmpl",
 }
 
-// renderedFixture is the subset of a rendered fixture document the assertions
-// below care about. Every field is optional: one document is a Namespace.
-type renderedFixture struct {
-	Kind string `json:"kind"`
-	Spec struct {
-		AteomImage        string `json:"ateomImage"`
-		SandboxClass      string `json:"sandboxClass"`
-		SandboxConfigName string `json:"sandboxConfigName"`
-		Resources         *struct {
-			Limits map[string]string `json:"limits"`
-		} `json:"resources"`
-		SnapshotsConfig struct {
-			Location string `json:"location"`
-		} `json:"snapshotsConfig"`
-	} `json:"spec"`
-}
-
-// decodeFixture renders a manifest and returns its documents by kind. It fails
-// the test on any document that is not valid YAML, which is the thing most
-// likely to break: the runtime blocks are injected as pre-indented text.
-func decodeFixture(t *testing.T, relPath string) map[string]renderedFixture {
+// renderFixture renders a manifest and decodes the two resources the
+// assertions below care about (the third document is a Namespace).
+//
+// Strict decoding against the real API types is the point: the runtime blocks
+// are injected as pre-indented text, so a placeholder that lands at the wrong
+// depth yields YAML that still parses but hangs the field off the wrong parent
+// — which strict mode reports as an unknown field instead of silently applying
+// a WorkerPool that never gets a micro-VM worker.
+func renderFixture(t *testing.T, relPath string) (*v1alpha1.WorkerPool, *v1alpha1.ActorTemplate) {
 	t.Helper()
 	raw, err := os.ReadFile(RenderFixtureManifest(t, relPath, "test-bucket"))
 	if err != nil {
 		t.Fatalf("reading the rendered %s: %v", relPath, err)
 	}
-	byKind := map[string]renderedFixture{}
+
+	pool, template := &v1alpha1.WorkerPool{}, &v1alpha1.ActorTemplate{}
 	for doc := range strings.SplitSeq(string(raw), "\n---\n") {
 		if strings.TrimSpace(doc) == "" {
 			continue
 		}
-		var out renderedFixture
-		if err := yaml.Unmarshal([]byte(doc), &out); err != nil {
+		var meta struct {
+			Kind string `json:"kind"`
+		}
+		if err := yaml.Unmarshal([]byte(doc), &meta); err != nil {
 			t.Fatalf("rendered %s is not valid YAML: %v\n%s", relPath, err, doc)
 		}
-		byKind[out.Kind] = out
+		var into any
+		switch meta.Kind {
+		case "WorkerPool":
+			into = pool
+		case "ActorTemplate":
+			into = template
+		default:
+			continue
+		}
+		if err := yaml.UnmarshalStrict([]byte(doc), into); err != nil {
+			t.Fatalf("rendered %s %s does not match the API type: %v\n%s", relPath, meta.Kind, err, doc)
+		}
 	}
-	return byKind
+	if pool.Name == "" || template.Name == "" {
+		t.Fatalf("rendered %s is missing a WorkerPool or an ActorTemplate", relPath)
+	}
+	return pool, template
 }
 
 // TestRenderFixtureManifest_GVisor pins the default rendering: every micro-VM
@@ -75,9 +81,8 @@ func TestRenderFixtureManifest_GVisor(t *testing.T) {
 	t.Setenv(sandboxClassEnv, "")
 	for _, relPath := range fixtureManifests {
 		t.Run(relPath, func(t *testing.T) {
-			docs := decodeFixture(t, relPath)
+			pool, template := renderFixture(t, relPath)
 
-			pool := docs["WorkerPool"]
 			if !strings.HasSuffix(pool.Spec.AteomImage, "/cmd/ateom-gvisor") {
 				t.Errorf("WorkerPool ateomImage = %q, want the gVisor ateom", pool.Spec.AteomImage)
 			}
@@ -86,7 +91,6 @@ func TestRenderFixtureManifest_GVisor(t *testing.T) {
 					pool.Spec.SandboxClass, pool.Spec.SandboxConfigName)
 			}
 
-			template := docs["ActorTemplate"]
 			if template.Spec.SandboxClass != "" {
 				t.Errorf("ActorTemplate sandboxClass = %q, want unset for gVisor", template.Spec.SandboxClass)
 			}
@@ -111,9 +115,8 @@ func TestRenderFixtureManifest_MicroVM(t *testing.T) {
 	t.Setenv(sandboxClassEnv, SandboxClassMicroVM)
 	for _, relPath := range fixtureManifests {
 		t.Run(relPath, func(t *testing.T) {
-			docs := decodeFixture(t, relPath)
+			pool, template := renderFixture(t, relPath)
 
-			pool := docs["WorkerPool"]
 			if !strings.HasSuffix(pool.Spec.AteomImage, "/cmd/ateom-microvm") {
 				t.Errorf("WorkerPool ateomImage = %q, want the micro-VM ateom", pool.Spec.AteomImage)
 			}
@@ -122,14 +125,13 @@ func TestRenderFixtureManifest_MicroVM(t *testing.T) {
 					pool.Spec.SandboxClass, pool.Spec.SandboxConfigName)
 			}
 
-			template := docs["ActorTemplate"]
 			if template.Spec.SandboxClass != SandboxClassMicroVM {
 				t.Errorf("ActorTemplate sandboxClass = %q, want %q — it must match the pool's or no worker is eligible",
 					template.Spec.SandboxClass, SandboxClassMicroVM)
 			}
 			// Undeclared limits boot the guest at the kata config default
 			// (2GiB), which does not fit beside the demo pools on one kind node.
-			if template.Spec.Resources == nil || template.Spec.Resources.Limits["memory"] == "" {
+			if template.Spec.Resources.Limits.Memory().IsZero() {
 				t.Errorf("ActorTemplate declares no memory limit, so the guest would boot at the kata default: %+v", template.Spec.Resources)
 			}
 			if want := "-microvm/"; !strings.HasSuffix(template.Spec.SnapshotsConfig.Location, want) {

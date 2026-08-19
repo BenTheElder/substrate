@@ -20,7 +20,7 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: ate-e2e-probe
+  name: ate-e2e-probe${FIXTURE_SUFFIX}
 
 ---
 
@@ -28,7 +28,7 @@ apiVersion: ate.dev/v1alpha1
 kind: WorkerPool
 metadata:
   name: probe
-  namespace: ate-e2e-probe
+  namespace: ate-e2e-probe${FIXTURE_SUFFIX}
   labels:
     workload: probe
 spec:
@@ -42,7 +42,7 @@ apiVersion: ate.dev/v1alpha1
 kind: ActorTemplate
 metadata:
   name: probe
-  namespace: ate-e2e-probe
+  namespace: ate-e2e-probe${FIXTURE_SUFFIX}
 spec:
 ${TEMPLATE_SANDBOX_CLASS}
   containers:
@@ -63,4 +63,4 @@ ${TEMPLATE_RESOURCES}
     matchLabels:
       workload: probe
   snapshotsConfig:
-    location: gs://${BUCKET_NAME}/ate-e2e-probe${SNAPSHOT_SUFFIX}/
+    location: gs://${BUCKET_NAME}/ate-e2e-probe${FIXTURE_SUFFIX}/

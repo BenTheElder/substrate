@@ -92,6 +92,19 @@ func EgressFixture() Fixture {
 	}
 }
 
+// FixtureName suffixes a fixture's name for the sandbox class under test, so
+// the gVisor and micro-VM lanes never share one. That matters most for the
+// namespaces a suite creates and deletes itself: the two lanes run one after
+// the other, and a namespace still Terminating from the previous one would
+// fail the next one's apply. ${FIXTURE_SUFFIX} does the same job inside the
+// fixture manifests.
+func FixtureName(base string) string {
+	if IsMicroVM() {
+		return base + "-" + SandboxClassMicroVM
+	}
+	return base
+}
+
 // TemplateReadyTimeout is how long to wait for an ActorTemplate's golden
 // snapshot. A micro-VM golden (a cloud-hypervisor cold boot plus checkpoint, on
 // nested KVM in CI) takes several times what a gVisor one does, so the default
@@ -166,10 +179,9 @@ func fixtureSubstitutions(bucket string) (inline, blocks map[string]string) {
 	inline = map[string]string{
 		"${BUCKET_NAME}": bucket,
 		"${ATEOM_IMAGE}": "ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor",
-		// Same fixture name, different runtime: keeping the goldens under
-		// separate prefixes stops a stray object from one class turning up while
-		// debugging the other.
-		"${SNAPSHOT_SUFFIX}": "",
+		// The manifest-side half of FixtureName: it suffixes the fixture's
+		// namespace, and with it the snapshot prefix underneath.
+		"${FIXTURE_SUFFIX}": "",
 	}
 	blocks = map[string]string{
 		"${WORKERPOOL_RUNTIME}":     "",
@@ -181,7 +193,7 @@ func fixtureSubstitutions(bucket string) (inline, blocks map[string]string) {
 	}
 
 	inline["${ATEOM_IMAGE}"] = "ko://github.com/agent-substrate/substrate/cmd/ateom-microvm"
-	inline["${SNAPSHOT_SUFFIX}"] = "-microvm"
+	inline["${FIXTURE_SUFFIX}"] = "-" + SandboxClassMicroVM
 	// The cluster-wide SandboxConfig hack/install-microvm-deps.sh installs. A
 	// micro-VM WorkerPool has to name it: it is deliberately not the class
 	// default, so a missing or stale one fails loudly.

@@ -31,8 +31,7 @@ import (
 )
 
 const (
-	sizingNamespace = "ate-e2e-sizing"
-	sizingTemplate  = "probe-sized"
+	sizingTemplate = "probe-sized"
 
 	// The limits declared in probe-sized.yaml.tmpl. Keep these in sync with the
 	// manifest: the whole point of the suite is to assert the sandbox observes
@@ -40,6 +39,11 @@ const (
 	wantCPU      = 2
 	wantMemBytes = 512 * 1024 * 1024 // 512Mi
 )
+
+// sizingNamespace is where deploySizedProbe applies the fixture, and the
+// atespace its actor lives in. Suffixed per sandbox class (see
+// e2e.FixtureName) so the two lanes' fixtures never collide.
+var sizingNamespace = e2e.FixtureName("ate-e2e-sizing")
 
 // resourcesResponse mirrors the /resources endpoint of the probe fixture.
 type resourcesResponse struct {

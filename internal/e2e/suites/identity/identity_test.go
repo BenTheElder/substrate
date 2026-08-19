@@ -30,10 +30,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-const (
-	probeNamespace = "ate-e2e-probe"
-	probeTemplate  = "probe"
-)
+const probeTemplate = "probe"
+
+// probeNamespace is where deployProbe applies the fixture, and the atespace its
+// actors live in. Suffixed per sandbox class (see e2e.FixtureName) so the two
+// lanes' fixtures never collide: they run one after the other, and this
+// namespace is deleted by the test that created it.
+var probeNamespace = e2e.FixtureName("ate-e2e-probe")
 
 type whoamiResponse struct {
 	File     string `json:"file"`
