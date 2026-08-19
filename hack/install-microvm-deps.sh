@@ -167,17 +167,20 @@ else
 fi
 
 # --- 3. apply the cluster-wide microvm SandboxConfig -----------------------
-# The arm64 virtiofsd is built from source (release tag in assemble.sh), so
-# its binary bytes are not reproducible across toolchains and its sha can't
-# be a fixed pin in the manifest. Compute it from the freshly-staged binary
+# The arm64 virtiofsd is built from source (release tag in assemble.sh), and
+# rootfs.img has the rebuilt guest agent patched into it (unless SLIM_AGENT=no),
+# so neither is reproducible across toolchains and neither sha can be a fixed
+# pin in the manifest. Compute it from the freshly-staged binary
 # and inject it, so the deployed SandboxConfig always matches whatever was
 # staged. The downloaded assets (cloud-hypervisor/kernel/rootfs/config, plus
 # virtiofsd on amd64 where upstream publishes a prebuilt) keep their
 # committed, reproducible per-arch shas.
 log "Applying microvm SandboxConfig from ${MANIFEST_TEMPLATE}..."
 VIRTIOFSD_SHA256="$(sha256sum "${OUT}/virtiofsd" | awk '{print $1}')"
+KATA_IMAGE_SHA256="$(sha256sum "${OUT}/rootfs.img" | awk '{print $1}')"
 sed -e "s|\${BUCKET_NAME}|${BUCKET_NAME}|g" \
     -e "s|\${VIRTIOFSD_SHA256}|${VIRTIOFSD_SHA256}|g" \
+    -e "s|\${KATA_IMAGE_SHA256}|${KATA_IMAGE_SHA256}|g" \
     "${MANIFEST_TEMPLATE}" \
   | run_kubectl apply -f -
 
