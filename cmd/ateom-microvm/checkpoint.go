@@ -305,6 +305,8 @@ func (s *AteomService) teardownActor(ctx context.Context, id string, ra *running
 	// attribution is what keeps a poll that lands mid-teardown on the
 	// FAILED_PRECONDITION path ("no numbers right now") instead of surfacing a
 	// closed connection as a failed read.
+	tTeardownStart := time.Now()
+	tAgentClose, tCHKill := tTeardownStart, tTeardownStart
 	s.guestStats.Store(nil)
 
 	if client != nil {
@@ -317,6 +319,7 @@ func (s *AteomService) teardownActor(ctx context.Context, id string, ra *running
 		slog.InfoContext(ctx, "CH API shutdown done", slog.Duration("took", time.Since(tShutdown)))
 	}
 
+	tAfterShutdown := time.Now()
 	if ra != nil {
 		// Close the kata-agent client kept open for stdout/stderr forwarding. This
 		// fails the forwarding goroutines' in-flight ReadStdout/ReadStderr calls, so
@@ -326,12 +329,14 @@ func (s *AteomService) teardownActor(ctx context.Context, id string, ra *running
 			_ = ra.guestAgent.Close()
 			ra.guestAgent = nil
 		}
+		tAgentClose = time.Now()
 
 		// Kill the CH process ateom launched.
 		if ra.chCmd != nil && ra.chCmd.Process != nil {
 			_ = ra.chCmd.Process.Kill()
 			_, _ = ra.chCmd.Process.Wait()
 		}
+		tCHKill = time.Now()
 		// Kill the virtiofsd (after CH, its only client).
 		if ra.vfsdCmd != nil && ra.vfsdCmd.Process != nil {
 			_ = ra.vfsdCmd.Process.Kill()
@@ -344,7 +349,9 @@ func (s *AteomService) teardownActor(ctx context.Context, id string, ra *running
 	// it also drops the merged rootfs overlay mounts, which MUST come before
 	// the upper-dir removal below (removing a live overlay's upperdir would
 	// corrupt the mount rather than delete the files).
+	tVfsdKill := time.Now()
 	kata.CleanupSandboxState(ctx, id)
+	tSweep := time.Now()
 
 	// Remove the rootfs upper dir: ateom owns it — atelet's actor-dir reset
 	// doesn't know it — and its absence is what marks a worker as holding no
@@ -352,6 +359,7 @@ func (s *AteomService) teardownActor(ctx context.Context, id string, ra *running
 	if err := os.RemoveAll(rootfsUpperDir(id)); err != nil {
 		slog.WarnContext(ctx, "Failed to remove rootfs upper dir", slog.String("actorUID", id), slog.Any("err", err))
 	}
+	tUpperRM := time.Now()
 
 	// Detach the bundle rootfs overlays composed in buildActorContainers, so
 	// atelet's bundle wipe doesn't strand live mounts in this namespace.
@@ -359,4 +367,13 @@ func (s *AteomService) teardownActor(ctx context.Context, id string, ra *running
 	if err := imagecache.UnmountAllUnder(ateompath.OCIBundleDir(id)); err != nil {
 		slog.WarnContext(ctx, "Failed to unmount bundle rootfs overlays", slog.String("actorUID", id), slog.Any("err", err))
 	}
+	slog.InfoContext(ctx, "Teardown phases", slog.String("id", id),
+		slog.Duration("ch_shutdown", tAfterShutdown.Sub(tTeardownStart)),
+		slog.Duration("agent_close", tAgentClose.Sub(tAfterShutdown)),
+		slog.Duration("ch_kill", tCHKill.Sub(tAgentClose)),
+		slog.Duration("vfsd_kill", tVfsdKill.Sub(tCHKill)),
+		slog.Duration("sandbox_sweep", tSweep.Sub(tVfsdKill)),
+		slog.Duration("upper_rm", tUpperRM.Sub(tSweep)),
+		slog.Duration("bundle_unmount", time.Since(tUpperRM)),
+		slog.Duration("total", time.Since(tTeardownStart)))
 }

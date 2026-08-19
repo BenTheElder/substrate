@@ -24,6 +24,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -38,6 +39,8 @@ import (
 // .../shared/sandboxes/<id>/mounts", "directory not empty". Calling this
 // before each run gives a clean slate.
 func CleanupSandboxState(ctx context.Context, id string) {
+	tStart := time.Now()
+	unmounted := 0
 	dirs := []string{
 		filepath.Join("/run/kata-containers/shared/sandboxes", id),
 		filepath.Join(vcVMDir, id),
@@ -59,6 +62,7 @@ func CleanupSandboxState(ctx context.Context, id string) {
 		}
 		// Deepest paths first so child mounts unmount before their parents.
 		sort.Slice(mounts, func(i, j int) bool { return len(mounts[i]) > len(mounts[j]) })
+		unmounted = len(mounts)
 		for _, mp := range mounts {
 			if err := unix.Unmount(mp, unix.MNT_DETACH); err != nil {
 				slog.WarnContext(ctx, "Failed to unmount leftover sandbox mount",
@@ -66,6 +70,7 @@ func CleanupSandboxState(ctx context.Context, id string) {
 			}
 		}
 	}
+	tUnmount := time.Now()
 	for _, d := range dirs {
 		if err := os.RemoveAll(d); err != nil {
 			slog.WarnContext(ctx, "Failed to remove leftover sandbox dir",
@@ -77,6 +82,20 @@ func CleanupSandboxState(ctx context.Context, id string) {
 	// (reparented to us) holding guest RAM and stale sockets. Matched strictly by
 	// the sandbox id (an actor UUID) appearing in the cmdline, so nothing
 	// unrelated can match.
+	tRemove := time.Now()
+	// One log line rather than a phase per step: the unmount is the only part that
+	// has ever cost anything (measured at ~450ms for a single host overlay on GKE,
+	// against microseconds for the rest), so what a reader needs is which of the
+	// two it was.
+	defer func() {
+		slog.InfoContext(ctx, "Swept sandbox state", slog.String("id", id),
+			slog.Int("unmounted", unmounted),
+			slog.Duration("unmount", tUnmount.Sub(tStart)),
+			slog.Duration("remove_dirs", tRemove.Sub(tUnmount)),
+			slog.Duration("proc_scan", time.Since(tRemove)),
+			slog.Duration("total", time.Since(tStart)))
+	}()
+
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return
