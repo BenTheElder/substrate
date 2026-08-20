@@ -611,6 +611,93 @@ func TestActorTemplateValidation(t *testing.T) {
 		},
 		wantErr: false,
 	}, {
+		name: "Volumes: 1 Image mount is valid",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.Volumes = []Volume{
+				{Name: "agent", VolumeSource: VolumeSource{Image: &ImageVolumeSource{
+					Reference: "example.com/agent@sha256:326e0e090a9a4057e62a1b94236e7a2df2f2f76722f67232e0e47854e4df9c53",
+				}}},
+			}
+			at.Spec.Containers[0].VolumeMounts = []VolumeMount{
+				{Name: "agent", MountPath: "/ate"},
+			}
+		},
+		wantErr: false,
+	}, {
+		name: "Volumes: unpinned Image reference is invalid",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.Volumes = []Volume{
+				{Name: "agent", VolumeSource: VolumeSource{Image: &ImageVolumeSource{
+					Reference: "example.com/agent:latest",
+				}}},
+			}
+			at.Spec.Containers[0].VolumeMounts = []VolumeMount{
+				{Name: "agent", MountPath: "/ate"},
+			}
+		},
+		wantErr: true,
+		errMsg:  "All images must be pinned",
+	}, {
+		name: "Volumes: Image reference is required",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.Volumes = []Volume{
+				{Name: "agent", VolumeSource: VolumeSource{Image: &ImageVolumeSource{}}},
+			}
+			at.Spec.Containers[0].VolumeMounts = []VolumeMount{
+				{Name: "agent", MountPath: "/ate"},
+			}
+		},
+		wantErr: true,
+		errMsg:  "All images must be pinned",
+	}, {
+		name: "Volumes: VolumeSource with both Image and DurableDir set is invalid",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.Volumes = []Volume{
+				{
+					Name: "agent",
+					VolumeSource: VolumeSource{
+						DurableDir: &DurableDirVolumeSource{},
+						Image: &ImageVolumeSource{
+							Reference: "example.com/agent@sha256:326e0e090a9a4057e62a1b94236e7a2df2f2f76722f67232e0e47854e4df9c53",
+						},
+					},
+				},
+			}
+			at.Spec.Containers[0].VolumeMounts = []VolumeMount{
+				{Name: "agent", MountPath: "/ate"},
+			}
+		},
+		wantErr: true,
+		errMsg:  "exactly one of the fields in [durableDir externalVolumeTemplate image systemInfo] must be set",
+	}, {
+		name: "Volumes: an unmounted Image volume is invalid",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.Volumes = []Volume{
+				{Name: "agent", VolumeSource: VolumeSource{Image: &ImageVolumeSource{
+					Reference: "example.com/agent@sha256:326e0e090a9a4057e62a1b94236e7a2df2f2f76722f67232e0e47854e4df9c53",
+				}}},
+			}
+		},
+		wantErr: true,
+		errMsg:  "All volumes defined in spec.volumes must be mounted by at least one container",
+	}, {
+		name: "Volumes: 2 Image volumes in template is valid",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.Volumes = []Volume{
+				{Name: "agent", VolumeSource: VolumeSource{Image: &ImageVolumeSource{
+					Reference: "example.com/agent@sha256:326e0e090a9a4057e62a1b94236e7a2df2f2f76722f67232e0e47854e4df9c53",
+				}}},
+				{Name: "tools", VolumeSource: VolumeSource{Image: &ImageVolumeSource{
+					Reference: "example.com/tools@sha256:326e0e090a9a4057e62a1b94236e7a2df2f2f76722f67232e0e47854e4df9c53",
+				}}},
+			}
+			at.Spec.Containers[0].VolumeMounts = []VolumeMount{
+				{Name: "agent", MountPath: "/ate"},
+				{Name: "tools", MountPath: "/tools"},
+			}
+		},
+		wantErr: false,
+	}, {
 		name: "Volumes: 2 DurableDir volumes in template is valid",
 		mutate: func(at *ActorTemplate) {
 			at.Spec.Volumes = []Volume{
@@ -761,7 +848,7 @@ func TestActorTemplateValidation(t *testing.T) {
 			}
 		},
 		wantErr: true,
-		errMsg:  "exactly one of the fields in [durableDir externalVolumeTemplate systemInfo] must be set",
+		errMsg:  "exactly one of the fields in [durableDir externalVolumeTemplate image systemInfo] must be set",
 	}, {
 		name: "Volumes: VolumeSource with no source set is invalid",
 		mutate: func(at *ActorTemplate) {
@@ -770,7 +857,7 @@ func TestActorTemplateValidation(t *testing.T) {
 			}
 		},
 		wantErr: true,
-		errMsg:  "exactly one of the fields in [durableDir externalVolumeTemplate systemInfo] must be set",
+		errMsg:  "exactly one of the fields in [durableDir externalVolumeTemplate image systemInfo] must be set",
 	}, {
 		name: "Volumes: VolumeSource with no source set is invalid (mixed with a valid DurableDir volume)",
 		mutate: func(at *ActorTemplate) {
@@ -784,7 +871,7 @@ func TestActorTemplateValidation(t *testing.T) {
 			}
 		},
 		wantErr: true,
-		errMsg:  "exactly one of the fields in [durableDir externalVolumeTemplate systemInfo] must be set",
+		errMsg:  "exactly one of the fields in [durableDir externalVolumeTemplate image systemInfo] must be set",
 	}, {
 		name: "Volumes: SystemInfo volume projecting all actor metadata fields is valid",
 		mutate: func(at *ActorTemplate) {

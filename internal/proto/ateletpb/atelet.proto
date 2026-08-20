@@ -141,6 +141,10 @@ message ExternalVolumeSource {
   map<string, string> volume_context = 3;
 }
 
+message ImageVolumeSource {
+  string reference = 1;
+}
+
 // ActorMetadataField selects one identity field of the actor.
 enum ActorMetadataField {
   ACTOR_METADATA_FIELD_UNSPECIFIED = 0;
@@ -182,6 +186,7 @@ message Volume {
     DurableDirVolume durable_dir = 2;
     ExternalVolumeSource external = 3;
     SystemInfoVolume system_info = 4;
+    ImageVolumeSource image = 5;
   }
 }
 

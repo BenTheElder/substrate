@@ -1627,6 +1627,7 @@ func buildAteomWorkloadSpec(spec *ateletpb.WorkloadSpec) (*ateompb.WorkloadSpec,
 		var ddMounts []*ateompb.DurableDirVolumeMount
 		var csiMounts []*ateompb.VolumeMount
 		var siMounts []*ateompb.SystemInfoVolumeMount
+		var imgMounts []*ateompb.ImageVolumeMount
 		for _, vm := range ctr.GetVolumeMounts() {
 			volName := vm.GetName()
 			vol, ok := volumes[volName]
@@ -1650,6 +1651,11 @@ func buildAteomWorkloadSpec(spec *ateletpb.WorkloadSpec) (*ateompb.WorkloadSpec,
 					VolumeName: volName,
 					MountPath:  vm.GetMountPath(),
 				})
+			case *ateletpb.Volume_Image:
+				imgMounts = append(imgMounts, &ateompb.ImageVolumeMount{
+					VolumeName: volName,
+					MountPath:  vm.GetMountPath(),
+				})
 			default:
 				return nil, fmt.Errorf("container %q mounts volume %q with unsupported source %T", ctr.GetName(), volName, vol.GetSource())
 			}
@@ -1659,6 +1665,7 @@ func buildAteomWorkloadSpec(spec *ateletpb.WorkloadSpec) (*ateompb.WorkloadSpec,
 			DurableDirVolumeMounts: ddMounts,
 			CsiVolumeMounts:        csiMounts,
 			SystemInfoVolumeMounts: siMounts,
+			ImageVolumeMounts:      imgMounts,
 			Readyz:                 toAteomReadyz(ctr.GetReadyz()),
 		})
 	}

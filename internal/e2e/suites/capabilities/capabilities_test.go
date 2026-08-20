@@ -141,11 +141,11 @@ func deployFixture(t *testing.T, bucket string) string {
 		t.Fatalf("FindRepoRoot: %v", err)
 	}
 
-	namespace := e2e.FixtureName("ate-e2e-caps")
+	namespace := e2e.FixtureName("ate-e2e") + "-capabilities"
 
 	// One manifest, rendered for the sandbox class under test (mirrors the
 	// sizing suite).
-	manifest := e2e.RenderFixtureManifest(t, "internal/e2e/fixtures/capabilities/capabilities.yaml.tmpl", bucket)
+	manifest := e2e.RenderFixtureManifest(t, "internal/e2e/fixtures/capabilities/capabilities.yaml.tmpl", bucket, "capabilities")
 
 	// Build/push the probe image and apply through the repo's pinned ko, as the
 	// identity suite does; CI does not install ko on PATH, and KO_CONFIG_PATH is

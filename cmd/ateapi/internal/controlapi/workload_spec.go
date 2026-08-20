@@ -67,6 +67,16 @@ func workloadSpecFromActorTemplate(actorTemplate *atev1alpha1.ActorTemplate, act
 				},
 			})
 
+		case vol.VolumeSource.Image != nil:
+			workloadSpec.Volumes = append(workloadSpec.Volumes, &ateletpb.Volume{
+				Name: vol.Name,
+				Source: &ateletpb.Volume_Image{
+					Image: &ateletpb.ImageVolumeSource{
+						Reference: vol.VolumeSource.Image.Reference,
+					},
+				},
+			})
+
 		default:
 			continue // Drop unrecognized volumes.
 		}

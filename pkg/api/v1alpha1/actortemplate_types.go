@@ -36,6 +36,16 @@ const (
 type DurableDirVolumeSource struct {
 }
 
+// Represents the contents of an OCI image, mounted read-only.
+type ImageVolumeSource struct {
+	// reference is the image to mount.
+	//
+	// +required
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:XValidation:rule="self.contains('@')",message="All images must be pinned (changing the image invalidates snapshots)"
+	Reference string `json:"reference"`
+}
+
 // Represents an external volume dynamically provisioned for each actor.
 type ExternalVolumeTemplate struct {
 	// capacity specifies the size of the volume to create.
@@ -130,12 +140,16 @@ type SystemInfoVolumeSource struct {
 //
 // When adding a new source type, list it in the ExactlyOneOf marker below.
 //
-// +kubebuilder:validation:ExactlyOneOf={durableDir,externalVolumeTemplate,systemInfo}
+// +kubebuilder:validation:ExactlyOneOf={durableDir,externalVolumeTemplate,image,systemInfo}
 type VolumeSource struct {
 	// durableDir represents a durable directory on rootfs that persists across
 	// resumes and participates in snapshots.
 	// +optional
 	DurableDir *DurableDirVolumeSource `json:"durableDir,omitempty"`
+
+	// image represents the contents of an OCI image, mounted read-only.
+	// +optional
+	Image *ImageVolumeSource `json:"image,omitempty"`
 
 	// externalVolumeTemplate represents an external volume dynamically provisioned
 	// for each actor. The volume only lives as long as the actor and is deleted

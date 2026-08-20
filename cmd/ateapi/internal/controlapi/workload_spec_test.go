@@ -137,6 +137,50 @@ func TestWorkloadSpecFromActorTemplate(t *testing.T) {
 			},
 		},
 		{
+			name: "converts Image volume and mounts",
+			template: &atev1alpha1.ActorTemplate{
+				ObjectMeta: metav1.ObjectMeta{Name: "tmpl1", Namespace: "agent-ns"},
+				Spec: atev1alpha1.ActorTemplateSpec{
+					Volumes: []atev1alpha1.Volume{
+						{Name: "home", VolumeSource: atev1alpha1.VolumeSource{DurableDir: &atev1alpha1.DurableDirVolumeSource{}}},
+						{Name: "agent", VolumeSource: atev1alpha1.VolumeSource{Image: &atev1alpha1.ImageVolumeSource{Reference: "example.com/agent@sha256:abc"}}},
+					},
+					Containers: []atev1alpha1.Container{
+						{
+							Name:  "main",
+							Image: "main",
+							VolumeMounts: []atev1alpha1.VolumeMount{
+								{Name: "home", MountPath: "/home/user"},
+								{Name: "agent", MountPath: "/ate"},
+							},
+						},
+					},
+				},
+			},
+			want: &ateletpb.WorkloadSpec{
+				Volumes: []*ateletpb.Volume{
+					{
+						Name:   "home",
+						Source: &ateletpb.Volume_DurableDir{DurableDir: &ateletpb.DurableDirVolume{}},
+					},
+					{
+						Name:   "agent",
+						Source: &ateletpb.Volume_Image{Image: &ateletpb.ImageVolumeSource{Reference: "example.com/agent@sha256:abc"}},
+					},
+				},
+				Containers: []*ateletpb.Container{
+					{
+						Name:  "main",
+						Image: "main",
+						VolumeMounts: []*ateletpb.VolumeMount{
+							{Name: "home", MountPath: "/home/user"},
+							{Name: "agent", MountPath: "/ate"},
+						},
+					},
+				},
+			},
+		},
+		{
 			name: "skips non-DurableDir volumes",
 			template: &atev1alpha1.ActorTemplate{
 				ObjectMeta: metav1.ObjectMeta{Name: "tmpl1", Namespace: "agent-ns"},

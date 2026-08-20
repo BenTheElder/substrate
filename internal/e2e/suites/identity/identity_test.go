@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -32,11 +31,9 @@ import (
 
 const probeTemplate = "probe"
 
-// probeNamespace is where deployProbe applies the fixture, and the atespace its
-// actors live in. Suffixed per sandbox class (see e2e.FixtureName) so the two
-// lanes' fixtures never collide: they run one after the other, and this
-// namespace is deleted by the test that created it.
-var probeNamespace = e2e.FixtureName("ate-e2e-probe")
+// probeNamespace is the suite's own probe fixture namespace, and the atespace
+// its actors live in.
+var probeNamespace string
 
 type whoamiResponse struct {
 	File     string `json:"file"`
@@ -77,7 +74,7 @@ func TestActorIdentity_AfterRestore_IsOwnID_NotGolden(t *testing.T) {
 	ctx := context.Background()
 	clients := e2e.GetClients()
 
-	deployProbe(t, env["BUCKET_NAME"])
+	probeNamespace = e2e.DeployProbe(t, env["BUCKET_NAME"], "identity")
 	golden := waitForGolden(t, ctx, clients)
 
 	// Two distinct actors from the same golden snapshot.
@@ -193,45 +190,6 @@ func waitForActorState(t *testing.T, ctx context.Context, clients *e2e.Clients, 
 		time.Sleep(1 * time.Second)
 	}
 	t.Fatalf("timed out waiting for actor %q to reach state %v", actorName, want)
-}
-
-func deployProbe(t *testing.T, bucket string) {
-	t.Helper()
-	root, err := e2e.FindRepoRoot()
-	if err != nil {
-		t.Fatalf("FindRepoRoot: %v", err)
-	}
-
-	// One manifest, rendered for the sandbox class under test, so both apply and
-	// delete consume the same file without any shell involved.
-	manifest := e2e.RenderFixtureManifest(t, "internal/e2e/fixtures/probe/probe.yaml.tmpl", bucket)
-
-	// Build/push the probe image and apply the manifest through the repo's
-	// pinned ko (hack/run-tool.sh ko); CI does not install ko on PATH, and every
-	// other deploy in this repo goes through this wrapper. The trailing
-	// `-- --context=...` mirrors run_ko in hack/install-ate.sh: ko's apply
-	// subcommand forwards args after `--` to kubectl. KO_CONFIG_PATH is
-	// required because ko resolves .ko.yaml from its working directory, which
-	// is the test's package dir, not the repo root; without it the build
-	// silently loses defaultPlatforms (and produces amd64-only images that
-	// cannot run on arm64 nodes).
-	applyArgs := []string{"ko", "apply", "-f", manifest}
-	if e2e.KubeContext != "" {
-		applyArgs = append(applyArgs, "--", "--context="+e2e.KubeContext)
-	}
-	e2e.RunCmdWithEnv(t, []string{"KO_CONFIG_PATH=" + root}, filepath.Join(root, "hack/run-tool.sh"), applyArgs...)
-
-	t.Cleanup(func() {
-		// Deletion needs no image build, so go straight to kubectl (matching
-		// demo-counter_delete in hack/install-demo-counter.sh). `ko delete`
-		// rejects this arg shape ("you may not specify resource arguments as
-		// well").
-		delArgs := []string{"delete", "--ignore-not-found", "-f", manifest}
-		if e2e.KubeContext != "" {
-			delArgs = append([]string{"--context=" + e2e.KubeContext}, delArgs...)
-		}
-		e2e.RunCmd(t, "kubectl", delArgs...)
-	})
 }
 
 func waitForGolden(t *testing.T, ctx context.Context, clients *e2e.Clients) string {

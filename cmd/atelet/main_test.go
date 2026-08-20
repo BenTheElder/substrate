@@ -1284,6 +1284,44 @@ func TestDrainOnShutdownForceStopsAfterTimeout(t *testing.T) {
 	}
 }
 
+// Image volumes appear on their own ImageVolumeMounts field, separate from durable-dir mounts.
+func TestBuildAteomWorkloadSpec_ImageVolumeMounts(t *testing.T) {
+	spec := &ateletpb.WorkloadSpec{
+		Volumes: []*ateletpb.Volume{
+			{Name: "agent", Source: &ateletpb.Volume_Image{Image: &ateletpb.ImageVolumeSource{}}},
+			{Name: "data", Source: &ateletpb.Volume_DurableDir{DurableDir: &ateletpb.DurableDirVolume{}}},
+			{Name: "ext", Source: &ateletpb.Volume_External{External: &ateletpb.ExternalVolumeSource{}}},
+		},
+		Containers: []*ateletpb.Container{{
+			Name: "app",
+			VolumeMounts: []*ateletpb.VolumeMount{
+				{Name: "agent", MountPath: "/ate"},
+				{Name: "data", MountPath: "/var/data"},
+				{Name: "ext", MountPath: "/mnt/ext"},
+			},
+		}},
+	}
+
+	got, err := buildAteomWorkloadSpec(spec)
+	if err != nil {
+		t.Fatalf("buildAteomWorkloadSpec: %v", err)
+	}
+	if len(got.GetContainers()) != 1 {
+		t.Fatalf("containers = %d, want 1", len(got.GetContainers()))
+	}
+	ctr := got.GetContainers()[0]
+
+	if len(ctr.GetImageVolumeMounts()) != 1 {
+		t.Fatalf("image volume mounts = %v, want 1", ctr.GetImageVolumeMounts())
+	}
+	if name, path := ctr.GetImageVolumeMounts()[0].GetVolumeName(), ctr.GetImageVolumeMounts()[0].GetMountPath(); name != "agent" || path != "/ate" {
+		t.Errorf("image volume mount = (%q, %q), want (agent, /ate)", name, path)
+	}
+	if len(ctr.GetDurableDirVolumeMounts()) != 1 || ctr.GetDurableDirVolumeMounts()[0].GetVolumeName() != "data" {
+		t.Errorf("durable mounts = %v, want just data", ctr.GetDurableDirVolumeMounts())
+	}
+}
+
 // allocatedBytes reports how much disk a file actually occupies, which is less than its
 // size when it has holes.
 func allocatedBytes(t *testing.T, path string) int64 {
