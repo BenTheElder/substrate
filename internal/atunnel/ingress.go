@@ -73,7 +73,6 @@ type Config struct {
 	CredentialBundlePath string
 	TrustBundlePath      string
 	AllowedClientID      string
-	Upstream             *url.URL
 }
 
 // Server is an activation-aware HTTPS reverse proxy. It is long-lived across
@@ -82,11 +81,20 @@ type Config struct {
 type Server struct {
 	credentialBundlePath string
 	tlsConfig            *tls.Config
-	proxy                *httputil.ReverseProxy
-	upstream             *url.URL
+	// newTransport builds the round tripper for each actor's proxy. A factory
+	// rather than one shared transport so every actor gets its own connection
+	// pool: pod-side addresses are reused as actors come and go, and a pooled
+	// connection outliving its actor would hand the next one a socket to its
+	// predecessor. Overridable so tests can supply a fake.
+	newTransport func() http.RoundTripper
 
-	mu     sync.Mutex
-	active *activation
+	mu sync.Mutex
+	// active is every actor this worker is currently serving, keyed by the
+	// identity the request carries. A worker hosts several actors at once, and
+	// they share one listener: the Host header is what selects between them, so
+	// routing is a lookup here rather than a comparison against the one actor
+	// that used to be allowed.
+	active map[resources.ActorRef]*activation
 }
 
 type activation struct {
@@ -94,6 +102,15 @@ type activation struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	// upstream is where this actor is reached, which differs per actor: the
+	// worker pod addresses each of them by a distinct pod-side address even
+	// though every actor believes it holds the same one. Held per activation
+	// rather than per server for that reason.
+	upstream *url.URL
+	// proxy is bound to upstream, so each actor gets its own connection pool and
+	// deactivating one cannot close another's idle connections.
+	proxy *httputil.ReverseProxy
 }
 
 // NewServer creates a Server and validates its TLS material.
@@ -107,10 +124,6 @@ func NewServer(cfg Config) (*Server, error) {
 	if cfg.AllowedClientID == "" {
 		return nil, fmt.Errorf("atunnel: allowed client identity is required")
 	}
-	if cfg.Upstream == nil || cfg.Upstream.Scheme == "" || cfg.Upstream.Host == "" {
-		return nil, fmt.Errorf("atunnel: upstream URL is required")
-	}
-
 	// Load once at startup so a malformed or missing projection fails the pod
 	// promptly. GetCertificate reloads the bundle for every new TLS connection,
 	// allowing kubelet's projected certificate rotation to take effect.
@@ -126,33 +139,12 @@ func NewServer(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("atunnel: trust bundle %q contains no certificates", cfg.TrustBundlePath)
 	}
 
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	proxy := &httputil.ReverseProxy{
-		Rewrite: func(pr *httputil.ProxyRequest) {
-			pr.SetURL(cfg.Upstream)
-			// Retain the actor's stable mesh hostname rather than the
-			// upstream's, matching NewSingleHostReverseProxy's default
-			// behavior.
-			pr.Out.Host = pr.In.Host
-
-			port := pr.In.Header.Get(TargetPortHeader)
-			pr.Out.Header.Del(TargetPortHeader)
-			if p, ok := ParsePort(port); ok {
-				pr.Out.URL.Host = net.JoinHostPort(cfg.Upstream.Hostname(), strconv.Itoa(p))
-			}
-			pr.SetXForwarded()
-		},
-		Transport: transport,
-		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			slog.WarnContext(r.Context(), "atunnel upstream request failed", slog.Any("err", err))
-			http.Error(w, "bad gateway", http.StatusBadGateway)
-		},
-	}
-
 	s := &Server{
 		credentialBundlePath: cfg.CredentialBundlePath,
-		proxy:                proxy,
-		upstream:             cfg.Upstream,
+		active:               map[resources.ActorRef]*activation{},
+		newTransport: func() http.RoundTripper {
+			return http.DefaultTransport.(*http.Transport).Clone()
+		},
 	}
 	s.tlsConfig = &tls.Config{
 		MinVersion: tls.VersionTLS12,
@@ -239,7 +231,7 @@ func (s *Server) ServeConnectHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "CONNECT required", http.StatusMethodNotAllowed)
 		return
 	}
-	ref, ctx, release, ok := s.authorize(r)
+	active, ctx, release, ok := s.authorize(r)
 	if !ok {
 		s.reject(w)
 		return
@@ -257,9 +249,9 @@ func (s *Server) ServeConnectHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
-	upstream, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(s.upstream.Hostname(), port))
+	upstream, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(active.upstream.Hostname(), port))
 	if err != nil {
-		slog.WarnContext(r.Context(), "atunnel CONNECT upstream failed", slog.Any("actor", ref), slog.Any("err", err))
+		slog.WarnContext(r.Context(), "atunnel CONNECT upstream failed", slog.Any("actor", active.ref), slog.Any("err", err))
 		http.Error(w, "bad gateway", http.StatusBadGateway)
 		return
 	}
@@ -351,30 +343,68 @@ func (w flushingWriter) Write(p []byte) (int, error) {
 
 // Activate allows requests for actorName in atespace. There can be only one
 // active actor per worker.
-func (s *Server) Activate(atespace, actorName string) error {
+func (s *Server) Activate(atespace, actorName string, upstream *url.URL) error {
 	if !resources.IsValidResourceName(atespace) || !resources.IsValidResourceName(actorName) {
 		return fmt.Errorf("atunnel: invalid actor identity %q/%q", atespace, actorName)
 	}
+	if upstream == nil || upstream.Scheme == "" || upstream.Host == "" {
+		return fmt.Errorf("atunnel: upstream URL is required")
+	}
+	ref := resources.ActorRef{Atespace: atespace, Name: actorName}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.active != nil {
-		return fmt.Errorf("atunnel: actor %s is already active", s.active.ref)
+	// Only this actor's own prior activation is in the way. Another actor being
+	// served is now the normal case, not a conflict.
+	if existing, ok := s.active[ref]; ok {
+		return fmt.Errorf("atunnel: actor %s is already active", existing.ref)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	s.active = &activation{
-		ref:    resources.ActorRef{Atespace: atespace, Name: actorName},
-		ctx:    ctx,
-		cancel: cancel,
+	s.active[ref] = &activation{
+		ref:      ref,
+		ctx:      ctx,
+		cancel:   cancel,
+		upstream: upstream,
+		proxy:    newActorProxy(upstream, s.newTransport()),
 	}
 	return nil
 }
 
-// Deactivate rejects new requests, cancels requests for the active actor, and
-// waits for their handlers to exit before returning.
-func (s *Server) Deactivate(ctx context.Context) error {
+// newActorProxy builds the reverse proxy for one actor. Each activation gets its
+// own, so an actor's connection pool belongs to it alone and deactivating one
+// actor cannot drop another's idle upstream connections.
+func newActorProxy(upstream *url.URL, transport http.RoundTripper) *httputil.ReverseProxy {
+	return &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.SetURL(upstream)
+			// Retain the actor's stable mesh hostname rather than the
+			// upstream's, matching NewSingleHostReverseProxy's default
+			// behavior.
+			pr.Out.Host = pr.In.Host
+
+			port := pr.In.Header.Get(TargetPortHeader)
+			pr.Out.Header.Del(TargetPortHeader)
+			if p, ok := ParsePort(port); ok {
+				pr.Out.URL.Host = net.JoinHostPort(upstream.Hostname(), strconv.Itoa(p))
+			}
+			pr.SetXForwarded()
+		},
+		Transport: transport,
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			slog.WarnContext(r.Context(), "atunnel upstream request failed", slog.Any("err", err))
+			http.Error(w, "bad gateway", http.StatusBadGateway)
+		},
+	}
+}
+
+// Deactivate rejects new requests for one actor, cancels the requests already
+// in flight for it, and waits for their handlers to exit. Other actors on this
+// worker are untouched.
+func (s *Server) Deactivate(ctx context.Context, atespace, actorName string) error {
+	ref := resources.ActorRef{Atespace: atespace, Name: actorName}
 	s.mu.Lock()
-	active := s.active
-	s.active = nil
+	active := s.active[ref]
+	delete(s.active, ref)
 	if active != nil {
 		active.cancel()
 	}
@@ -390,23 +420,27 @@ func (s *Server) Deactivate(ctx context.Context) error {
 	}()
 	select {
 	case <-done:
-		s.closeIdleUpstreamConnections()
+		closeIdleUpstreamConnections(active)
 		return nil
 	case <-ctx.Done():
-		s.closeIdleUpstreamConnections()
+		closeIdleUpstreamConnections(active)
 		return fmt.Errorf("atunnel: waiting for active requests to stop: %w", ctx.Err())
 	}
 }
 
-func (s *Server) closeIdleUpstreamConnections() {
-	if transport, ok := s.proxy.Transport.(interface{ CloseIdleConnections() }); ok {
+// closeIdleUpstreamConnections drops one actor's idle upstream connections. Its
+// pod-side address can be reused by the next actor to take the slot, so leaving
+// a pooled connection open would let a later actor inherit a socket to its
+// predecessor.
+func closeIdleUpstreamConnections(active *activation) {
+	if transport, ok := active.proxy.Transport.(interface{ CloseIdleConnections() }); ok {
 		transport.CloseIdleConnections()
 	}
 }
 
 // ServeHTTP validates the actor hostname on every request before proxying it.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	_, requestCtx, release, ok := s.authorize(r)
+	active, requestCtx, release, ok := s.authorize(r)
 	if !ok {
 		s.reject(w)
 		return
@@ -425,28 +459,28 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// ReverseProxy changes the URL destination but intentionally retains Host,
 	// allowing the actor application to observe its stable actor DNS name.
-	s.proxy.ServeHTTP(w, r.WithContext(requestCtx))
+	active.proxy.ServeHTTP(w, r.WithContext(requestCtx))
 }
 
-func (s *Server) authorize(r *http.Request) (resources.ActorRef, context.Context, func(), bool) {
+func (s *Server) authorize(r *http.Request) (*activation, context.Context, func(), bool) {
 	actorHost := r.Header.Get(OriginalHostHeader)
 	if actorHost == "" {
 		actorHost = r.Host
 	}
 	host, err := requestHostname(actorHost)
 	if err != nil {
-		return resources.ActorRef{}, nil, nil, false
+		return nil, nil, nil, false
 	}
 	ref, err := resources.ParseActorDNSName(host)
 	if err != nil {
-		return resources.ActorRef{}, nil, nil, false
+		return nil, nil, nil, false
 	}
 
 	s.mu.Lock()
-	active := s.active
-	if active == nil || active.ref != ref {
+	active, ok := s.active[ref]
+	if !ok {
 		s.mu.Unlock()
-		return resources.ActorRef{}, nil, nil, false
+		return nil, nil, nil, false
 	}
 	active.wg.Add(1)
 	s.mu.Unlock()
@@ -457,7 +491,7 @@ func (s *Server) authorize(r *http.Request) (resources.ActorRef, context.Context
 		stop()
 		cancel()
 	}
-	return ref, requestCtx, release, true
+	return active, requestCtx, release, true
 }
 
 func (s *Server) reject(w http.ResponseWriter) {

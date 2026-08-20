@@ -47,9 +47,19 @@ type OriginalDestination func(net.Conn) (string, error)
 // is assigned to its worker.
 type Egress struct {
 	originalDestination OriginalDestination
+	// actorSource resolves which actor a redirected connection came from. A
+	// seam for the same reason originalDestination is one: the production
+	// answer reads a real socket, which a test cannot produce from a pipe.
+	actorSource func(net.Conn) (string, bool)
 
-	mu     sync.Mutex
-	active *egressActivation
+	mu sync.Mutex
+	// active is every actor with egress armed, keyed by the pod-side address
+	// its traffic arrives from. A worker's actors all believe they hold the same
+	// address, so that is not what distinguishes them here: the worker rewrites
+	// each actor's source to an address unique to it before the redirect, and
+	// the accepted connection's remote address is therefore the actor's
+	// identity. See internal/actornet.
+	active map[string]*egressActivation
 }
 
 type egressActivation struct {
@@ -71,6 +81,7 @@ func NewEgress(originalDestination OriginalDestination) (*Egress, error) {
 	}
 	return &Egress{
 		originalDestination: originalDestination,
+		actorSource:         remoteIPKey,
 	}, nil
 }
 
@@ -101,7 +112,10 @@ func (e *Egress) Serve(ctx context.Context, listener net.Listener) error {
 
 // Activate allows egress with a previously obtained actor certificate and
 // renews it until deactivation.
-func (e *Egress) Activate(dialer egressDialer, certificateSource actorCertificateSource, expiresAt time.Time) error {
+func (e *Egress) Activate(podSideIP net.IP, dialer egressDialer, certificateSource actorCertificateSource, expiresAt time.Time) error {
+	if len(podSideIP) == 0 {
+		return fmt.Errorf("atunnel: actor pod-side address is required")
+	}
 	if dialer == nil {
 		return fmt.Errorf("atunnel: egress dialer is required")
 	}
@@ -111,10 +125,16 @@ func (e *Egress) Activate(dialer egressDialer, certificateSource actorCertificat
 	if !expiresAt.After(time.Now()) {
 		return fmt.Errorf("atunnel: valid actor certificate is required")
 	}
+	key := podSideIP.String()
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.active != nil {
-		return fmt.Errorf("atunnel: actor already has active egress")
+	if e.active == nil {
+		e.active = map[string]*egressActivation{}
+	}
+	// Only a second activation for the SAME actor is a conflict; other actors
+	// having egress armed is the ordinary case.
+	if _, ok := e.active[key]; ok {
+		return fmt.Errorf("atunnel: actor at %s already has active egress", key)
 	}
 	activationCtx, cancel := context.WithCancel(context.Background())
 	active := &egressActivation{
@@ -124,7 +144,7 @@ func (e *Egress) Activate(dialer egressDialer, certificateSource actorCertificat
 		ctx:               activationCtx,
 		cancel:            cancel,
 	}
-	e.active = active
+	e.active[key] = active
 	active.wg.Add(1)
 	go e.renew(active, expiresAt)
 	return nil
@@ -209,10 +229,16 @@ func waitForRenewal(ctx context.Context, delay time.Duration) bool {
 
 // Deactivate rejects new egress, closes active streams, and waits for their
 // forwarding goroutines to exit.
-func (e *Egress) Deactivate(ctx context.Context) error {
+// Deactivate disarms one actor's egress and waits for its tunnels to drain.
+// Other actors on this worker keep theirs.
+func (e *Egress) Deactivate(ctx context.Context, podSideIP net.IP) error {
+	key := ""
+	if len(podSideIP) > 0 {
+		key = podSideIP.String()
+	}
 	e.mu.Lock()
-	active := e.active
-	e.active = nil
+	active := e.active[key]
+	delete(e.active, key)
 	if active != nil {
 		active.expiresAt = time.Time{}
 		active.cancel()
@@ -236,8 +262,17 @@ func (e *Egress) Deactivate(ctx context.Context) error {
 }
 
 func (e *Egress) handle(downstream net.Conn) {
+	// The actor is identified by where the connection came from. The redirect
+	// preserves the source address, and the worker has already rewritten it to
+	// one that names a single actor, so no lookup table beyond this map is
+	// needed and no actor can be mistaken for another.
+	key, ok := e.actorSource(downstream)
+	if !ok {
+		_ = downstream.Close()
+		return
+	}
 	e.mu.Lock()
-	active := e.active
+	active := e.active[key]
 	if active == nil {
 		e.mu.Unlock()
 		_ = downstream.Close()
@@ -299,4 +334,14 @@ func closeWrite(conn net.Conn) {
 	if conn, ok := conn.(interface{ CloseWrite() error }); ok {
 		_ = conn.CloseWrite()
 	}
+}
+
+// remoteIPKey is the production actorSource: the address a redirected
+// connection came from, which the worker has already made unique per actor.
+func remoteIPKey(conn net.Conn) (string, bool) {
+	addr, ok := conn.RemoteAddr().(*net.TCPAddr)
+	if !ok || addr.IP == nil {
+		return "", false
+	}
+	return addr.IP.String(), true
 }
