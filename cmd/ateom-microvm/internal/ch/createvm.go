@@ -60,9 +60,22 @@ type CpusConfig struct {
 // MemoryConfig sets guest RAM. Shared=true makes CH back RAM with a memfd, which
 // is what lets vm.snapshot write a SPARSE image (the memory-only snapshot the
 // rest of ateom relies on).
+//
+// HotplugSize reserves address space the guest can be grown into later, which is
+// how a guest boots at a floor and reaches its declared size afterwards (see
+// bootMemMiB). It is only address space: the kernel does not build page tables
+// for it until memory is actually plugged, which is the whole point.
+//
+// HotplugMethod must be "VirtioMem", spelled the way the API enum serializes it —
+// the CLI takes "virtio-mem" but vm.create rejects that spelling outright. The
+// method matters: with cloud-hypervisor's default (ACPI) vm.resize returns 204 and
+// silently does nothing, measured on aarch64 as a guest that stayed at its boot
+// size with no new memory blocks.
 type MemoryConfig struct {
-	Size   int64 `json:"size"`
-	Shared bool  `json:"shared"`
+	Size          int64  `json:"size"`
+	Shared        bool   `json:"shared"`
+	HotplugMethod string `json:"hotplug_method,omitempty"`
+	HotplugSize   int64  `json:"hotplug_size,omitempty"`
 }
 
 // PayloadConfig points at the guest kernel + its cmdline (initramfs/firmware

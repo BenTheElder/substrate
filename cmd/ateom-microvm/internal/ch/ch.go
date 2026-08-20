@@ -116,6 +116,41 @@ func (c *Client) Resume(ctx context.Context) error {
 	return c.api.put(ctx, "/api/v1/vm.resume", nil)
 }
 
+// resizeConfig is the vm.resize body. Only memory is used here; CH also takes
+// desired_vcpus and desired_balloon, which ateom does not drive.
+type resizeConfig struct {
+	DesiredRAM int64 `json:"desired_ram"`
+}
+
+// Resize grows the guest to totalBytes by plugging memory into the region
+// MemoryConfig.HotplugSize reserved at boot. The call is asynchronous as far as
+// the guest is concerned: it sets the device's requested size and the guest's
+// virtio-mem driver plugs up to it, so callers that need the memory to be there
+// must wait for HotpluggedBytes to catch up.
+func (c *Client) Resize(ctx context.Context, totalBytes int64) error {
+	return c.api.put(ctx, "/api/v1/vm.resize", resizeConfig{DesiredRAM: totalBytes})
+}
+
+// vmInfo is the subset of vm.info ateom reads back.
+type vmInfo struct {
+	Config struct {
+		Memory struct {
+			HotpluggedSize int64 `json:"hotplugged_size"`
+		} `json:"memory"`
+	} `json:"config"`
+}
+
+// HotpluggedBytes reports how much of the hotplug region the GUEST has accepted.
+// virtio-mem only counts memory the guest's driver actually plugged, so this is
+// the check that the growth landed rather than being silently dropped.
+func (c *Client) HotpluggedBytes(ctx context.Context) (int64, error) {
+	var info vmInfo
+	if err := c.api.getJSON(ctx, "/api/v1/vm.info", &info); err != nil {
+		return 0, err
+	}
+	return info.Config.Memory.HotpluggedSize, nil
+}
+
 // Snapshot writes the (paused) guest's state to destDir as a CH snapshot
 // (config.json + state.json + memory-ranges). The guest must be paused first.
 func (c *Client) Snapshot(ctx context.Context, destDir string) error {

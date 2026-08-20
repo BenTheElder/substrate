@@ -242,3 +242,52 @@ func TestWorkloadIDs(t *testing.T) {
 		t.Errorf("workloadIDs() = %v, want %v", got, want)
 	}
 }
+
+// A guest boots at the floor and is grown into a virtio-mem region afterwards, so
+// kernel init does not scale with the actor's declared RAM. An actor at or below
+// the floor must get no hotplug region at all — an empty region would mean a device
+// and a growth wait for nothing.
+func TestBootAndHotplugMiB(t *testing.T) {
+	tests := []struct {
+		mem, wantBoot, wantHotplug int
+	}{
+		{mem: 2048, wantBoot: bootMemMiB, wantHotplug: 2048 - bootMemMiB},
+		{mem: 384, wantBoot: bootMemMiB, wantHotplug: 384 - bootMemMiB},
+		{mem: bootMemMiB, wantBoot: bootMemMiB, wantHotplug: 0},
+		{mem: minGuestMemMiB, wantBoot: minGuestMemMiB, wantHotplug: 0},
+	}
+	for _, tc := range tests {
+		boot, hotplug := bootAndHotplugMiB(tc.mem)
+		if boot != tc.wantBoot || hotplug != tc.wantHotplug {
+			t.Errorf("bootAndHotplugMiB(%d) = %d, %d; want %d, %d",
+				tc.mem, boot, hotplug, tc.wantBoot, tc.wantHotplug)
+		}
+		if boot+hotplug != tc.mem {
+			t.Errorf("bootAndHotplugMiB(%d) loses memory: %d + %d", tc.mem, boot, hotplug)
+		}
+		// The method must be virtio-mem whenever there is a region: with CH's
+		// default (ACPI) vm.resize returns 204 and silently does nothing.
+		if got, want := hotplugMethod(hotplug), map[bool]string{true: "VirtioMem", false: ""}[hotplug > 0]; got != want {
+			t.Errorf("hotplugMethod(%d) = %q, want %q", hotplug, got, want)
+		}
+	}
+}
+
+// The VM config must boot small and carry the region, so the guest kernel never
+// builds page tables for memory the actor may not touch until later.
+func TestBuildVMConfigBootsAtFloor(t *testing.T) {
+	cfg := buildVMConfig("actor-1", "/vmlinux", "/rootfs.img", "", "/console.log", 2048, 2, true, false)
+	if got, want := cfg.Memory.Size, int64(bootMemMiB)*1024*1024; got != want {
+		t.Errorf("Memory.Size = %d, want the boot floor %d", got, want)
+	}
+	if got, want := cfg.Memory.HotplugSize, int64(2048-bootMemMiB)*1024*1024; got != want {
+		t.Errorf("Memory.HotplugSize = %d, want %d", got, want)
+	}
+	if cfg.Memory.HotplugMethod != "VirtioMem" {
+		t.Errorf("Memory.HotplugMethod = %q, want VirtioMem", cfg.Memory.HotplugMethod)
+	}
+	small := buildVMConfig("actor-1", "/vmlinux", "/rootfs.img", "", "/console.log", minGuestMemMiB, 2, true, false)
+	if small.Memory.HotplugSize != 0 || small.Memory.HotplugMethod != "" {
+		t.Errorf("a floor-sized guest got a hotplug region: %+v", small.Memory)
+	}
+}

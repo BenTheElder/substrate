@@ -152,6 +152,28 @@ const vmmMemReserveMiB = 128
 // binary needs more, and this floor cannot know how much.
 const minGuestMemMiB = 128
 
+// bootMemMiB is how much RAM the guest BOOTS with, regardless of what the actor
+// declared; the rest arrives over virtio-mem before any container starts (see
+// growGuestMemory). Kernel init scales with RAM — it builds the struct-page array
+// for every page it is given — and a hotplug region costs nothing until memory is
+// plugged into it. Measured on a GKE worker, boot to the agent answering:
+//
+//	size=2048M                                  493 ms  (kernel to init 339 ms)
+//	size=256M,hotplug_method=virtio-mem,+1792M  369 ms  (kernel to init 235 ms)
+//	size=256M                                   366 ms
+//
+// so a 2 GiB actor boots at the 256 MiB price. Growth itself is ~0 ms of API and
+// the guest accepts the whole region ~5 ms later.
+const bootMemMiB = 256
+
+// guestGrowTimeout bounds the wait for the guest to accept its hotplug memory
+// (measured at ~5 ms on a GKE worker), and guestGrowInterval is how often that is
+// polled. The timeout is generous because failing here fails the actor.
+const (
+	guestGrowTimeout  = 10 * time.Second
+	guestGrowInterval = 2 * time.Millisecond
+)
+
 // maxActorContainers is a sanity cap on containers per actor (all share the one
 // micro-VM + virtiofsd). 25 is far above any real pod.
 const maxActorContainers = 25
@@ -536,11 +558,12 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 	}
 	slog.InfoContext(ctx, "Micro-VM booted", slog.String("id", actorUID), slog.String("api", apiSocket))
 
+	tBooted := time.Now()
+
 	// Dial the kata-agent over hybrid-vsock. The agent only starts listening once
 	// the guest's init reaches kata-containers.target — well after CH creates the
 	// vsock socket file — so poll the CONNECT until it answers (as the kata shim
 	// does), rather than dialing once.
-	tBooted := time.Now()
 	vsockPath := kata.VsockSocketPath(actorUID)
 	if !waitForFile(vsockPath, 15*time.Second) {
 		return fmt.Errorf("kata-agent vsock socket %q did not appear", vsockPath)
@@ -552,6 +575,18 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 		return fmt.Errorf("while dialing kata-agent: %w", err)
 	}
 	tDialed := time.Now()
+
+	// Grow to the declared size now, not right after vm.boot: the guest plugs memory
+	// as soon as its virtio-mem driver probes, so growing earlier just moves the
+	// struct-page cost back inside kernel init and gives all of the boot saving back
+	// (measured in production: growing at boot left agent_dial at 423-434 ms against
+	// a 445-450 ms full-size control, versus ~300 ms when the guest boots small and
+	// stays small until it is up). Still before any container starts, so the workload
+	// never sees the boot floor.
+	if err := growGuestMemory(ctx, client, memMiB); err != nil {
+		return err
+	}
+	tGrown := time.Now()
 	// The agent client must stay open past this RPC: the stdout/stderr forwarding
 	// goroutines (started below) read over it for the actor's lifetime. It is stored
 	// on the runningActor and closed by teardownActor. Close it here only if Run
@@ -578,7 +613,8 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 	slog.InfoContext(ctx, "Actor boot phases", slog.String("id", actorUID),
 		slog.Duration("vsock_wait", tVsock.Sub(tBooted)),
 		slog.Duration("agent_dial", tDialed.Sub(tVsock)),
-		slog.Duration("containers", tContainers.Sub(tDialed)),
+		slog.Duration("grow", tGrown.Sub(tDialed)),
+		slog.Duration("containers", tContainers.Sub(tGrown)),
 		slog.Duration("readyz", time.Since(tContainers)),
 		slog.Duration("since_boot", time.Since(tBooted)))
 
@@ -832,6 +868,7 @@ func initParams(agentInit bool) string {
 // map, CPU features and ACPI lines never reach the log. kataDebug adds the UART back
 // with earlycon (and pays the ~800ms) for diagnosing a guest that dies before then.
 func buildVMConfig(id, kernel, image, kparams, consoleLog string, memMiB, vcpus int, agentInit, debug bool) ch.VmConfig {
+	bootMiB, hotplugMiB := bootAndHotplugMiB(memMiB)
 	cmdline := "root=/dev/vda1 rootflags=data=ordered,errors=remount-ro ro rootfstype=ext4 " +
 		"panic=1 no_timer_check noreplace-smp console=hvc0 " +
 		initParams(agentInit)
@@ -845,7 +882,12 @@ func buildVMConfig(id, kernel, image, kparams, consoleLog string, memMiB, vcpus 
 	}
 	return ch.VmConfig{
 		Cpus:    ch.CpusConfig{BootVcpus: int32(vcpus), MaxVcpus: int32(vcpus)},
-		Memory:  ch.MemoryConfig{Size: int64(memMiB) * 1024 * 1024, Shared: true},
+		Memory: ch.MemoryConfig{
+			Size:          int64(bootMiB) * 1024 * 1024,
+			Shared:        true,
+			HotplugMethod: hotplugMethod(hotplugMiB),
+			HotplugSize:   int64(hotplugMiB) * 1024 * 1024,
+		},
 		Payload: ch.PayloadConfig{Kernel: kernel, Cmdline: cmdline},
 		Disks: []ch.DiskConfig{
 			{Path: image, Readonly: true, ImageType: "Raw", NumQueues: int32(vcpus), QueueSize: 1024},
@@ -856,6 +898,65 @@ func buildVMConfig(id, kernel, image, kparams, consoleLog string, memMiB, vcpus 
 		Console:  &ch.ConsoleConfig{Mode: "File", File: consoleLog},
 		Serial:   serial,
 		Vsock:    &ch.VsockConfig{Cid: 3, Socket: kata.VsockSocketPath(id)},
+	}
+}
+
+// bootAndHotplugMiB splits an actor's guest RAM into what the VM boots with and
+// what it is grown into afterwards. A guest at or below the boot floor needs no
+// hotplug region at all, and gets none: no device, nothing to grow, nothing to
+// verify.
+func bootAndHotplugMiB(memMiB int) (boot, hotplug int) {
+	if memMiB <= bootMemMiB {
+		return memMiB, 0
+	}
+	return bootMemMiB, memMiB - bootMemMiB
+}
+
+// hotplugMethod returns the method for a hotplug region, or "" when there is none.
+// It is always virtio-mem, spelled the way the API enum serializes it: the CLI takes
+// "virtio-mem" but vm.create rejects that spelling. The method matters because
+// cloud-hypervisor's default (ACPI) accepts vm.resize with a 204 and then does
+// nothing at all, which would leave an actor running on the boot floor instead of
+// the memory it declared.
+func hotplugMethod(hotplugMiB int) string {
+	if hotplugMiB == 0 {
+		return ""
+	}
+	return "VirtioMem"
+}
+
+// growGuestMemory plugs the rest of the actor's declared RAM into the booted guest
+// and waits for the guest to take it. The wait is the point: vm.resize only sets
+// the device's requested size, so without confirming that the guest's virtio-mem
+// driver plugged the memory, a silently-failed growth would surface much later as
+// the workload OOMing at a size it never agreed to.
+func growGuestMemory(ctx context.Context, client *ch.Client, memMiB int) error {
+	_, hotplugMiB := bootAndHotplugMiB(memMiB)
+	if hotplugMiB == 0 {
+		return nil
+	}
+	want := int64(hotplugMiB) * 1024 * 1024
+	if err := client.Resize(ctx, int64(memMiB)*1024*1024); err != nil {
+		return fmt.Errorf("while growing guest to %dMiB: %w", memMiB, err)
+	}
+	deadline := time.Now().Add(guestGrowTimeout)
+	for {
+		got, err := client.HotpluggedBytes(ctx)
+		if err != nil {
+			return fmt.Errorf("while checking guest memory growth: %w", err)
+		}
+		if got >= want {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("guest took %d of %d bytes of hotplug memory within %v",
+				got, want, guestGrowTimeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(guestGrowInterval):
+		}
 	}
 }
 
