@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 
 	"cloud.google.com/go/storage"
 	"github.com/agent-substrate/substrate/internal/ateerrors"
@@ -27,6 +28,10 @@ import (
 
 type gcsClient struct {
 	client *storage.Client
+	// pool holds extra clients so concurrent upload parts get their own connections;
+	// built on first use by uploadClient.
+	poolOnce sync.Once
+	pool     []*storage.Client
 }
 
 func NewGCSClient(client *storage.Client) ObjectStorage {

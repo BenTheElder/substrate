@@ -29,7 +29,7 @@ import (
 )
 
 // emulatorClient returns a storage client bound to a GCS emulator, or skips. The Go
-// client honours STORAGE_EMULATOR_HOST, so:
+// client honors STORAGE_EMULATOR_HOST, so:
 //
 //	docker run -d -p 4443:4443 fsouza/fake-gcs-server -scheme http -public-host localhost:4443
 //	STORAGE_EMULATOR_HOST=localhost:4443 go test ./cmd/atelet/internal/ategcs -run Composite
