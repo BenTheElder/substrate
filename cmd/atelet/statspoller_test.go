@@ -58,7 +58,7 @@ func (f *fakeStatsAteom) GetActiveWorkloadStats(ctx context.Context, req *ateomp
 // executingResponse builds the sample an executing ateom would echo.
 func executingResponse(templateNS, templateName string, class ateompb.SandboxClass, source ateompb.StatsSource, current, workingSet uint64) *ateompb.GetActiveWorkloadStatsResponse {
 	return &ateompb.GetActiveWorkloadStatsResponse{
-		Result: &ateompb.GetActiveWorkloadStatsResponse_Sample{Sample: &ateompb.WorkloadStatsSample{
+		Samples: []*ateompb.WorkloadStatsSample{{
 			ActorTemplateNamespace: templateNS,
 			ActorTemplateName:      templateName,
 			SandboxClass:           class,
@@ -70,9 +70,7 @@ func executingResponse(templateNS, templateName string, class ateompb.SandboxCla
 }
 
 func noSampleResponse(reason ateompb.NoSampleReason) *ateompb.GetActiveWorkloadStatsResponse {
-	return &ateompb.GetActiveWorkloadStatsResponse{
-		Result: &ateompb.GetActiveWorkloadStatsResponse_NoSampleReason{NoSampleReason: reason},
-	}
+	return &ateompb.GetActiveWorkloadStatsResponse{NoSampleReason: reason}
 }
 
 // closeRecorder counts Close calls, standing in for a probe's connection.
@@ -280,7 +278,7 @@ func gaugePointCount(t *testing.T, reader *sdkmetric.ManualReader, name string) 
 // delta tests.
 func cpuResponse(actorUID string, cpuUsec uint64) *ateompb.GetActiveWorkloadStatsResponse {
 	return &ateompb.GetActiveWorkloadStatsResponse{
-		Result: &ateompb.GetActiveWorkloadStatsResponse_Sample{Sample: &ateompb.WorkloadStatsSample{
+		Samples: []*ateompb.WorkloadStatsSample{{
 			ActorUid:               actorUID,
 			ActorTemplateNamespace: "ns-a",
 			ActorTemplateName:      "tmpl-a",

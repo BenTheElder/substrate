@@ -493,7 +493,7 @@ func (s *AteomHerder) Run(ctx context.Context, req *ateletpb.RunRequest) (resp *
 	}
 
 	if err := s.prepareOCIBundles(ctx, actorUID, actorRef,
-		req.GetSpec(), sandboxRec.PauseImage, req.GetTargetAteomUid(),
+		req.GetSpec(), sandboxRec.PauseImage,
 	); err != nil {
 		return nil, ateerrors.CrashIfReason(ctx, err, ateerrors.ReasonInvalidContainerConfig)
 	}
@@ -1140,7 +1140,7 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 			return ateerrors.CrashIfReason(ctx, err, ateerrors.ReasonFailedGetExternalObject, ateerrors.ReasonInvalidObjectURL, ateerrors.ReasonTerminalFileSystemError, ateerrors.ReasonInvalidSandboxAsset)
 		}
 		t := time.Now()
-		err = s.prepareOCIBundles(gctx, actorUID, actorRef, req.GetSpec(), runtimeRec.PauseImage, req.GetTargetAteomUid())
+		err = s.prepareOCIBundles(gctx, actorUID, actorRef, req.GetSpec(), runtimeRec.PauseImage)
 		dBundles = time.Since(t)
 		if err != nil {
 			prepFailedPhase = ateattr.SnapshotPhaseOCIUnpack
@@ -1512,7 +1512,6 @@ func (s *AteomHerder) prepareOCIBundles(
 	actorRef resources.ActorRef,
 	spec *ateletpb.WorkloadSpec,
 	pauseImage string,
-	targetAteomUid string,
 ) error {
 	// Prepare host folders for volume types that need them.
 	for _, vol := range spec.GetVolumes() {
@@ -1559,7 +1558,7 @@ func (s *AteomHerder) prepareOCIBundles(
 			nil,
 			nil,
 			annotations,
-			ateompath.AteomNetNSPath(targetAteomUid),
+			ateompath.ActorNetNSPath(actorUID),
 			nil, // pause is sandbox infra; it mounts no volumes.
 			nil,
 			nil, // pause only reaps; it needs no capabilities.
@@ -1591,7 +1590,7 @@ func (s *AteomHerder) prepareOCIBundles(
 					"io.kubernetes.cri.sandbox-id":     "pause",
 					"io.kubernetes.cri.container-name": ctr.GetName(),
 				},
-				ateompath.AteomNetNSPath(targetAteomUid),
+				ateompath.ActorNetNSPath(actorUID),
 				spec.GetVolumes(),
 				ctr.GetVolumeMounts(),
 				resolveCapabilities(ctr.GetSecurityContext().GetCapabilities()),

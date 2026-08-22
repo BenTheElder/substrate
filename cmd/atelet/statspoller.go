@@ -279,47 +279,54 @@ func (p *statsPoller) collect(ctx context.Context) map[templateKey]*templateAggr
 				return nil
 			}
 
-			sample := resp.GetSample()
-			if sample == nil {
+			// A worker can be executing several actors, so every sample in the
+			// answer is folded in. Taking the first would under-report a
+			// multi-actor worker, silently and in the direction that looks
+			// healthy.
+			samples := resp.GetSamples()
+			if len(samples) == 0 {
 				// NO_WORKLOAD or NOT_MEASURABLE_YET: normal answers, nothing to
 				// add.
 				return nil
 			}
 
-			key := templateKey{
-				templateNamespace: sample.GetActorTemplateNamespace(),
-				templateName:      sample.GetActorTemplateName(),
-				sandboxClass:      sandboxClassLabel(sample.GetSandboxClass()),
-				source:            statsSourceLabel(sample.GetSource()),
-				workerPool:        pools[podUID],
-			}
 			mu.Lock()
 			defer mu.Unlock()
-			agg := aggs[key]
-			if agg == nil {
-				agg = &templateAggregate{}
-				aggs[key] = agg
-			}
-			agg.sampledActors++
-			agg.memoryCurrentBytes += int64(sample.GetMemoryCurrentBytes())
-			agg.memoryWorkingSetBytes += int64(sample.GetMemoryWorkingSetBytes())
+			for _, sample := range samples {
+				key := templateKey{
+					templateNamespace: sample.GetActorTemplateNamespace(),
+					templateName:      sample.GetActorTemplateName(),
+					sandboxClass:      sandboxClassLabel(sample.GetSandboxClass()),
+					source:            statsSourceLabel(sample.GetSource()),
+					workerPool:        pools[podUID],
+				}
+				agg := aggs[key]
+				if agg == nil {
+					agg = &templateAggregate{}
+					aggs[key] = agg
+				}
+				agg.sampledActors++
+				agg.memoryCurrentBytes += int64(sample.GetMemoryCurrentBytes())
+				agg.memoryWorkingSetBytes += int64(sample.GetMemoryWorkingSetBytes())
 
-			// The counter increase this sample represents. A decrease means the
-			// epoch reset underneath us (the cgroup source restarts at zero on
-			// restore), so the new value IS the usage since the reset. A sample
-			// with NO baseline charges nothing and only records one: atelet
-			// cannot tell a new actor from its own restart, and charging the
-			// whole epoch-so-far would re-count hours of usage the previous
-			// atelet already counted, as one artificial spike. The bounded
-			// price is that every actor's boot-to-first-poll usage goes
-			// uncounted -- the events channel carries per-actor precision.
-			cpu := sample.GetCpuUsageUsec()
-			seenCPU[sample.GetActorUid()] = cpu
-			if last, ok := p.lastCPU[sample.GetActorUid()]; ok {
-				if last <= cpu {
-					agg.cpuDeltaUsec += int64(cpu - last)
-				} else {
-					agg.cpuDeltaUsec += int64(cpu)
+				// The counter increase this sample represents. A decrease means
+				// the epoch reset underneath us (the cgroup source restarts at
+				// zero on restore), so the new value IS the usage since the
+				// reset. A sample with NO baseline charges nothing and only
+				// records one: atelet cannot tell a new actor from its own
+				// restart, and charging the whole epoch-so-far would re-count
+				// hours of usage the previous atelet already counted, as one
+				// artificial spike. The bounded price is that every actor's
+				// boot-to-first-poll usage goes uncounted -- the events channel
+				// carries per-actor precision.
+				cpu := sample.GetCpuUsageUsec()
+				seenCPU[sample.GetActorUid()] = cpu
+				if last, ok := p.lastCPU[sample.GetActorUid()]; ok {
+					if last <= cpu {
+						agg.cpuDeltaUsec += int64(cpu - last)
+					} else {
+						agg.cpuDeltaUsec += int64(cpu)
+					}
 				}
 			}
 			return nil

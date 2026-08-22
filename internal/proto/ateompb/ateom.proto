@@ -78,11 +78,15 @@ service Ateom {
   // that dies during boot is attributable rather than anonymous.
   rpc GetWorkloadStats(GetWorkloadStatsRequest) returns (GetWorkloadStatsResponse) {}
 
-  // GetActiveWorkloadStats samples whatever this ateom is currently
+  // GetActiveWorkloadStats samples everything this ateom is currently
   // executing, without asserting an identity. It is the discovery read for a
   // scraper that enumerates ateoms and holds no worker-to-actor mapping;
   // GetWorkloadStats above is the verified read for a caller that must be
   // answered about a specific actor.
+  //
+  // An ateom may be executing several actors, so the answer is a sample per
+  // actor rather than one sample. A caller that took the first and stopped
+  // would silently under-report a worker hosting more than one.
   //
   // Every state a blind caller can find is a normal answer here, never an
   // error: the response is either a sample or the NoSampleReason there is
@@ -448,13 +452,23 @@ enum NoSampleReason {
 }
 
 message GetActiveWorkloadStatsResponse {
-  // Exactly one of the two is set: either a measurement, or the reason there
-  // is none. An ateom serves one actor at a time, so the sample slot is
-  // singular; the sample is self-describing (see the attribution rule on the
-  // rpc), and a sample being present is itself the statement that a workload
-  // is executing.
-  oneof result {
-    WorkloadStatsSample sample = 1;
-    NoSampleReason no_sample_reason = 2;
-  }
+  // Field 1 was a single WorkloadStatsSample, from when an ateom executed at
+  // most one actor. It was in a oneof with the reason, which a repeated field
+  // cannot join.
+  reserved 1;
+  reserved "sample";
+
+  // One sample per actor being executed, in no particular order. Each is
+  // self-describing (see the attribution rule on the rpc), and a sample being
+  // present is itself the statement that its actor is executing.
+  //
+  // Empty means nothing was measured, and no_sample_reason says why. An actor
+  // that is executing but not yet measurable simply contributes no sample, so a
+  // worker hosting two actors where one is still booting answers with one
+  // sample and no reason.
+  repeated WorkloadStatsSample samples = 3;
+
+  // Why there are no samples. Set only when samples is empty; exactly one of
+  // the two carries the answer.
+  NoSampleReason no_sample_reason = 2;
 }

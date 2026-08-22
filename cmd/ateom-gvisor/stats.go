@@ -105,13 +105,14 @@ func (s *AteomService) GetWorkloadStats(ctx context.Context, req *ateompb.GetWor
 	// Both of these are NOT_FOUND rather than FAILED_PRECONDITION: they tell the
 	// caller the requested actor is not here, which no amount of retrying on the
 	// same timer will change. Its worker-to-actor mapping wants re-resolving.
-	active := s.activeActor.Load()
-	if active == nil {
-		return nil, status.Errorf(codes.NotFound, "ateom is available; it is not executing actor %q", req.GetActorUid())
+	hosted := s.lookupActor(req.GetActorUid())
+	if hosted == nil {
+		if len(s.hostedActors()) == 0 {
+			return nil, status.Errorf(codes.NotFound, "ateom is available; it is not executing actor %q", req.GetActorUid())
+		}
+		return nil, status.Errorf(codes.NotFound, "ateom is not executing the requested actor %q", req.GetActorUid())
 	}
-	if active.UID != req.GetActorUid() {
-		return nil, status.Errorf(codes.NotFound, "ateom is executing actor %q, not the requested %q", active.UID, req.GetActorUid())
-	}
+	active := &hosted.attribution
 
 	sample, err := s.sampleSandbox(active)
 	if err != nil {
@@ -140,7 +141,7 @@ func (s *AteomService) GetWorkloadStats(ctx context.Context, req *ateompb.GetWor
 	// actor is no longer the one here, so a retry lands on one of them and gets
 	// that answer anyway. The same state should not report two different codes
 	// depending on where in the handler it was noticed.
-	if s.activeActor.Load() != active {
+	if s.lookupActor(req.GetActorUid()) != hosted {
 		return nil, status.Errorf(codes.NotFound, "ateom stopped executing actor %q while the sample was being taken", req.GetActorUid())
 	}
 
@@ -148,51 +149,49 @@ func (s *AteomService) GetWorkloadStats(ctx context.Context, req *ateompb.GetWor
 }
 
 // GetActiveWorkloadStats implements
-// ateompb.Ateom/GetActiveWorkloadStats: the discovery read, sampling
-// whatever is executing with no identity asserted. Same lock discipline as
-// GetWorkloadStats above, for the same reasons.
+// ateompb.Ateom/GetActiveWorkloadStats: the discovery read, sampling everything
+// executing with no identity asserted. Same lock discipline as GetWorkloadStats
+// above, for the same reasons.
 func (s *AteomService) GetActiveWorkloadStats(ctx context.Context, req *ateompb.GetActiveWorkloadStatsRequest) (*ateompb.GetActiveWorkloadStatsResponse, error) {
-	active := s.activeActor.Load()
-	if active == nil {
+	hosted := s.hostedActors()
+	if len(hosted) == 0 {
 		return noSample(ateompb.NoSampleReason_NO_SAMPLE_REASON_NO_WORKLOAD), nil
 	}
 
-	sample, err := s.sampleSandbox(active)
-	if err != nil {
-		// A missing cgroup is a workload with no numbers yet -- a poll landing
-		// in the boot -- which for a caller with no prior knowledge is as
-		// normal a finding as an available ateom, so it is a reason, not an
-		// error. Anything else is a real read failure.
-		if errors.Is(err, fs.ErrNotExist) {
-			return noSample(ateompb.NoSampleReason_NO_SAMPLE_REASON_NOT_MEASURABLE_YET), nil
+	// One sample per actor. An actor with no numbers yet contributes none and
+	// does not stop the others being reported: on a worker hosting several,
+	// one of them booting is the common case, and dropping the whole answer
+	// for it would blind the caller to everything else running here.
+	samples := make([]*ateompb.WorkloadStatsSample, 0, len(hosted))
+	for _, h := range hosted {
+		attribution := &h.attribution
+		sample, err := s.sampleSandbox(attribution)
+		if err != nil {
+			// A missing cgroup is a workload with no numbers yet -- a poll
+			// landing in the boot, or an actor that left between the snapshot
+			// above and the read. Both are normal findings for a blind caller.
+			// Anything else is a real read failure, and is reported as one
+			// rather than quietly shrinking the answer.
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return nil, status.Errorf(codes.Internal, "reading sandbox cgroup for actor %q: %v", attribution.UID, err)
 		}
-		return nil, status.Errorf(codes.Internal, "reading sandbox cgroup: %v", err)
+		samples = append(samples, sample)
 	}
 
-	// Same re-check as GetWorkloadStats, different answer: with no uid asserted
-	// there is no "requested actor" for NOT_FOUND to disown, and a transition
-	// underneath the read just means these numbers cannot be attributed to any
-	// single actor. Report the reason as of now -- the next tick resolves it
-	// either way.
-	if latest := s.activeActor.Load(); latest != active {
-		reason := ateompb.NoSampleReason_NO_SAMPLE_REASON_NOT_MEASURABLE_YET
-		if latest == nil {
-			reason = ateompb.NoSampleReason_NO_SAMPLE_REASON_NO_WORKLOAD
-		}
-		return noSample(reason), nil
+	// Everything here is still booting, or left while being read. Either way
+	// there is nothing to attribute yet, which the next tick resolves.
+	if len(samples) == 0 {
+		return noSample(ateompb.NoSampleReason_NO_SAMPLE_REASON_NOT_MEASURABLE_YET), nil
 	}
-
-	return &ateompb.GetActiveWorkloadStatsResponse{
-		Result: &ateompb.GetActiveWorkloadStatsResponse_Sample{Sample: sample},
-	}, nil
+	return &ateompb.GetActiveWorkloadStatsResponse{Samples: samples}, nil
 }
 
 // noSample is the discovery read's "nothing to give, and that is normal"
 // answer.
 func noSample(reason ateompb.NoSampleReason) *ateompb.GetActiveWorkloadStatsResponse {
-	return &ateompb.GetActiveWorkloadStatsResponse{
-		Result: &ateompb.GetActiveWorkloadStatsResponse_NoSampleReason{NoSampleReason: reason},
-	}
+	return &ateompb.GetActiveWorkloadStatsResponse{NoSampleReason: reason}
 }
 
 // sampleSandbox reads the sandbox cgroup and builds the sample attributed to
@@ -207,7 +206,7 @@ func (s *AteomService) sampleSandbox(active *resources.ActorAttribution) (*ateom
 		read = cgroupstats.Read
 	}
 	observedAt := time.Now()
-	sample, err := read(filepath.Join(s.cgroupRoot, sandboxCgroupContainer))
+	sample, err := read(filepath.Join(s.cgroupRoot, actorCgroupLeaf(active.UID, sandboxCgroupContainer)))
 	if err != nil {
 		return nil, err
 	}

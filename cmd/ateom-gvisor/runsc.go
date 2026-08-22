@@ -79,7 +79,7 @@ func (r *runsc) ensureContainerCgroupsPath(containerName string) error {
 		spec.Linux = &specs.Linux{}
 	}
 	if spec.Linux.CgroupsPath == "" {
-		spec.Linux.CgroupsPath = "/" + containerName
+		spec.Linux.CgroupsPath = "/" + actorCgroupLeaf(r.actorUID, containerName)
 	}
 	// Right-size the per-container cgroup leaf to the actor's declared limits;
 	// runsc applies spec.Linux.Resources when it creates the leaf. Shared with the
