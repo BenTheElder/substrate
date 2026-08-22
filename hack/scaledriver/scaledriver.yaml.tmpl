@@ -1,0 +1,104 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Runs hack/scaledriver against the density fixture in demos/tiny.
+#
+# In-cluster because atelet requires a client certificate chaining to the
+# podidentity CA, and only a pod can project one.
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: scaledriver
+  namespace: ${POOL_NS}
+
+---
+
+# Reads only: the ActorTemplate to build the workload spec from, and the pods
+# that locate the worker and the atelet beside it. Everything the driver
+# actually does happens over the atelet gRPC connection, not the Kubernetes API.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: scaledriver
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["list"]
+- apiGroups: ["ate.dev"]
+  resources: ["actortemplates"]
+  verbs: ["get"]
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: scaledriver
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: scaledriver
+subjects:
+- kind: ServiceAccount
+  name: scaledriver
+  namespace: ${POOL_NS}
+
+---
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: scaledriver
+  namespace: ${POOL_NS}
+spec:
+  serviceAccountName: scaledriver
+  # One shot: the run either finishes or reports what stopped it. A restart
+  # would re-activate actors that are already up and hide the ceiling.
+  restartPolicy: Never
+  # No toleration for the density taint on purpose -- the driver stays off the
+  # node it is measuring.
+  containers:
+  - name: scaledriver
+    image: ko://github.com/agent-substrate/substrate/hack/scaledriver
+    args:
+    - --mode=${MODE}
+    - --pool-namespace=${POOL_NS}
+    - --pool-name=${POOL_NAME}
+    - --template-namespace=${TEMPLATE_NS}
+    - --template-name=${TEMPLATE_NAME}
+    - --atespace=${ATESPACE}
+    - --count=${COUNT}
+    - --parallel=${PARALLEL}
+    - --name-prefix=${NAME_PREFIX}
+    - --readyz-timeout-seconds=${READYZ_TIMEOUT_SECONDS}
+    - --golden-snapshot-uri=${GOLDEN_SNAPSHOT_URI}
+    volumeMounts:
+    - name: podidentity
+      mountPath: /run/podidentity.podcert.ate.dev
+      readOnly: true
+  volumes:
+  - name: podidentity
+    projected:
+      sources:
+      - podCertificate:
+          signerName: podidentity.podcert.ate.dev/identity
+          keyType: ECDSAP256
+          credentialBundlePath: credential-bundle.pem
+      - clusterTrustBundle:
+          signerName: podidentity.podcert.ate.dev/identity
+          labelSelector:
+            matchLabels:
+              podcert.ate.dev/canarying: live
+          path: trust-bundle.pem
