@@ -36,7 +36,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -1077,33 +1076,70 @@ const (
 	maxNotifyPayloadBytes = 8000
 )
 
+// workerEventEnvelope names the worker that changed. It deliberately does NOT
+// carry the worker itself.
+//
+// A worker record holds one assignment per actor it hosts, so its encoded size
+// grows with occupancy, and NOTIFY's payload limit is 8000 bytes -- which a
+// worker reaches at about 27 actors. Sending the record turned a worker's 28th
+// activation into a hard failure ("worker event payload of 8076 bytes exceeds
+// PostgreSQL NOTIFY limit of 8000 bytes"), and no amount of retrying helps
+// because the next actor only makes it bigger. That is also why the limit is
+// checked rather than left to Postgres: a silently dropped notification would
+// wedge every subscriber's cache instead of failing the write.
+//
+// So the notification says what changed and the subscriber reads it, which is
+// what the payload limit exists to push callers toward. The cost is one read
+// per event per subscriber, on the write path, off the hot path the cache
+// exists to serve -- and the payload is now a constant few dozen bytes however
+// many actors a worker holds.
 type workerEventEnvelope struct {
-	Type   int    `json:"t"`
-	Worker string `json:"w"` // protojson-encoded Worker
+	Type int    `json:"t"`
+	Name string `json:"n"`
 }
 
 func marshalWorkerEvent(eventType store.WorkerEventType, worker *ateapipb.Worker) ([]byte, error) {
-	workerJSON, err := protojson.Marshal(worker)
-	if err != nil {
-		return nil, fmt.Errorf("in protojson.Marshal: %w", err)
-	}
-	msg, err := json.Marshal(workerEventEnvelope{Type: int(eventType), Worker: string(workerJSON)})
+	msg, err := json.Marshal(workerEventEnvelope{
+		Type: int(eventType),
+		Name: worker.GetMetadata().GetName(),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("in json.Marshal: %w", err)
 	}
 	return msg, nil
 }
 
-func unmarshalWorkerEvent(payload string) (store.WorkerEvent, error) {
+// resolveWorkerEvent turns a notification into the event its subscriber wants,
+// reading the named worker for everything but a delete.
+//
+// Reading gives the CURRENT record, which may already be newer than the change
+// that triggered this notification. That is not a problem to solve: a
+// subscriber is a cache converging on the latest state, and skipping an
+// intermediate version gets it there sooner. A worker deleted between the
+// notification and the read reports ErrNotFound, which is a delete.
+func (p *Persistence) resolveWorkerEvent(ctx context.Context, payload string) (store.WorkerEvent, error) {
 	var env workerEventEnvelope
 	if err := json.Unmarshal([]byte(payload), &env); err != nil {
 		return store.WorkerEvent{}, fmt.Errorf("in json.Unmarshal: %w", err)
 	}
-	worker := &ateapipb.Worker{}
-	if err := protojson.Unmarshal([]byte(env.Worker), worker); err != nil {
-		return store.WorkerEvent{}, fmt.Errorf("in protojson.Unmarshal: %w", err)
+	eventType := store.WorkerEventType(env.Type)
+	if eventType == store.WorkerEventDeleted {
+		return store.WorkerEvent{
+			Type:   eventType,
+			Worker: &ateapipb.Worker{Metadata: &ateapipb.ResourceMetadata{Name: env.Name}},
+		}, nil
 	}
-	return store.WorkerEvent{Type: store.WorkerEventType(env.Type), Worker: worker}, nil
+	worker, err := p.GetWorker(ctx, env.Name)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return store.WorkerEvent{
+				Type:   store.WorkerEventDeleted,
+				Worker: &ateapipb.Worker{Metadata: &ateapipb.ResourceMetadata{Name: env.Name}},
+			}, nil
+		}
+		return store.WorkerEvent{}, fmt.Errorf("reading worker %q named by a change notification: %w", env.Name, err)
+	}
+	return store.WorkerEvent{Type: eventType, Worker: worker}, nil
 }
 
 // writeAndNotify runs fn inside a transaction, then--only if fn reports a
@@ -1327,9 +1363,9 @@ func (p *Persistence) WatchWorkers(ctx context.Context) (*store.WorkerWatch, err
 				// re-subscribe; matches ateredis's WatchWorkers contract.
 				return
 			}
-			event, err := unmarshalWorkerEvent(notification.Payload)
+			event, err := p.resolveWorkerEvent(watchCtx, notification.Payload)
 			if err != nil {
-				slog.ErrorContext(ctx, "worker event unmarshal failed", slog.Any("err", err))
+				slog.ErrorContext(ctx, "worker event resolve failed", slog.Any("err", err))
 				continue
 			}
 			select {

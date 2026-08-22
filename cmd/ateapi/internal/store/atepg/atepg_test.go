@@ -357,3 +357,54 @@ func TestAcquireLock_ConcurrentTakeover(t *testing.T) {
 		lock.Close()
 	}
 }
+
+// TestMarshalWorkerEventStaysUnderTheNotifyLimit pins that a worker's change
+// notification does not grow with the number of actors the worker hosts.
+//
+// It used to: the notification carried the whole worker record, one assignment
+// per hosted actor, and Postgres refuses a NOTIFY payload over 8000 bytes. A
+// worker crossed that at about 27 actors, and from then on every activation
+// onto it failed the write outright -- permanently, since the next actor only
+// makes the record bigger. No unit test could see it because the payload is
+// only large once a worker is busy.
+func TestMarshalWorkerEventStaysUnderTheNotifyLimit(t *testing.T) {
+	// Far past both the old ~27 ceiling and any plausible per-worker count, so
+	// this fails if the record ever creeps back into the payload.
+	const assignments = 4094
+
+	worker := &ateapipb.Worker{
+		Metadata: &ateapipb.ResourceMetadata{Name: "worker-with-a-realistic-uid-0f8a1c72-4e3d-4a9b-9c1e-2b7d6a5f3e10"},
+	}
+	worker.Status = &ateapipb.WorkerStatus{}
+	for i := range assignments {
+		worker.Status.Assignments = append(worker.Status.Assignments, &ateapipb.ActorAssignment{
+			Actor:    &ateapipb.ObjectRef{Atespace: "some-atespace", Name: fmt.Sprintf("actor-%06d", i)},
+			ActorUid: fmt.Sprintf("8c1d5e%03d-4e3d-4a9b-9c1e-2b7d6a5f3e10", i),
+			ActorTemplate: &ateapipb.KubeNamespacedObjectRef{
+				Namespace: "some-template-namespace",
+				Name:      "some-template",
+			},
+			Resources: &ateapipb.WorkerCapacity{CpuMilli: 500, MemoryBytes: 58720256},
+		})
+	}
+
+	payload, err := marshalWorkerEvent(store.WorkerEventUpdated, worker)
+	if err != nil {
+		t.Fatalf("marshalWorkerEvent: %v", err)
+	}
+	if len(payload) > maxNotifyPayloadBytes {
+		t.Errorf("payload for a worker with %d assignments is %d bytes, over the %d-byte NOTIFY limit",
+			assignments, len(payload), maxNotifyPayloadBytes)
+	}
+
+	// And it is the same size empty, which is the actual property: constant, not
+	// merely small enough today.
+	bare, err := marshalWorkerEvent(store.WorkerEventUpdated, &ateapipb.Worker{Metadata: worker.GetMetadata()})
+	if err != nil {
+		t.Fatalf("marshalWorkerEvent (bare): %v", err)
+	}
+	if len(payload) != len(bare) {
+		t.Errorf("payload is %d bytes with %d assignments and %d bytes with none; it must not depend on occupancy",
+			len(payload), assignments, len(bare))
+	}
+}
