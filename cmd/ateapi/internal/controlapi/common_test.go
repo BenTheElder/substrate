@@ -46,3 +46,27 @@ func assertValidateErr(t *testing.T, got field.ErrorList, want field.ErrorList) 
 	t.Helper()
 	field.ErrorMatcher{}.ByType().ByField().ByValue().Test(t, want, got)
 }
+
+// firstAssignment returns the single Actor a Worker is hosting, or nil when it
+// is hosting none. These tests place one Actor per Worker, so "the assignment"
+// is still a meaningful thing to assert on even though a Worker now holds a
+// list; asserting through this keeps them readable and would fail loudly (by
+// looking at the wrong entry) if a test ever placed two.
+func firstAssignment(w *ateapipb.Worker) *ateapipb.ActorAssignment {
+	assignments := w.GetStatus().GetAssignments()
+	if len(assignments) == 0 {
+		return nil
+	}
+	return assignments[0]
+}
+
+// assignmentsOf wraps a single optional assignment as a Worker's assignment
+// list, mapping "no assignment" to an empty list rather than a list holding a
+// nil entry — which would look to everything downstream like a Worker hosting a
+// nameless Actor.
+func assignmentsOf(assignment *ateapipb.ActorAssignment) []*ateapipb.ActorAssignment {
+	if assignment == nil {
+		return nil
+	}
+	return []*ateapipb.ActorAssignment{assignment}
+}

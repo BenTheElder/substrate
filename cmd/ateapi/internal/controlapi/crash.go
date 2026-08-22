@@ -134,18 +134,14 @@ func releaseWorker(ctx context.Context, st crashActorStore, actor *ateapipb.Acto
 	}
 
 	sandboxClass := worker.GetSandboxClass()
-	wass := worker.GetStatus().GetAssignment()
-	if wass == nil {
-		slog.WarnContext(ctx, "Worker's assignment is already nil, skipping release", slog.String("worker", workerName))
+	// Release only this actor's assignment; the worker may be hosting others,
+	// and they are unaffected by this one crashing. A worker that is no longer
+	// hosting it has already been released.
+	if !releaseActorFromWorker(worker, actor.GetMetadata().GetUid()) {
+		slog.WarnContext(ctx, "Worker is not hosting this Actor, skipping release",
+			slog.String("worker", workerName))
 		return sandboxClass, nil
 	}
-	// Only free it if it still belongs to us
-	if wass.GetActorUid() != actor.GetMetadata().GetUid() {
-		slog.WarnContext(ctx, "Worker already assigned to another Actor", slog.String("worker", workerName))
-		return sandboxClass, nil
-	}
-
-	worker.Status.Assignment = nil
 	if err := st.UpdateWorker(ctx, worker, worker.GetMetadata().GetVersion()); err != nil {
 		return sandboxClass, fmt.Errorf("while releasing worker: %w", err)
 	}

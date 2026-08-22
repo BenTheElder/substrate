@@ -166,8 +166,10 @@ func (s *Server) MintCert(ctx context.Context, req *ateapipb.MintCertRequest) (*
 	}
 	atespace, actorName := actorRef.Atespace, actorRef.Name
 
-	// Actor identity comes only from ateapi state. expected_actor_uid is a
-	// fail-closed guard against a request crossing an assignment change.
+	// Actor identity comes only from ateapi state. expected_actor_uid picked
+	// which of the worker's actors to mint for (see authorizeActor); this
+	// re-checks it against the resolved actor, which is a fail-closed guard
+	// against a request crossing an assignment change.
 	actorUID := actor.GetMetadata().GetUid()
 	if actorUID == "" {
 		slog.ErrorContext(ctx, "MintCert: actor has no UID", slog.Any("actor", actorRef))
@@ -314,9 +316,16 @@ func validateWorkerRef(worker *ateapipb.ObjectRef) error {
 	return resources.ValidateGlobalObjectRef(worker, fldPath).ToAggregate()
 }
 
-// authorizeActor resolves the actor from the authenticated worker and verifies
-// that the worker and actor still point at one another. Actor identity supplied
-// by the requester never participates in this authorization decision.
+// authorizeActor resolves the actor the request names among those the
+// authenticated worker is hosting, and verifies that the worker and actor still
+// point at one another.
+//
+// A worker may host several actors, so expected_actor_uid selects which of them
+// to mint for. It SELECTS, it does not assert: the set it chooses from is the
+// worker's assignment list as ateapi records it, so a caller can only ever
+// obtain a credential for an actor already placed on it, and naming anything
+// else is a denial. Which of its own actors a worker asks for is its business —
+// it is hosting all of them.
 func (s *Server) authorizeActor(ctx context.Context, caller *ateletCaller, req *ateapipb.MintCertRequest) (*ateapipb.Actor, resources.ActorRef, error) {
 	// Denials are deliberately indistinguishable from each other: a caller that
 	// is not entitled to a worker should not learn its assignment.
@@ -338,9 +347,25 @@ func (s *Server) authorizeActor(ctx context.Context, caller *ateletCaller, req *
 		return nil, resources.ActorRef{}, deny("worker is hosted on a different node", slog.String("workerNode", worker.GetNodeName()))
 	}
 
-	actorRef := resources.ActorRefFromObjectRef(worker.GetStatus().GetAssignment().GetActor())
-	if actorRef == (resources.ActorRef{}) {
+	// Pick the assignment the request names. Falling back to the worker's first
+	// assignment when nothing matches is what preserves the two different
+	// answers this call has always given, which are not interchangeable:
+	// authorization is decided against an actor the worker really is hosting
+	// (and a bad binding is PermissionDenied, indistinguishable from every other
+	// denial), while a request whose expectation does not match that actor is a
+	// stale caller and gets FailedPrecondition from the check in MintCert, which
+	// is retryable. Resolving straight to a denial here would collapse the two
+	// and turn an ordinary mint/assignment race into a fatal error.
+	assigned := assignmentForActorUID(worker, req.GetExpectedActorUid())
+	if assigned == nil {
+		assigned = firstAssignment(worker)
+	}
+	if assigned == nil {
 		return nil, resources.ActorRef{}, deny("worker has no actor assignment")
+	}
+	actorRef := resources.ActorRefFromObjectRef(assigned.GetActor())
+	if actorRef == (resources.ActorRef{}) {
+		return nil, resources.ActorRef{}, deny("worker assignment names no actor")
 	}
 	actor, err := s.store.GetActor(ctx, actorRef)
 	if err != nil {
@@ -366,11 +391,36 @@ func (s *Server) authorizeActor(ctx context.Context, caller *ateletCaller, req *
 		slog.ErrorContext(ctx, "ActorIdentity: running actor has no worker assignment", slog.Any("actor", actorRef))
 		return nil, resources.ActorRef{}, status.Error(codes.FailedPrecondition, "actor has no worker assigned")
 	}
-	if worker.GetStatus().GetAssignment().GetActorUid() != actor.GetMetadata().GetUid() {
+	if assigned.GetActorUid() != actor.GetMetadata().GetUid() {
 		return nil, resources.ActorRef{}, deny("worker is no longer assigned to this actor incarnation", slog.Any("actor", actorRef))
 	}
 	if assignment.GetWorker().GetName() != worker.GetMetadata().GetName() {
 		return nil, resources.ActorRef{}, deny("actor no longer points to the requesting worker", slog.Any("actor", actorRef))
 	}
 	return actor, actorRef, nil
+}
+
+// firstAssignment returns any one of the worker's assignments, or nil when it
+// is hosting none.
+func firstAssignment(worker *ateapipb.Worker) *ateapipb.ActorAssignment {
+	assignments := worker.GetStatus().GetAssignments()
+	if len(assignments) == 0 {
+		return nil
+	}
+	return assignments[0]
+}
+
+// assignmentForActorUID returns the worker's assignment for actorUID, or nil if
+// it is not hosting that actor. A worker hosts several actors, so an assignment
+// has to be selected rather than assumed.
+func assignmentForActorUID(worker *ateapipb.Worker, actorUID string) *ateapipb.ActorAssignment {
+	if actorUID == "" {
+		return nil
+	}
+	for _, assignment := range worker.GetStatus().GetAssignments() {
+		if assignment.GetActorUid() == actorUID {
+			return assignment
+		}
+	}
+	return nil
 }

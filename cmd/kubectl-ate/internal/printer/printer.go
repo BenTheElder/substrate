@@ -21,6 +21,9 @@ import (
 	"io"
 	"os"
 	"slices"
+	"strings"
+
+	"github.com/agent-substrate/substrate/internal/resources"
 	"text/tabwriter"
 	"time"
 
@@ -125,12 +128,25 @@ func PrintWorkersTo(out io.Writer, workers []*ateapipb.Worker, format string) er
 			class := worker.GetSandboxClass()
 			pod := worker.GetWorkerPod()
 
+			// A worker can host several actors, so "assigned" is a count
+			// against its limit rather than a yes/no, and every actor is
+			// listed. Capacity reports zero actors when it is unknown, in
+			// which case there is no limit to show.
+			assignments := worker.GetStatus().GetAssignments()
 			status := "FREE"
+			if len(assignments) > 0 {
+				status = fmt.Sprintf("ASSIGNED(%d/%d)", len(assignments),
+					resources.WorkerMaxActors(worker.GetCapacity()))
+			}
 			assignedActor := "<none>"
-			if wass := worker.GetStatus().GetAssignment(); wass != nil {
-				status = "ASSIGNED"
-				assignedActor = fmt.Sprintf("%s/%s/%s/%s",
-					wass.ActorTemplate.Namespace, wass.ActorTemplate.Name, wass.Actor.Atespace, wass.Actor.Name)
+			if len(assignments) > 0 {
+				names := make([]string, 0, len(assignments))
+				for _, wass := range assignments {
+					names = append(names, fmt.Sprintf("%s/%s/%s/%s",
+						wass.GetActorTemplate().GetNamespace(), wass.GetActorTemplate().GetName(),
+						wass.GetActor().GetAtespace(), wass.GetActor().GetName()))
+				}
+				assignedActor = strings.Join(names, ",")
 			}
 
 			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", ns, pool, class, pod, status, assignedActor)

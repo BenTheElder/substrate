@@ -96,8 +96,11 @@ func RegisterWorkerCount(meter metric.Meter, workers func() ([]*ateapipb.Worker,
 			}
 		}
 		for _, w := range ws {
+			// A worker hosting any actor counts as assigned. This says nothing
+			// about whether it has room for another; that is the scheduler's
+			// eligible-workers metric.
 			state := ateattr.WorkerStateIdle
-			if w.GetStatus().GetAssignment() != nil {
+			if len(w.GetStatus().GetAssignments()) > 0 {
 				state = ateattr.WorkerStateAssigned
 			}
 			tally[key{w.GetWorkerNamespace(), w.GetWorkerPool(), state, w.GetSandboxClass()}]++

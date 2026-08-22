@@ -17,6 +17,7 @@ package scheduling
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/agent-substrate/substrate/internal/ateattr"
@@ -305,10 +306,10 @@ func withState(state ateapipb.WorkerState) func(*ateapipb.Worker) {
 
 func assigned(atespace, name string) func(*ateapipb.Worker) {
 	return func(w *ateapipb.Worker) {
-		w.Status.Assignment = &ateapipb.ActorAssignment{
+		w.Status.Assignments = []*ateapipb.ActorAssignment{{
 			Actor:    &ateapipb.ObjectRef{Atespace: atespace, Name: name},
 			ActorUid: atespace + "/" + name,
-		}
+		}}
 	}
 }
 
@@ -617,4 +618,121 @@ func TestSchedule_EligibleWorkersMetric(t *testing.T) {
 			t.Fatalf("ate.scheduler.eligible_workers metric not found")
 		}
 	})
+}
+
+// TestHasRoom covers the capacity model: a worker admits actors until one of
+// its dimensions runs out, and what it has left is its capacity minus what its
+// current assignments took.
+func TestHasRoom(t *testing.T) {
+	assignmentFor := func(cpu, mem int64) *ateapipb.ActorAssignment {
+		return &ateapipb.ActorAssignment{
+			ActorUid:  fmt.Sprintf("uid-%d-%d", cpu, mem),
+			Resources: &ateapipb.WorkerCapacity{CpuMilli: cpu, MemoryBytes: mem},
+		}
+	}
+	hosting := func(assignments ...*ateapipb.ActorAssignment) func(*ateapipb.Worker) {
+		return func(w *ateapipb.Worker) { w.Status.Assignments = assignments }
+	}
+	capacityOf := func(cpu, mem int64, actors int32) func(*ateapipb.Worker) {
+		return func(w *ateapipb.Worker) {
+			w.Capacity = &ateapipb.WorkerCapacity{CpuMilli: cpu, MemoryBytes: mem, Actors: actors}
+		}
+	}
+
+	for name, tc := range map[string]struct {
+		opts        []func(*ateapipb.Worker)
+		constraints Constraints
+		want        bool
+	}{
+		"empty worker fits an actor it can contain": {
+			opts:        []func(*ateapipb.Worker){capacityOf(4000, 8<<30, 4)},
+			constraints: Constraints{CPUMilli: 1000, MemoryBytes: 2 << 30},
+			want:        true,
+		},
+		"remaining capacity is what is left after the actors already placed": {
+			opts: []func(*ateapipb.Worker){capacityOf(4000, 8<<30, 4),
+				hosting(assignmentFor(3000, 6<<30))},
+			constraints: Constraints{CPUMilli: 1000, MemoryBytes: 2 << 30},
+			want:        true,
+		},
+		"an actor larger than what is left does not fit": {
+			opts: []func(*ateapipb.Worker){capacityOf(4000, 8<<30, 4),
+				hosting(assignmentFor(3500, 1<<30))},
+			constraints: Constraints{CPUMilli: 1000, MemoryBytes: 2 << 30},
+			want:        false,
+		},
+		"memory runs out independently of cpu": {
+			opts: []func(*ateapipb.Worker){capacityOf(4000, 8<<30, 4),
+				hosting(assignmentFor(100, 7<<30))},
+			constraints: Constraints{CPUMilli: 100, MemoryBytes: 2 << 30},
+			want:        false,
+		},
+		"a worker at its actor limit has no room however small the actor": {
+			opts: []func(*ateapipb.Worker){capacityOf(64000, 64<<30, 2),
+				hosting(assignmentFor(1, 1), assignmentFor(2, 2))},
+			constraints: Constraints{CPUMilli: 1, MemoryBytes: 1},
+			want:        false,
+		},
+		// The point of capacity-at-the-worker rather than fixed per-actor
+		// slices: an actor smaller than an even share leaves the remainder for
+		// its neighbors instead of stranding it.
+		"small actors pack in beyond an even split": {
+			opts: []func(*ateapipb.Worker){capacityOf(4000, 8<<30, 8),
+				hosting(assignmentFor(100, 1<<30), assignmentFor(100, 1<<30), assignmentFor(100, 1<<30))},
+			constraints: Constraints{CPUMilli: 100, MemoryBytes: 1 << 30},
+			want:        true,
+		},
+		"unknown worker capacity does not block placement on compute": {
+			opts:        []func(*ateapipb.Worker){capacityOf(0, 0, 4)},
+			constraints: Constraints{CPUMilli: 64000, MemoryBytes: 1 << 40},
+			want:        true,
+		},
+		"an actor that declares no limits still consumes an actor slot": {
+			opts: []func(*ateapipb.Worker){capacityOf(4000, 8<<30, 1),
+				hosting(&ateapipb.ActorAssignment{ActorUid: "no-limits"})},
+			constraints: Constraints{},
+			want:        false,
+		},
+		// Unset actor capacity means one, not unlimited: a worker built without
+		// capacity must not accept actors without bound.
+		"unset actor capacity admits exactly one": {
+			constraints: Constraints{},
+			want:        true,
+		},
+		"unset actor capacity is full at one": {
+			opts:        []func(*ateapipb.Worker){hosting(assignmentFor(1, 1))},
+			constraints: Constraints{},
+			want:        false,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := worker("pod", "gvisor", "node", nil, tc.opts...)
+			s := New(nil).(*scheduler)
+			if got := s.HasRoom(w, tc.constraints); got != tc.want {
+				t.Errorf("HasRoom() = %t, want %t (capacity %v, allocated %v)",
+					got, tc.want, w.GetCapacity(), Allocated(w))
+			}
+		})
+	}
+}
+
+// TestAppliesIgnoresRoom pins the split between the two questions. A worker that
+// is full still "applies" to the actor it is already hosting, which is what
+// stops the resume workflow from evicting a valid placement when it
+// re-validates one.
+func TestAppliesIgnoresRoom(t *testing.T) {
+	full := worker("pod", "gvisor", "node", nil,
+		func(w *ateapipb.Worker) {
+			w.Capacity = &ateapipb.WorkerCapacity{Actors: 1}
+			w.Status.Assignments = []*ateapipb.ActorAssignment{{ActorUid: "resident"}}
+		})
+	constraints := Constraints{SandboxClass: "gvisor"}
+
+	s := New(nil).(*scheduler)
+	if !s.Applies(full, constraints) {
+		t.Error("Applies() = false for a full worker, want true: eligibility must not depend on room")
+	}
+	if s.HasRoom(full, constraints) {
+		t.Error("HasRoom() = true for a worker at its actor limit, want false")
+	}
 }

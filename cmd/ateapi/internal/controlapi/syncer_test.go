@@ -281,14 +281,14 @@ func TestSyncer_DeleteBoundWorker_ClearsActor(t *testing.T) {
 		t.Fatalf("create actor: %v", err)
 	}
 	w, _ := persistence.GetWorker(ctx, testPodUID)
-	w.Status.Assignment = &ateapipb.ActorAssignment{
+	w.Status.Assignments = []*ateapipb.ActorAssignment{{
 		ActorTemplate: &ateapipb.KubeNamespacedObjectRef{
 			Namespace: ns,
 			Name:      "tmpl",
 		},
 		Actor:    &ateapipb.ObjectRef{Atespace: createdActor.GetMetadata().GetAtespace(), Name: createdActor.GetMetadata().GetName()},
 		ActorUid: createdActor.GetMetadata().GetUid(),
-	}
+	}}
 	if err := persistence.UpdateWorker(ctx, w, w.GetMetadata().GetVersion()); err != nil {
 		t.Fatalf("update worker: %v", err)
 	}
@@ -601,11 +601,11 @@ func TestReconcileDeadWorker(t *testing.T) {
 		WorkerPodUid: testPodUID, NodeName: "node1",
 		Status: &ateapipb.WorkerStatus{
 			State: ateapipb.WorkerState_WORKER_STATE_DRAINING,
-			Assignment: &ateapipb.ActorAssignment{
+			Assignments: []*ateapipb.ActorAssignment{{
 				ActorTemplate: &ateapipb.KubeNamespacedObjectRef{Namespace: ns, Name: "tmpl"},
 				Actor:         &ateapipb.ObjectRef{Atespace: createdActor.GetMetadata().GetAtespace(), Name: createdActor.GetMetadata().GetName()},
 				ActorUid:      createdActor.GetMetadata().GetUid(),
-			},
+			}},
 		},
 	}); err != nil {
 		t.Fatalf("create worker: %v", err)
@@ -656,11 +656,11 @@ func TestReconcileDeadWorker_IgnoresStaleIncarnationAssignment(t *testing.T) {
 		WorkerPodUid: uid,
 		Status: &ateapipb.WorkerStatus{
 			State: ateapipb.WorkerState_WORKER_STATE_DRAINING,
-			Assignment: &ateapipb.ActorAssignment{
+			Assignments: []*ateapipb.ActorAssignment{{
 				ActorTemplate: &ateapipb.KubeNamespacedObjectRef{Namespace: ns, Name: "tmpl"},
 				Actor:         &ateapipb.ObjectRef{Atespace: createdActor.GetMetadata().GetAtespace(), Name: createdActor.GetMetadata().GetName()},
 				ActorUid:      "old-incarnation-uid",
-			},
+			}},
 		},
 	}); err != nil {
 		t.Fatalf("create worker: %v", err)
@@ -748,11 +748,11 @@ func TestSyncer_ReconcileOrphanedWorkers(t *testing.T) {
 		WorkerPodUid: orphanUID, NodeName: "node1",
 		Status: &ateapipb.WorkerStatus{
 			State: ateapipb.WorkerState_WORKER_STATE_DRAINING,
-			Assignment: &ateapipb.ActorAssignment{
+			Assignments: []*ateapipb.ActorAssignment{{
 				ActorTemplate: &ateapipb.KubeNamespacedObjectRef{Namespace: ns, Name: "tmpl"},
 				Actor:         &ateapipb.ObjectRef{Atespace: createdActor.GetMetadata().GetAtespace(), Name: createdActor.GetMetadata().GetName()},
 				ActorUid:      createdActor.GetMetadata().GetUid(),
-			},
+			}},
 		},
 	}); err != nil {
 		t.Fatalf("create orphan worker: %v", err)
@@ -979,18 +979,18 @@ func TestReleaseActorOnDeadWorker_StateTransitions(t *testing.T) {
 				SandboxClass: "gvisor",
 				Status: &ateapipb.WorkerStatus{
 					State: ateapipb.WorkerState_WORKER_STATE_ACTIVE,
-					Assignment: &ateapipb.ActorAssignment{
+					Assignments: []*ateapipb.ActorAssignment{{
 						ActorTemplate: &ateapipb.KubeNamespacedObjectRef{Namespace: ns, Name: "tmpl"},
 						Actor:         &ateapipb.ObjectRef{Atespace: createdActor.GetMetadata().GetAtespace(), Name: createdActor.GetMetadata().GetName()},
 						ActorUid:      createdActor.GetMetadata().GetUid(),
-					},
+					}},
 				},
 			}); err != nil {
 				t.Fatalf("create worker: %v", err)
 			}
 
-			if err := s.releaseActorOnDeadWorker(ctx, testPodUID); err != nil {
-				t.Fatalf("releaseActorOnDeadWorker: %v", err)
+			if err := s.releaseActorsOnDeadWorker(ctx, testPodUID); err != nil {
+				t.Fatalf("releaseActorsOnDeadWorker: %v", err)
 			}
 
 			got, err := persistence.GetActor(ctx, resources.ActorRef{Name: actorID, Atespace: atespace})

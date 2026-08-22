@@ -371,11 +371,11 @@ func (w *ActorWorkflow) validateAssignedWorker(ctx context.Context, actorRef res
 		}
 		return nil, status.Errorf(codes.Aborted, "actor %s crashed", actorRef.String())
 	}
-	// Verify the worker is still assigned to the same Actor.
-	if worker.GetStatus().GetAssignment().GetActorUid() != actor.GetMetadata().GetUid() {
-		slog.ErrorContext(ctx, "crashing actor because its assigned worker no longer belongs to it",
+	// Verify the worker is still hosting this Actor.
+	if workerAssignmentForActor(worker, actor.GetMetadata().GetUid()) == nil {
+		slog.ErrorContext(ctx, "crashing actor because its assigned worker no longer hosts it",
 			slog.String("worker", worker.GetWorkerPod()),
-			slog.Any("assignment", worker.GetStatus().GetAssignment()))
+			slog.Any("assignments", worker.GetStatus().GetAssignments()))
 		if cerr := crashActor(ctx, w.store, actorRef, ateattr.OperationResume, ateattr.ReasonWorkerReassigned); cerr != nil {
 			return nil, fmt.Errorf("while crashing actor: %w", cerr)
 		}
@@ -388,7 +388,7 @@ func (w *ActorWorkflow) validateAssignedWorker(ctx context.Context, actorRef res
 	if !w.scheduler.Applies(worker, constraints) {
 		slog.ErrorContext(ctx, "crashing actor because previously assigned worker is not eligible anymore")
 		release := proto.Clone(worker).(*ateapipb.Worker)
-		release.Status.Assignment = nil
+		releaseActorFromWorker(release, actor.GetMetadata().GetUid())
 		// If that worker's pool is no longer eligible (e.g. the actor's
 		// worker_selector was updated after the failed attempt), release it back
 		// to the free pool instead of leaving it claimed forever — nothing else
@@ -448,12 +448,12 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 	// This can happen if ateapi crashed after updating worker with actor assignment,
 	// but has not yet updated the actor.
 	for _, worker := range workers {
-		if worker.GetStatus().GetAssignment() == nil {
+		if workerAssignmentForActor(worker, actor.GetMetadata().GetUid()) == nil {
 			continue
 		}
-		if worker.GetStatus().GetAssignment().GetActorUid() != actor.GetMetadata().GetUid() {
-			continue
-		}
+		// Only Applies, not HasRoom: this worker is already hosting the actor,
+		// so its own resources are counted against the worker's capacity and a
+		// room check would reject a placement that is already in force.
 		if w.scheduler.Applies(worker, constraints) {
 			assignedWorker = worker
 			break
@@ -461,7 +461,7 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 		// Workers() returns pointers directly from the cache so we need to clone before
 		// mutating so that the cache is not corrupted if UpdateWorker fails.
 		releaseWorker := proto.Clone(worker).(*ateapipb.Worker)
-		releaseWorker.Status.Assignment = nil
+		releaseActorFromWorker(releaseWorker, actor.GetMetadata().GetUid())
 		// The claimed worker is no longer eligible (e.g. the actor's
 		// worker_selector changed after the failed attempt); release it back
 		// to the free pool — nothing else reclaims a healthy worker whose
@@ -493,7 +493,7 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 	// Workers() returns pointers directly from the cache so we need to clone before
 	// mutating so that the cache is not corrupted if UpdateWorker fails.
 	assignedWorker = proto.Clone(assignedWorker).(*ateapipb.Worker)
-	assignedWorker.Status.Assignment = &ateapipb.ActorAssignment{
+	bindActorToWorker(assignedWorker, &ateapipb.ActorAssignment{
 		ActorTemplate: &ateapipb.KubeNamespacedObjectRef{
 			Namespace: actor.GetActorTemplateNamespace(),
 			Name:      actor.GetActorTemplateName(),
@@ -503,7 +503,13 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 			Name:     actor.GetMetadata().GetName(),
 		},
 		ActorUid: actor.GetMetadata().GetUid(),
-	}
+		// What this placement consumes, recorded on the assignment so the
+		// worker's allocation is the sum of what it hosts. These are the same
+		// limits the scheduler just checked for room. Left unset when the actor
+		// declared none, rather than written as an all-zero message that says
+		// the same thing (matching workerCapacity in the syncer).
+		Resources: admittedResources(constraints),
+	})
 
 	if err := w.store.UpdateWorker(ctx, assignedWorker, assignedWorker.GetMetadata().GetVersion()); err != nil {
 		return nil, nil, err
@@ -775,4 +781,16 @@ func (w *ActorWorkflow) finalizeRunning(ctx context.Context, actorRef resources.
 		return nil, err
 	}
 	return storedActor, nil
+}
+
+// admittedResources is what an actor's declared limits reserve on the worker it
+// is placed on, or nil when it declared none.
+func admittedResources(constraints scheduling.Constraints) *ateapipb.WorkerCapacity {
+	if constraints.CPUMilli == 0 && constraints.MemoryBytes == 0 {
+		return nil
+	}
+	return &ateapipb.WorkerCapacity{
+		CpuMilli:    constraints.CPUMilli,
+		MemoryBytes: constraints.MemoryBytes,
+	}
 }

@@ -67,7 +67,9 @@ func filterWorkers(workers []*ateapipb.Worker, namespace, atespace, selector, sa
 		if namespace != "" && w.GetWorkerNamespace() != namespace {
 			continue
 		}
-		if atespace != "" && w.GetStatus().GetAssignment().GetActor().GetAtespace() != atespace {
+		// A worker matches an atespace filter if any actor it hosts is in that
+		// atespace; an idle worker hosts none and so matches nothing.
+		if atespace != "" && !hostsActorInAtespace(w, atespace) {
 			continue
 		}
 		if labelSel != nil && !labelSel.Matches(labels.Set(w.GetLabels())) {
@@ -79,4 +81,15 @@ func filterWorkers(workers []*ateapipb.Worker, namespace, atespace, selector, sa
 		filtered = append(filtered, w)
 	}
 	return filtered, nil
+}
+
+// hostsActorInAtespace reports whether any Actor the Worker hosts belongs to
+// atespace.
+func hostsActorInAtespace(w *ateapipb.Worker, atespace string) bool {
+	for _, wass := range w.GetStatus().GetAssignments() {
+		if wass.GetActor().GetAtespace() == atespace {
+			return true
+		}
+	}
+	return false
 }

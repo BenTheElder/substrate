@@ -27,6 +27,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/resources"
 	listersv1alpha1 "github.com/agent-substrate/substrate/pkg/client/listers/api/v1alpha1"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	"google.golang.org/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
@@ -258,7 +259,7 @@ func (s *WorkerPoolSyncer) createOrUpdateWorker(ctx context.Context, key workerK
 			NodeName:        pod.Spec.NodeName,
 			SandboxClass:    string(pool.Spec.SandboxClass),
 			Labels:          pool.GetLabels(),
-			Capacity:        workerCapacity(pod),
+			Capacity:        workerCapacity(pod, pool.Spec.MaxActors()),
 			Status: &ateapipb.WorkerStatus{
 				State: ateapipb.WorkerState_WORKER_STATE_ACTIVE,
 			},
@@ -294,6 +295,13 @@ func (s *WorkerPoolSyncer) createOrUpdateWorker(ctx context.Context, key workerK
 		w.Labels = pool.GetLabels()
 		changed = true
 	}
+	// Capacity moves when the pool's maxActorsPerWorker changes, not only when
+	// the pod is resized, so it is compared like the rest.
+	if capacity := workerCapacity(pod, pool.Spec.MaxActors()); !proto.Equal(w.GetCapacity(), capacity) {
+		slog.InfoContext(ctx, "Syncer: updating worker in store (capacity changed)", key.logAttrs()...)
+		w.Capacity = capacity
+		changed = true
+	}
 	if !changed {
 		return nil
 	}
@@ -311,15 +319,22 @@ func isWorkerEligible(pod *corev1.Pod) bool {
 // actor's sandbox; its resource limits bound what an actor placed here can use.
 const ateomContainerName = "ateom"
 
-// workerCapacity returns the worker pod's capacity for hosting an actor — CPU
-// in millicores and memory in bytes — taken from the ateom container's resource
-// limits. A dimension the pod does not limit reports 0, which the scheduler
-// treats as "unknown" (unconstrained); a pod that limits neither reports nil
-// rather than an all-zero message that says the same thing. The actor sandbox
-// runs nested in the ateom container's cgroup, so that container's limits — not
-// the pod total — are the relevant envelope.
-func workerCapacity(pod *corev1.Pod) *ateapipb.WorkerCapacity {
-	var capacity ateapipb.WorkerCapacity
+// workerCapacity returns the worker pod's whole capacity for hosting actors:
+// CPU in millicores and memory in bytes from the ateom container's resource
+// limits, plus how many actors the pool allows on one pod.
+//
+// The compute dimensions are the pod's total, not a share of it. What is left
+// is a question the scheduler answers by subtracting the actors already placed
+// (scheduling.Allocated), so an actor smaller than an equal share still leaves
+// the remainder available to its neighbors — which a fixed per-actor slice
+// would strand.
+//
+// A compute dimension the pod does not limit reports 0, which the scheduler
+// treats as "unknown" (unconstrained). The actor sandbox runs nested in the
+// ateom container's cgroup, so that container's limits — not the pod total —
+// are the relevant envelope.
+func workerCapacity(pod *corev1.Pod, maxActors int32) *ateapipb.WorkerCapacity {
+	capacity := ateapipb.WorkerCapacity{Actors: maxActors}
 	for i := range pod.Spec.Containers {
 		c := &pod.Spec.Containers[i]
 		if c.Name != ateomContainerName {
@@ -333,7 +348,7 @@ func workerCapacity(pod *corev1.Pod) *ateapipb.WorkerCapacity {
 		}
 		break
 	}
-	if capacity.CpuMilli == 0 && capacity.MemoryBytes == 0 {
+	if capacity.CpuMilli == 0 && capacity.MemoryBytes == 0 && capacity.Actors == 0 {
 		return nil
 	}
 	return &capacity
@@ -367,7 +382,7 @@ func (s *WorkerPoolSyncer) markWorkerDraining(ctx context.Context, key workerKey
 // later reconcile can retry. Returns nil once the actor is released and the
 // worker record deleted.
 func (s *WorkerPoolSyncer) reconcileDeadWorker(ctx context.Context, name string) error {
-	if err := s.releaseActorOnDeadWorker(ctx, name); err != nil {
+	if err := s.releaseActorsOnDeadWorker(ctx, name); err != nil {
 		return err
 	}
 	return s.persistence.DeleteWorker(ctx, name)
@@ -450,16 +465,22 @@ func (s *WorkerPoolSyncer) listWorkersPageWithRetry(ctx context.Context, pageTok
 	}
 }
 
-// releaseActorOnDeadWorker resets the actor bound to a vanishing worker pod. An
-// actor that already reached ACTOR_STATE_SUSPENDED (it saved its state cleanly during
-// graceful termination) is left untouched and remains resumable. An actor that
-// was still running when the pod disappeared is moved to ACTOR_STATE_CRASHED and its
-// pod pointers are cleared.
+// releaseActorsOnDeadWorker resets every actor bound to a vanishing worker pod.
+// An actor that already reached ACTOR_STATE_SUSPENDED (it saved its state
+// cleanly during graceful termination) is left untouched and remains resumable.
+// An actor that was still running when the pod disappeared is moved to
+// ACTOR_STATE_CRASHED and its pod pointers are cleared.
+//
+// Every assignment is attempted even if an earlier one fails, and the errors are
+// joined: a worker hosting several actors must not strand the rest because one
+// of them lost a race. The caller only deletes the worker record once this
+// returns nil, so a partial failure retries the whole set, and the actors
+// already released short-circuit on their second pass.
 //
 // UpdateActor uses optimistic version checking. A concurrent SuspendActor
 // or ResumeActor wins; we fail this attempt so it can be retried with the
 // updated state.
-func (s *WorkerPoolSyncer) releaseActorOnDeadWorker(ctx context.Context, name string) error {
+func (s *WorkerPoolSyncer) releaseActorsOnDeadWorker(ctx context.Context, name string) error {
 	worker, err := s.persistence.GetWorker(ctx, name)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -467,10 +488,23 @@ func (s *WorkerPoolSyncer) releaseActorOnDeadWorker(ctx context.Context, name st
 		}
 		return err
 	}
-	if worker.GetStatus().GetAssignment().GetActor() == nil {
+	var errs []error
+	for _, assignment := range worker.GetStatus().GetAssignments() {
+		if err := s.releaseActorOnDeadWorker(ctx, worker, assignment); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// releaseActorOnDeadWorker releases one of a dead worker's actors. See
+// releaseActorsOnDeadWorker for the contract.
+func (s *WorkerPoolSyncer) releaseActorOnDeadWorker(ctx context.Context, worker *ateapipb.Worker, assignment *ateapipb.ActorAssignment) error {
+	name := worker.GetMetadata().GetName()
+	if assignment.GetActor() == nil {
 		return nil
 	}
-	actorRef := resources.ActorRefFromObjectRef(worker.GetStatus().GetAssignment().GetActor())
+	actorRef := resources.ActorRefFromObjectRef(assignment.GetActor())
 	actor, err := s.persistence.GetActor(ctx, actorRef)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -478,7 +512,7 @@ func (s *WorkerPoolSyncer) releaseActorOnDeadWorker(ctx context.Context, name st
 		}
 		return err
 	}
-	if actor.GetMetadata().GetUid() != worker.GetStatus().GetAssignment().GetActorUid() {
+	if actor.GetMetadata().GetUid() != assignment.GetActorUid() {
 		return nil
 	}
 	// Skip if a concurrent SuspendActor already cleared the pointer, or if the

@@ -353,7 +353,7 @@ func TestValidateWorker(t *testing.T) {
 			WorkerPodUid:    testWorkerPodUID,
 			NodeName:        "node-1.example.com",
 			Status: &ateapipb.WorkerStatus{
-				Assignment: &ateapipb.ActorAssignment{
+				Assignments: []*ateapipb.ActorAssignment{{
 					ActorTemplate: &ateapipb.KubeNamespacedObjectRef{
 						Namespace: "actor-ns",
 						Name:      "actor-template",
@@ -363,7 +363,7 @@ func TestValidateWorker(t *testing.T) {
 						Name:     "actor",
 					},
 					ActorUid: "actor-uid",
-				},
+				}},
 			},
 		},
 		wantMsg: "",
@@ -378,16 +378,16 @@ func TestValidateWorker(t *testing.T) {
 			WorkerPodUid:    testWorkerPodUID,
 			NodeName:        "node-1.example.com",
 			Status: &ateapipb.WorkerStatus{
-				Assignment: &ateapipb.ActorAssignment{
+				Assignments: []*ateapipb.ActorAssignment{{
 					Actor: &ateapipb.ObjectRef{
 						Atespace: "actor-ns",
 						Name:     "actor",
 					},
 					ActorUid: "actor-uid",
-				},
+				}},
 			},
 		},
-		wantMsg: "worker.status.assignment.actor_template: Required value",
+		wantMsg: "worker.status.assignments\\[0\\].actor_template: Required value",
 	}, {
 		name: "partially assigned worker, missing actor_template.namespace",
 		worker: &ateapipb.Worker{
@@ -399,7 +399,7 @@ func TestValidateWorker(t *testing.T) {
 			WorkerPodUid:    testWorkerPodUID,
 			NodeName:        "node-1.example.com",
 			Status: &ateapipb.WorkerStatus{
-				Assignment: &ateapipb.ActorAssignment{
+				Assignments: []*ateapipb.ActorAssignment{{
 					ActorTemplate: &ateapipb.KubeNamespacedObjectRef{
 						Name: "actor-template",
 					},
@@ -408,10 +408,10 @@ func TestValidateWorker(t *testing.T) {
 						Name:     "actor",
 					},
 					ActorUid: "actor-uid",
-				},
+				}},
 			},
 		},
-		wantMsg: "worker.status.assignment.actor_template.namespace: Required value",
+		wantMsg: "worker.status.assignments\\[0\\].actor_template.namespace: Required value",
 	}, {
 		name: "partially assigned worker, missing actor_template.name",
 		worker: &ateapipb.Worker{
@@ -423,7 +423,7 @@ func TestValidateWorker(t *testing.T) {
 			WorkerPodUid:    testWorkerPodUID,
 			NodeName:        "node-1.example.com",
 			Status: &ateapipb.WorkerStatus{
-				Assignment: &ateapipb.ActorAssignment{
+				Assignments: []*ateapipb.ActorAssignment{{
 					ActorTemplate: &ateapipb.KubeNamespacedObjectRef{
 						Namespace: "actor-ns",
 					},
@@ -432,10 +432,10 @@ func TestValidateWorker(t *testing.T) {
 						Name:     "actor",
 					},
 					ActorUid: "actor-uid",
-				},
+				}},
 			},
 		},
-		wantMsg: "worker.status.assignment.actor_template.name: Required value",
+		wantMsg: "worker.status.assignments\\[0\\].actor_template.name: Required value",
 	}, {
 		name: "partially assigned worker, missing actor",
 		worker: &ateapipb.Worker{
@@ -447,16 +447,16 @@ func TestValidateWorker(t *testing.T) {
 			WorkerPodUid:    testWorkerPodUID,
 			NodeName:        "node-1.example.com",
 			Status: &ateapipb.WorkerStatus{
-				Assignment: &ateapipb.ActorAssignment{
+				Assignments: []*ateapipb.ActorAssignment{{
 					ActorTemplate: &ateapipb.KubeNamespacedObjectRef{
 						Name:      "actor-template",
 						Namespace: "actor-ns",
 					},
 					ActorUid: "actor-uid",
-				},
+				}},
 			},
 		},
-		wantMsg: "worker.status.assignment.actor: Required value",
+		wantMsg: "worker.status.assignments\\[0\\].actor: Required value",
 	}, {
 		name: "partially assigned worker, missing actor.name",
 		worker: &ateapipb.Worker{
@@ -468,7 +468,7 @@ func TestValidateWorker(t *testing.T) {
 			WorkerPodUid:    testWorkerPodUID,
 			NodeName:        "node-1.example.com",
 			Status: &ateapipb.WorkerStatus{
-				Assignment: &ateapipb.ActorAssignment{
+				Assignments: []*ateapipb.ActorAssignment{{
 					ActorTemplate: &ateapipb.KubeNamespacedObjectRef{
 						Name:      "actor-template",
 						Namespace: "actor-ns",
@@ -477,10 +477,10 @@ func TestValidateWorker(t *testing.T) {
 						Atespace: "actor-ns",
 					},
 					ActorUid: "actor-uid",
-				},
+				}},
 			},
 		},
-		wantMsg: "worker.status.assignment.actor.name: Required value",
+		wantMsg: "worker.status.assignments\\[0\\].actor.name: Required value",
 	}, {
 		name: "partially assigned worker, missing actor.atespace",
 		worker: &ateapipb.Worker{
@@ -492,7 +492,7 @@ func TestValidateWorker(t *testing.T) {
 			WorkerPodUid:    testWorkerPodUID,
 			NodeName:        "node-1.example.com",
 			Status: &ateapipb.WorkerStatus{
-				Assignment: &ateapipb.ActorAssignment{
+				Assignments: []*ateapipb.ActorAssignment{{
 					ActorTemplate: &ateapipb.KubeNamespacedObjectRef{
 						Name:      "actor-template",
 						Namespace: "actor-ns",
@@ -501,10 +501,10 @@ func TestValidateWorker(t *testing.T) {
 						Name: "actor",
 					},
 					ActorUid: "actor-uid",
-				},
+				}},
 			},
 		},
-		wantMsg: "worker.status.assignment.actor.atespace: Required value",
+		wantMsg: "worker.status.assignments\\[0\\].actor.atespace: Required value",
 	}, {
 		name: "partially assigned worker, missing actor_uid",
 		worker: &ateapipb.Worker{
@@ -516,7 +516,7 @@ func TestValidateWorker(t *testing.T) {
 			WorkerPodUid:    testWorkerPodUID,
 			NodeName:        "node-1.example.com",
 			Status: &ateapipb.WorkerStatus{
-				Assignment: &ateapipb.ActorAssignment{
+				Assignments: []*ateapipb.ActorAssignment{{
 					ActorTemplate: &ateapipb.KubeNamespacedObjectRef{
 						Name:      "actor-template",
 						Namespace: "actor-ns",
@@ -525,10 +525,10 @@ func TestValidateWorker(t *testing.T) {
 						Atespace: "actor-ns",
 						Name:     "actor",
 					},
-				},
+				}},
 			},
 		},
-		wantMsg: "worker.status.assignment.actor_uid: Required value",
+		wantMsg: "worker.status.assignments\\[0\\].actor_uid: Required value",
 	}, {
 		name: "missing worker_namespace",
 		worker: &ateapipb.Worker{

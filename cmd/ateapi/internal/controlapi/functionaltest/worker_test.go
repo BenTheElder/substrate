@@ -65,6 +65,9 @@ func TestListWorkers(t *testing.T) {
 			Ip:              "127.0.0.1",
 			SandboxClass:    "gvisor",
 			Labels:          map[string]string{"foo": "bar"},
+			// The pod sets no compute limits, so capacity reports only how many
+			// actors the pool allows on one worker.
+			Capacity: &ateapipb.WorkerCapacity{Actors: 1},
 			Status: &ateapipb.WorkerStatus{
 				State: ateapipb.WorkerState_WORKER_STATE_ACTIVE,
 			},

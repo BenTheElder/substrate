@@ -132,10 +132,10 @@ func TestEnsurePausedFinalized_RecordsContentScope(t *testing.T) {
 				WorkerPod:       "worker-pod-1",
 				NodeName:        "node1",
 				Status: &ateapipb.WorkerStatus{
-					Assignment: &ateapipb.ActorAssignment{
+					Assignments: []*ateapipb.ActorAssignment{{
 						Actor:    &ateapipb.ObjectRef{Atespace: actorRef.Atespace, Name: actorRef.Name},
 						ActorUid: created.GetMetadata().GetUid(),
-					},
+					}},
 				},
 			}); err != nil {
 				t.Fatalf("CreateWorker: %v", err)

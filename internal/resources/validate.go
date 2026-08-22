@@ -244,8 +244,22 @@ func ValidateWorker(worker *ateapipb.Worker, fldPath *field.Path) field.ErrorLis
 		}
 	}
 
-	if val := worker.GetStatus().GetAssignment(); val != nil {
-		errs = append(errs, ValidateAssignment(val, fldPath.Child("status", "assignment"))...)
+	// A Worker may host several Actors, and each assignment must name a distinct
+	// one: two entries for the same Actor would double-count its resources
+	// against the worker's capacity and leave one behind when the Actor is
+	// released.
+	seenActors := make(map[string]int, len(worker.GetStatus().GetAssignments()))
+	for i, val := range worker.GetStatus().GetAssignments() {
+		path := fldPath.Child("status", "assignments").Index(i)
+		errs = append(errs, ValidateAssignment(val, path)...)
+		if uid := val.GetActorUid(); uid != "" {
+			if first, dup := seenActors[uid]; dup {
+				errs = append(errs, field.Duplicate(path.Child("actor_uid"),
+					fmt.Sprintf("%s (already assigned at index %d)", uid, first)))
+				continue
+			}
+			seenActors[uid] = i
+		}
 	}
 
 	if val, fldPath := worker.Ip, fldPath.Child("ip"); val == "" {

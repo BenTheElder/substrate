@@ -4657,8 +4657,10 @@ func (x *Worker) GetStatus() *WorkerStatus {
 type WorkerStatus struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	State WorkerState            `protobuf:"varint,1,opt,name=state,proto3,enum=ateapi.WorkerState" json:"state,omitempty"`
-	// The Actor currently bound to this Worker, if any.
-	Assignment    *ActorAssignment `protobuf:"bytes,2,opt,name=assignment,proto3" json:"assignment,omitempty"`
+	// The Actors currently bound to this Worker. Empty when the Worker is idle.
+	// How many may be bound at once is not a fixed number: it is whatever
+	// capacity admits, including capacity.actors as one of its dimensions.
+	Assignments   []*ActorAssignment `protobuf:"bytes,3,rep,name=assignments,proto3" json:"assignments,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4700,23 +4702,40 @@ func (x *WorkerStatus) GetState() WorkerState {
 	return WorkerState_WORKER_STATE_UNSPECIFIED
 }
 
-func (x *WorkerStatus) GetAssignment() *ActorAssignment {
+func (x *WorkerStatus) GetAssignments() []*ActorAssignment {
 	if x != nil {
-		return x.Assignment
+		return x.Assignments
 	}
 	return nil
 }
 
-// WorkerCapacity is the worker pod's compute capacity available to host an
-// actor sandbox, taken from the ateom container's resource limits. The
-// scheduler only places an actor on a worker whose capacity is >= the actor's
-// declared resource limits. An unset message, or a zero field within it, means
-// "unknown/unset" for that dimension: treated as unconstrained so placement is
-// not blocked (matching the pre-capacity behavior).
+// WorkerCapacity is what a worker pod has to give the Actors it hosts, and is
+// also the shape of what those Actors have taken: the scheduler places an Actor
+// only where capacity minus the sum of the assignments' resources still covers
+// the Actor's declared limits, in every dimension.
+//
+// The compute dimensions come from the ateom container's resource limits. An
+// unset message, or a zero field within it, means "unknown/unset" for that
+// dimension: treated as unconstrained so placement is not blocked (matching the
+// pre-capacity behavior).
 type WorkerCapacity struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	CpuMilli      int64                  `protobuf:"varint,1,opt,name=cpu_milli,json=cpuMilli,proto3" json:"cpu_milli,omitempty"`          // CPU capacity in millicores (1000 = one core).
-	MemoryBytes   int64                  `protobuf:"varint,2,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"` // Memory capacity in bytes.
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	CpuMilli    int64                  `protobuf:"varint,1,opt,name=cpu_milli,json=cpuMilli,proto3" json:"cpu_milli,omitempty"`          // CPU capacity in millicores (1000 = one core).
+	MemoryBytes int64                  `protobuf:"varint,2,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"` // Memory capacity in bytes.
+	// How many Actors may be bound to the Worker at once, from the WorkerPool's
+	// maxActorsPerWorker. It is a capacity dimension rather than a separate limit
+	// because it bounds the same thing the others do -- what one more Actor
+	// costs -- for the per-Actor costs that are not CPU or memory: network
+	// namespaces, mounts, file descriptors, and the blast radius of losing the
+	// pod. Kubernetes bounds a node the same way, with allocatable pods alongside
+	// allocatable cpu and memory.
+	//
+	// Unset means one, unlike the compute dimensions above, where unset means
+	// unconstrained. A worker that has not said it can host more than one actor
+	// is assumed not to be able to, so that a Worker created without capacity
+	// does not accept actors without limit. The syncer always sets this from the
+	// pool, which itself defaults to 1.
+	Actors        int32 `protobuf:"varint,3,opt,name=actors,proto3" json:"actors,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4765,6 +4784,13 @@ func (x *WorkerCapacity) GetMemoryBytes() int64 {
 	return 0
 }
 
+func (x *WorkerCapacity) GetActors() int32 {
+	if x != nil {
+		return x.Actors
+	}
+	return 0
+}
+
 // ActorAssignment names the Actor currently bound to a Worker — the inverse of
 // WorkerAssignment.
 type ActorAssignment struct {
@@ -4774,6 +4800,16 @@ type ActorAssignment struct {
 	ActorTemplate *KubeNamespacedObjectRef `protobuf:"bytes,1,opt,name=actor_template,json=actorTemplate,proto3" json:"actor_template,omitempty"`
 	Actor         *ObjectRef               `protobuf:"bytes,2,opt,name=actor,proto3" json:"actor,omitempty"`
 	ActorUid      string                   `protobuf:"bytes,3,opt,name=actor_uid,json=actorUid,proto3" json:"actor_uid,omitempty"`
+	// What the Worker admitted this Actor for, from the Actor's declared limits
+	// at placement time. Carried on the assignment so a Worker's allocation is
+	// the sum of what it is hosting, derived and never separately stored -- a
+	// stored running total is one more thing to keep in step with the list, and
+	// it drifts on exactly the paths (crash, restart, partial failure) where the
+	// count matters most.
+	//
+	// The actors dimension is not meaningful here and is left unset; one
+	// assignment is one Actor.
+	Resources     *WorkerCapacity `protobuf:"bytes,4,opt,name=resources,proto3" json:"resources,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4827,6 +4863,13 @@ func (x *ActorAssignment) GetActorUid() string {
 		return x.ActorUid
 	}
 	return ""
+}
+
+func (x *ActorAssignment) GetResources() *WorkerCapacity {
+	if x != nil {
+		return x.Resources
+	}
+	return nil
 }
 
 type KubeNamespacedObjectRef struct {
@@ -5506,19 +5549,20 @@ const file_ateapi_proto_rawDesc = "" +
 	"\x06status\x18\v \x01(\v2\x14.ateapi.WorkerStatusR\x06status\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"r\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x86\x01\n" +
 	"\fWorkerStatus\x12)\n" +
-	"\x05state\x18\x01 \x01(\x0e2\x13.ateapi.WorkerStateR\x05state\x127\n" +
-	"\n" +
-	"assignment\x18\x02 \x01(\v2\x17.ateapi.ActorAssignmentR\n" +
-	"assignment\"P\n" +
+	"\x05state\x18\x01 \x01(\x0e2\x13.ateapi.WorkerStateR\x05state\x129\n" +
+	"\vassignments\x18\x03 \x03(\v2\x17.ateapi.ActorAssignmentR\vassignmentsJ\x04\b\x02\x10\x03R\n" +
+	"assignment\"h\n" +
 	"\x0eWorkerCapacity\x12\x1b\n" +
 	"\tcpu_milli\x18\x01 \x01(\x03R\bcpuMilli\x12!\n" +
-	"\fmemory_bytes\x18\x02 \x01(\x03R\vmemoryBytes\"\x9f\x01\n" +
+	"\fmemory_bytes\x18\x02 \x01(\x03R\vmemoryBytes\x12\x16\n" +
+	"\x06actors\x18\x03 \x01(\x05R\x06actors\"\xd5\x01\n" +
 	"\x0fActorAssignment\x12F\n" +
 	"\x0eactor_template\x18\x01 \x01(\v2\x1f.ateapi.KubeNamespacedObjectRefR\ractorTemplate\x12'\n" +
 	"\x05actor\x18\x02 \x01(\v2\x11.ateapi.ObjectRefR\x05actor\x12\x1b\n" +
-	"\tactor_uid\x18\x03 \x01(\tR\bactorUid\"K\n" +
+	"\tactor_uid\x18\x03 \x01(\tR\bactorUid\x124\n" +
+	"\tresources\x18\x04 \x01(\v2\x16.ateapi.WorkerCapacityR\tresources\"K\n" +
 	"\x17KubeNamespacedObjectRef\x12\x1c\n" +
 	"\tnamespace\x18\x01 \x01(\tR\tnamespace\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\"\x13\n" +
@@ -5824,80 +5868,81 @@ var file_ateapi_proto_depIdxs = []int32{
 	79,  // 91: ateapi.Worker.capacity:type_name -> ateapi.WorkerCapacity
 	78,  // 92: ateapi.Worker.status:type_name -> ateapi.WorkerStatus
 	6,   // 93: ateapi.WorkerStatus.state:type_name -> ateapi.WorkerState
-	80,  // 94: ateapi.WorkerStatus.assignment:type_name -> ateapi.ActorAssignment
+	80,  // 94: ateapi.WorkerStatus.assignments:type_name -> ateapi.ActorAssignment
 	81,  // 95: ateapi.ActorAssignment.actor_template:type_name -> ateapi.KubeNamespacedObjectRef
 	21,  // 96: ateapi.ActorAssignment.actor:type_name -> ateapi.ObjectRef
-	21,  // 97: ateapi.MintCertRequest.worker:type_name -> ateapi.ObjectRef
-	7,   // 98: ateapi.MintCertRequest.purpose:type_name -> ateapi.ActorCertificatePurpose
-	38,  // 99: ateapi.SandboxAssets.AssetsEntry.value:type_name -> ateapi.ArchAssets
-	39,  // 100: ateapi.ArchAssets.FilesEntry.value:type_name -> ateapi.AssetFile
-	50,  // 101: ateapi.Control.GetActor:input_type -> ateapi.GetActorRequest
-	51,  // 102: ateapi.Control.CreateActor:input_type -> ateapi.CreateActorRequest
-	52,  // 103: ateapi.Control.UpdateActor:input_type -> ateapi.UpdateActorRequest
-	53,  // 104: ateapi.Control.SuspendActor:input_type -> ateapi.SuspendActorRequest
-	55,  // 105: ateapi.Control.PauseActor:input_type -> ateapi.PauseActorRequest
-	57,  // 106: ateapi.Control.ResumeActor:input_type -> ateapi.ResumeActorRequest
-	59,  // 107: ateapi.Control.DeleteActor:input_type -> ateapi.DeleteActorRequest
-	60,  // 108: ateapi.Control.GetActorSnapshot:input_type -> ateapi.GetActorSnapshotRequest
-	61,  // 109: ateapi.Control.GetActorSnapshotTag:input_type -> ateapi.GetActorSnapshotTagRequest
-	62,  // 110: ateapi.Control.ListActorSnapshots:input_type -> ateapi.ListActorSnapshotsRequest
-	64,  // 111: ateapi.Control.CreateActorSnapshotTag:input_type -> ateapi.CreateActorSnapshotTagRequest
-	65,  // 112: ateapi.Control.UpdateActorSnapshotTag:input_type -> ateapi.UpdateActorSnapshotTagRequest
-	66,  // 113: ateapi.Control.DeleteActorSnapshotTag:input_type -> ateapi.DeleteActorSnapshotTagRequest
-	68,  // 114: ateapi.Control.ListWorkers:input_type -> ateapi.ListWorkersRequest
-	70,  // 115: ateapi.Control.GetWorker:input_type -> ateapi.GetWorkerRequest
-	71,  // 116: ateapi.Control.CreateWorker:input_type -> ateapi.CreateWorkerRequest
-	72,  // 117: ateapi.Control.UpdateWorker:input_type -> ateapi.UpdateWorkerRequest
-	73,  // 118: ateapi.Control.DeleteWorker:input_type -> ateapi.DeleteWorkerRequest
-	74,  // 119: ateapi.Control.DrainWorker:input_type -> ateapi.DrainWorkerRequest
-	75,  // 120: ateapi.Control.ListActors:input_type -> ateapi.ListActorsRequest
-	40,  // 121: ateapi.Control.CreateAtespace:input_type -> ateapi.CreateAtespaceRequest
-	41,  // 122: ateapi.Control.GetAtespace:input_type -> ateapi.GetAtespaceRequest
-	42,  // 123: ateapi.Control.ListAtespaces:input_type -> ateapi.ListAtespacesRequest
-	44,  // 124: ateapi.Control.DeleteAtespace:input_type -> ateapi.DeleteAtespaceRequest
-	45,  // 125: ateapi.Control.CreateActorTemplate:input_type -> ateapi.CreateActorTemplateRequest
-	46,  // 126: ateapi.Control.GetActorTemplate:input_type -> ateapi.GetActorTemplateRequest
-	47,  // 127: ateapi.Control.ListActorTemplates:input_type -> ateapi.ListActorTemplatesRequest
-	49,  // 128: ateapi.Control.DeleteActorTemplate:input_type -> ateapi.DeleteActorTemplateRequest
-	82,  // 129: ateapi.Debug.DebugClear:input_type -> ateapi.DebugClearRequest
-	84,  // 130: ateapi.ActorIdentity.MintJWT:input_type -> ateapi.MintJWTRequest
-	86,  // 131: ateapi.ActorIdentity.MintCert:input_type -> ateapi.MintCertRequest
-	13,  // 132: ateapi.Control.GetActor:output_type -> ateapi.Actor
-	13,  // 133: ateapi.Control.CreateActor:output_type -> ateapi.Actor
-	13,  // 134: ateapi.Control.UpdateActor:output_type -> ateapi.Actor
-	54,  // 135: ateapi.Control.SuspendActor:output_type -> ateapi.SuspendActorResponse
-	56,  // 136: ateapi.Control.PauseActor:output_type -> ateapi.PauseActorResponse
-	58,  // 137: ateapi.Control.ResumeActor:output_type -> ateapi.ResumeActorResponse
-	13,  // 138: ateapi.Control.DeleteActor:output_type -> ateapi.Actor
-	17,  // 139: ateapi.Control.GetActorSnapshot:output_type -> ateapi.ActorSnapshot
-	19,  // 140: ateapi.Control.GetActorSnapshotTag:output_type -> ateapi.ActorSnapshotTag
-	63,  // 141: ateapi.Control.ListActorSnapshots:output_type -> ateapi.ListActorSnapshotsResponse
-	19,  // 142: ateapi.Control.CreateActorSnapshotTag:output_type -> ateapi.ActorSnapshotTag
-	19,  // 143: ateapi.Control.UpdateActorSnapshotTag:output_type -> ateapi.ActorSnapshotTag
-	19,  // 144: ateapi.Control.DeleteActorSnapshotTag:output_type -> ateapi.ActorSnapshotTag
-	69,  // 145: ateapi.Control.ListWorkers:output_type -> ateapi.ListWorkersResponse
-	77,  // 146: ateapi.Control.GetWorker:output_type -> ateapi.Worker
-	77,  // 147: ateapi.Control.CreateWorker:output_type -> ateapi.Worker
-	77,  // 148: ateapi.Control.UpdateWorker:output_type -> ateapi.Worker
-	77,  // 149: ateapi.Control.DeleteWorker:output_type -> ateapi.Worker
-	77,  // 150: ateapi.Control.DrainWorker:output_type -> ateapi.Worker
-	76,  // 151: ateapi.Control.ListActors:output_type -> ateapi.ListActorsResponse
-	20,  // 152: ateapi.Control.CreateAtespace:output_type -> ateapi.Atespace
-	20,  // 153: ateapi.Control.GetAtespace:output_type -> ateapi.Atespace
-	43,  // 154: ateapi.Control.ListAtespaces:output_type -> ateapi.ListAtespacesResponse
-	20,  // 155: ateapi.Control.DeleteAtespace:output_type -> ateapi.Atespace
-	22,  // 156: ateapi.Control.CreateActorTemplate:output_type -> ateapi.ActorTemplate
-	22,  // 157: ateapi.Control.GetActorTemplate:output_type -> ateapi.ActorTemplate
-	48,  // 158: ateapi.Control.ListActorTemplates:output_type -> ateapi.ListActorTemplatesResponse
-	22,  // 159: ateapi.Control.DeleteActorTemplate:output_type -> ateapi.ActorTemplate
-	83,  // 160: ateapi.Debug.DebugClear:output_type -> ateapi.DebugClearResponse
-	85,  // 161: ateapi.ActorIdentity.MintJWT:output_type -> ateapi.MintJWTResponse
-	87,  // 162: ateapi.ActorIdentity.MintCert:output_type -> ateapi.MintCertResponse
-	132, // [132:163] is the sub-list for method output_type
-	101, // [101:132] is the sub-list for method input_type
-	101, // [101:101] is the sub-list for extension type_name
-	101, // [101:101] is the sub-list for extension extendee
-	0,   // [0:101] is the sub-list for field type_name
+	79,  // 97: ateapi.ActorAssignment.resources:type_name -> ateapi.WorkerCapacity
+	21,  // 98: ateapi.MintCertRequest.worker:type_name -> ateapi.ObjectRef
+	7,   // 99: ateapi.MintCertRequest.purpose:type_name -> ateapi.ActorCertificatePurpose
+	38,  // 100: ateapi.SandboxAssets.AssetsEntry.value:type_name -> ateapi.ArchAssets
+	39,  // 101: ateapi.ArchAssets.FilesEntry.value:type_name -> ateapi.AssetFile
+	50,  // 102: ateapi.Control.GetActor:input_type -> ateapi.GetActorRequest
+	51,  // 103: ateapi.Control.CreateActor:input_type -> ateapi.CreateActorRequest
+	52,  // 104: ateapi.Control.UpdateActor:input_type -> ateapi.UpdateActorRequest
+	53,  // 105: ateapi.Control.SuspendActor:input_type -> ateapi.SuspendActorRequest
+	55,  // 106: ateapi.Control.PauseActor:input_type -> ateapi.PauseActorRequest
+	57,  // 107: ateapi.Control.ResumeActor:input_type -> ateapi.ResumeActorRequest
+	59,  // 108: ateapi.Control.DeleteActor:input_type -> ateapi.DeleteActorRequest
+	60,  // 109: ateapi.Control.GetActorSnapshot:input_type -> ateapi.GetActorSnapshotRequest
+	61,  // 110: ateapi.Control.GetActorSnapshotTag:input_type -> ateapi.GetActorSnapshotTagRequest
+	62,  // 111: ateapi.Control.ListActorSnapshots:input_type -> ateapi.ListActorSnapshotsRequest
+	64,  // 112: ateapi.Control.CreateActorSnapshotTag:input_type -> ateapi.CreateActorSnapshotTagRequest
+	65,  // 113: ateapi.Control.UpdateActorSnapshotTag:input_type -> ateapi.UpdateActorSnapshotTagRequest
+	66,  // 114: ateapi.Control.DeleteActorSnapshotTag:input_type -> ateapi.DeleteActorSnapshotTagRequest
+	68,  // 115: ateapi.Control.ListWorkers:input_type -> ateapi.ListWorkersRequest
+	70,  // 116: ateapi.Control.GetWorker:input_type -> ateapi.GetWorkerRequest
+	71,  // 117: ateapi.Control.CreateWorker:input_type -> ateapi.CreateWorkerRequest
+	72,  // 118: ateapi.Control.UpdateWorker:input_type -> ateapi.UpdateWorkerRequest
+	73,  // 119: ateapi.Control.DeleteWorker:input_type -> ateapi.DeleteWorkerRequest
+	74,  // 120: ateapi.Control.DrainWorker:input_type -> ateapi.DrainWorkerRequest
+	75,  // 121: ateapi.Control.ListActors:input_type -> ateapi.ListActorsRequest
+	40,  // 122: ateapi.Control.CreateAtespace:input_type -> ateapi.CreateAtespaceRequest
+	41,  // 123: ateapi.Control.GetAtespace:input_type -> ateapi.GetAtespaceRequest
+	42,  // 124: ateapi.Control.ListAtespaces:input_type -> ateapi.ListAtespacesRequest
+	44,  // 125: ateapi.Control.DeleteAtespace:input_type -> ateapi.DeleteAtespaceRequest
+	45,  // 126: ateapi.Control.CreateActorTemplate:input_type -> ateapi.CreateActorTemplateRequest
+	46,  // 127: ateapi.Control.GetActorTemplate:input_type -> ateapi.GetActorTemplateRequest
+	47,  // 128: ateapi.Control.ListActorTemplates:input_type -> ateapi.ListActorTemplatesRequest
+	49,  // 129: ateapi.Control.DeleteActorTemplate:input_type -> ateapi.DeleteActorTemplateRequest
+	82,  // 130: ateapi.Debug.DebugClear:input_type -> ateapi.DebugClearRequest
+	84,  // 131: ateapi.ActorIdentity.MintJWT:input_type -> ateapi.MintJWTRequest
+	86,  // 132: ateapi.ActorIdentity.MintCert:input_type -> ateapi.MintCertRequest
+	13,  // 133: ateapi.Control.GetActor:output_type -> ateapi.Actor
+	13,  // 134: ateapi.Control.CreateActor:output_type -> ateapi.Actor
+	13,  // 135: ateapi.Control.UpdateActor:output_type -> ateapi.Actor
+	54,  // 136: ateapi.Control.SuspendActor:output_type -> ateapi.SuspendActorResponse
+	56,  // 137: ateapi.Control.PauseActor:output_type -> ateapi.PauseActorResponse
+	58,  // 138: ateapi.Control.ResumeActor:output_type -> ateapi.ResumeActorResponse
+	13,  // 139: ateapi.Control.DeleteActor:output_type -> ateapi.Actor
+	17,  // 140: ateapi.Control.GetActorSnapshot:output_type -> ateapi.ActorSnapshot
+	19,  // 141: ateapi.Control.GetActorSnapshotTag:output_type -> ateapi.ActorSnapshotTag
+	63,  // 142: ateapi.Control.ListActorSnapshots:output_type -> ateapi.ListActorSnapshotsResponse
+	19,  // 143: ateapi.Control.CreateActorSnapshotTag:output_type -> ateapi.ActorSnapshotTag
+	19,  // 144: ateapi.Control.UpdateActorSnapshotTag:output_type -> ateapi.ActorSnapshotTag
+	19,  // 145: ateapi.Control.DeleteActorSnapshotTag:output_type -> ateapi.ActorSnapshotTag
+	69,  // 146: ateapi.Control.ListWorkers:output_type -> ateapi.ListWorkersResponse
+	77,  // 147: ateapi.Control.GetWorker:output_type -> ateapi.Worker
+	77,  // 148: ateapi.Control.CreateWorker:output_type -> ateapi.Worker
+	77,  // 149: ateapi.Control.UpdateWorker:output_type -> ateapi.Worker
+	77,  // 150: ateapi.Control.DeleteWorker:output_type -> ateapi.Worker
+	77,  // 151: ateapi.Control.DrainWorker:output_type -> ateapi.Worker
+	76,  // 152: ateapi.Control.ListActors:output_type -> ateapi.ListActorsResponse
+	20,  // 153: ateapi.Control.CreateAtespace:output_type -> ateapi.Atespace
+	20,  // 154: ateapi.Control.GetAtespace:output_type -> ateapi.Atespace
+	43,  // 155: ateapi.Control.ListAtespaces:output_type -> ateapi.ListAtespacesResponse
+	20,  // 156: ateapi.Control.DeleteAtespace:output_type -> ateapi.Atespace
+	22,  // 157: ateapi.Control.CreateActorTemplate:output_type -> ateapi.ActorTemplate
+	22,  // 158: ateapi.Control.GetActorTemplate:output_type -> ateapi.ActorTemplate
+	48,  // 159: ateapi.Control.ListActorTemplates:output_type -> ateapi.ListActorTemplatesResponse
+	22,  // 160: ateapi.Control.DeleteActorTemplate:output_type -> ateapi.ActorTemplate
+	83,  // 161: ateapi.Debug.DebugClear:output_type -> ateapi.DebugClearResponse
+	85,  // 162: ateapi.ActorIdentity.MintJWT:output_type -> ateapi.MintJWTResponse
+	87,  // 163: ateapi.ActorIdentity.MintCert:output_type -> ateapi.MintCertResponse
+	133, // [133:164] is the sub-list for method output_type
+	102, // [102:133] is the sub-list for method input_type
+	102, // [102:102] is the sub-list for extension type_name
+	102, // [102:102] is the sub-list for extension extendee
+	0,   // [0:102] is the sub-list for field type_name
 }
 
 func init() { file_ateapi_proto_init() }

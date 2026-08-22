@@ -1104,10 +1104,10 @@ func runWorkerContractTests(t *testing.T, setup func(t *testing.T) store.Interfa
 		}
 		defer watch.Close()
 
-		worker.Status.Assignment = &ateapipb.ActorAssignment{
+		worker.Status.Assignments = []*ateapipb.ActorAssignment{{
 			ActorTemplate: &ateapipb.KubeNamespacedObjectRef{Namespace: "default", Name: "test-template"},
 			Actor:         &ateapipb.ObjectRef{Name: "session-1"},
-		}
+		}}
 		if err := s.UpdateWorker(ctx, worker, 1); err != nil {
 			t.Fatalf("UpdateWorker failed: %v", err)
 		}
@@ -1152,12 +1152,12 @@ func runWorkerContractTests(t *testing.T, setup func(t *testing.T) store.Interfa
 			t.Fatalf("GetWorker failed: %v", err)
 		}
 
-		worker1.Status.Assignment = &ateapipb.ActorAssignment{Actor: &ateapipb.ObjectRef{Name: "session-1"}}
+		worker1.Status.Assignments = []*ateapipb.ActorAssignment{{Actor: &ateapipb.ObjectRef{Name: "session-1"}}}
 		if err := s.UpdateWorker(ctx, worker1, worker1.GetMetadata().GetVersion()); err != nil {
 			t.Fatalf("UpdateWorker failed: %v", err)
 		}
 
-		worker2.Status.Assignment = &ateapipb.ActorAssignment{Actor: &ateapipb.ObjectRef{Name: "session-2"}}
+		worker2.Status.Assignments = []*ateapipb.ActorAssignment{{Actor: &ateapipb.ObjectRef{Name: "session-2"}}}
 		err = s.UpdateWorker(ctx, worker2, worker2.GetMetadata().GetVersion())
 		if !errors.Is(err, store.ErrVersionConflict) {
 			t.Errorf("expected ErrVersionConflict, got %v", err)
