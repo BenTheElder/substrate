@@ -304,11 +304,33 @@ func (w *ActorWorkflow) ensureWorkerAssigned(ctx context.Context, actorRef resou
 		return nil, nil, status.Errorf(codes.FailedPrecondition, "AssignWorker prerequisite not met for Actor: %s (got: %v, want %s or %s)", actorRef, actor.GetStatus().GetState(), ateapipb.ActorState_ACTOR_STATE_SUSPENDED, ateapipb.ActorState_ACTOR_STATE_PAUSED)
 	}
 
+	// Sized for the contention this actually sees, which is not one or two
+	// racing writers.
+	//
+	// Every activation claims its worker by rewriting that worker's whole
+	// record, so N actors activating onto the same worker are N writers
+	// compare-and-swapping one row: all but one lose each round, and the last
+	// one through needs roughly N rounds. The previous budget -- five steps from
+	// 10ms, about 235ms all told -- could not absorb that. Measured on an EMPTY
+	// worker, purely from concurrency: 21% of activations rejected at 12 in
+	// flight and 67% at 24, every one of them failing at exactly 235ms with
+	// "timed out waiting for the condition".
+	//
+	// Capping the step keeps the tail from running away while still letting the
+	// attempts spread: with a shared row it is the jitter that decides who gets
+	// through, not the growth factor. ~3s of retrying against a 10 minute RPC
+	// deadline.
+	//
+	// This converts a refusal into latency; it does not remove the contention.
+	// The write is O(actors on the worker) and shared by every activation
+	// targeting it, so the honest fix is for an activation to stop rewriting a
+	// record it shares with everyone else.
 	backoff := wait.Backoff{
-		Steps:    5,
-		Duration: 10 * time.Millisecond,
+		Steps:    12,
+		Duration: 15 * time.Millisecond,
 		Factor:   2.0,
 		Jitter:   1.0,
+		Cap:      250 * time.Millisecond,
 	}
 	var assignedActor *ateapipb.Actor
 	var assignedWorker *ateapipb.Worker
@@ -321,7 +343,7 @@ func (w *ActorWorkflow) ensureWorkerAssigned(ctx context.Context, actorRef resou
 			assignedActor, assignedWorker = attemptActor, attemptWorker
 			return true, nil
 		}
-		if errors.Is(attemptErr, store.ErrVersionConflict) {
+		if errors.Is(attemptErr, store.ErrVersionConflict) || errors.Is(attemptErr, errWorkerFilledUp) {
 			if attemptActor != nil {
 				actor = attemptActor // retry with the refreshed actor
 			}
@@ -490,8 +512,34 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 		slog.InfoContext(ctx, "Picked worker", slog.Any("worker", pickedWorker.String()))
 	}
 
-	// Workers() returns pointers directly from the cache so we need to clone before
-	// mutating so that the cache is not corrupted if UpdateWorker fails.
+	// Everything from here to the write is the claim, and it is serialized per
+	// worker within this process. See claimLocks for why: without it the racing
+	// writers are goroutines rather than replicas, and optimistic concurrency
+	// spends a full read-modify-write per loser.
+	unlock := w.claimLocks.lock(assignedWorker.GetMetadata().GetName())
+	defer unlock()
+
+	// Re-read under the lock. The pick above came from a watch-fed cache, which
+	// does not see a claim that has just succeeded until its event arrives --
+	// so the cached copy is exactly the version most likely to be stale, and
+	// writing from it is what loses the compare-and-swap.
+	fresh, err := w.store.GetWorker(ctx, assignedWorker.GetMetadata().GetName())
+	if err != nil {
+		return nil, nil, fmt.Errorf("while re-reading worker %q before claiming it: %w",
+			assignedWorker.GetMetadata().GetName(), err)
+	}
+	// And re-check it still fits, for the same reason. The scheduler judged room
+	// from the stale copy; previously a wrong answer there was caught by the
+	// compare-and-swap failing, which no longer happens now that the claim is
+	// serialized. Retrying re-runs scheduling and picks somewhere else.
+	if workerAssignmentForActor(fresh, actor.GetMetadata().GetUid()) == nil && !w.scheduler.HasRoom(fresh, constraints) {
+		return nil, nil, errWorkerFilledUp
+	}
+	assignedWorker = fresh
+
+	// GetWorker returns a fresh message, but the already-assigned branch above
+	// can still hand back a pointer straight from the cache, so clone before
+	// mutating either way.
 	assignedWorker = proto.Clone(assignedWorker).(*ateapipb.Worker)
 	bindActorToWorker(assignedWorker, &ateapipb.ActorAssignment{
 		ActorTemplate: &ateapipb.KubeNamespacedObjectRef{
