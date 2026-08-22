@@ -28,6 +28,8 @@ import (
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
+	"github.com/agent-substrate/substrate/internal/activation"
+	"github.com/agent-substrate/substrate/internal/ateattr"
 	"github.com/agent-substrate/substrate/internal/ateompath"
 	"github.com/agent-substrate/substrate/internal/sizing"
 )
@@ -38,6 +40,10 @@ type runsc struct {
 	// size is the actor's declared limits, supplied on the RunWorkload /
 	// RestoreWorkload RPC; ensureContainerCgroupsPath writes it into the OCI spec.
 	size sizing.SandboxSize
+	// act collects the timings of the create/start/restore commands, which run
+	// once per container and so are summed rather than reported individually.
+	// Nil outside an activation (checkpoint, teardown).
+	act *activation.Activation
 }
 
 // nvproxyGlobalArgs returns the runsc global flags for GPU sandboxes, enabling
@@ -96,6 +102,7 @@ func (r *runsc) ensureContainerCgroupsPath(containerName string) error {
 }
 
 func (r *runsc) cmdCreate(ctx context.Context, out io.Writer, containerName string, additionalArgs []string) error {
+	defer r.act.Timing(ateattr.ActivationPhaseSandboxCreate)()
 	reapLock.RLock()
 	defer reapLock.RUnlock()
 
@@ -145,6 +152,7 @@ func (r *runsc) cmdCreate(ctx context.Context, out io.Writer, containerName stri
 }
 
 func (r *runsc) cmdStart(ctx context.Context, out io.Writer, containerName string) error {
+	defer r.act.Timing(ateattr.ActivationPhaseSandboxRestore)()
 	reapLock.RLock()
 	defer reapLock.RUnlock()
 
@@ -246,6 +254,7 @@ func (r *runsc) cmdFsCheckpoint(ctx context.Context, containerName, checkpointPa
 // We take a checkpoint only of the root container of the sandbox, but we need
 // to call restore on each container, using the same checkpoint.
 func (r *runsc) cmdRestore(ctx context.Context, out io.Writer, containerName, checkpointPath string) error {
+	defer r.act.Timing(ateattr.ActivationPhaseSandboxRestore)()
 	reapLock.RLock()
 	defer reapLock.RUnlock()
 

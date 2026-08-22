@@ -34,8 +34,10 @@ import (
 
 	"cloud.google.com/go/compute/metadata"
 	"github.com/agent-substrate/substrate/cmd/ateom-gvisor/internal/cgroupstats"
+	"github.com/agent-substrate/substrate/internal/activation"
 	"github.com/agent-substrate/substrate/internal/actorlock"
 	"github.com/agent-substrate/substrate/internal/actorlog"
+	"github.com/agent-substrate/substrate/internal/ateattr"
 	"github.com/agent-substrate/substrate/internal/ateinterceptors"
 	"github.com/agent-substrate/substrate/internal/ateompath"
 	"github.com/agent-substrate/substrate/internal/ateomstats"
@@ -52,6 +54,7 @@ import (
 	"github.com/hashicorp/go-reap"
 	"github.com/spf13/pflag"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/otel"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -196,6 +199,13 @@ func do(ctx context.Context) error {
 	}
 
 	ateomService := NewService(actorLogger, atunnelIngress, atunnelEgress, atunnelEgressPort, *workerCredentialBundle, *podIdentityTrustBundle, *egressGatewayTrustBundle)
+
+	// Assigned rather than passed: NewService's parameter list is already long,
+	// and every test constructs a service that wants the nil no-op anyway.
+	ateomService.instruments, err = activation.NewInstruments(otel.Meter(serviceName))
+	if err != nil {
+		serverboot.Fatal(ctx, "Failed to create activation instruments", err)
+	}
 
 	svr := grpc.NewServer(
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
@@ -359,6 +369,10 @@ type AteomService struct {
 	// own cgroup scope, which setupCgroupDelegation prepares. A field rather
 	// than a constant so tests can point GetWorkloadStats at a fixture tree.
 	cgroupRoot string
+
+	// instruments records the activation phase breakdown. Nil is a working
+	// no-op, which is what every test gets.
+	instruments *activation.Instruments
 
 	// readSandboxCgroup overrides cgroupstats.Read when set. Only tests set it:
 	// it is the seam that lets them interleave a lifecycle transition with the
@@ -585,9 +599,16 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	// actor.
 	s.inFlight.Add(1)
 	defer s.inFlight.Done()
+
+	attribution := ateomstats.ActorAttributionFromRequest(req)
+	act := activation.New(ateattr.OperationCreate, attribution)
+	defer func() { act.Finish(ctx, s.instruments, retErr) }()
+
+	lockWait := time.Now()
 	if !s.actorLocks.Lock(ctx, req.GetActorUid()) {
 		return nil, status.Error(codes.Canceled, "cancelled while waiting for the actor lock")
 	}
+	act.Since(ateattr.ActivationPhaseActorLockWait, lockWait)
 	defer s.actorLocks.Unlock(req.GetActorUid())
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -599,7 +620,6 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 		return nil, err
 	}
 
-	attribution := ateomstats.ActorAttributionFromRequest(req)
 	s.actorLogger.EmitLifecycleLog(ctx, "Actor starting", attribution)
 
 	// hostActor retains the attribution before the boot rather than after it, so
@@ -615,7 +635,7 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	if err != nil {
 		return nil, err
 	}
-	hosted, err := s.hostActor(ctx, attribution, req.GetEgressGateway() != nil)
+	hosted, err := s.hostActor(ctx, act, attribution, req.GetEgressGateway() != nil)
 	if err != nil {
 		return nil, err
 	}
@@ -623,6 +643,7 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 		path:     req.GetRunscPath(),
 		actorUID: req.GetActorUid(),
 		size:     sizing.FromLimits(req.GetCpuMilli(), req.GetMemoryBytes()),
+		act:      act,
 	}
 	var containersToDelete []string
 	defer func() {
@@ -651,7 +672,7 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	// upper — because mounting is ateom's job (atelet runs with no
 	// capabilities); runsc's gofer resolves the mount in this pod's mount
 	// namespace.
-	if err := imagecache.SetupBundleRootfs(ateompath.OCIBundlePath(req.GetActorUid(), "pause")); err != nil {
+	if err := setupBundleRootfs(act, req.GetActorUid(), "pause"); err != nil {
 		return nil, fmt.Errorf("while composing pause rootfs: %w", err)
 	}
 	containersToDelete = append(containersToDelete, "pause")
@@ -670,7 +691,7 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 			return nil, fmt.Errorf("while starting json log pipe for %q: %w", ac.GetName(), err)
 		}
 		defer pw.Close()
-		if err := imagecache.SetupBundleRootfs(ateompath.OCIBundlePath(req.GetActorUid(), ac.GetName())); err != nil {
+		if err := setupBundleRootfs(act, req.GetActorUid(), ac.GetName()); err != nil {
 			return nil, fmt.Errorf("while composing %q rootfs: %w", ac.GetName(), err)
 		}
 		containersToDelete = append(containersToDelete, ac.GetName())
@@ -686,10 +707,14 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	}
 
 	// Block until every readyz-enabled container reports 200.
-	if err := readyz.WaitAll(ctx, req.GetSpec().GetContainers(), hosted.network.PodSideIP.String()); err != nil {
+	if err := act.Step(ateattr.ActivationPhaseReadyz, func() error {
+		return readyz.WaitAll(ctx, req.GetSpec().GetContainers(), hosted.network.PodSideIP.String())
+	}); err != nil {
 		return nil, fmt.Errorf("while waiting for container readyz: %w", err)
 	}
-	if err := s.activateActorNetworking(hosted, req.GetAtespace(), req.GetActorName(), egress); err != nil {
+	if err := act.Step(ateattr.ActivationPhaseIngress, func() error {
+		return s.activateActorNetworking(hosted, req.GetAtespace(), req.GetActorName(), egress)
+	}); err != nil {
 		return nil, err
 	}
 
@@ -861,9 +886,16 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	// actor.
 	s.inFlight.Add(1)
 	defer s.inFlight.Done()
+
+	attribution := ateomstats.ActorAttributionFromRequest(req)
+	act := activation.New(ateattr.OperationResume, attribution)
+	defer func() { act.Finish(ctx, s.instruments, retErr) }()
+
+	lockWait := time.Now()
 	if !s.actorLocks.Lock(ctx, req.GetActorUid()) {
 		return nil, status.Error(codes.Canceled, "cancelled while waiting for the actor lock")
 	}
+	act.Since(ateattr.ActivationPhaseActorLockWait, lockWait)
 	defer s.actorLocks.Unlock(req.GetActorUid())
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -875,7 +907,6 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		return nil, err
 	}
 
-	attribution := ateomstats.ActorAttributionFromRequest(req)
 	s.actorLogger.EmitLifecycleLog(ctx, "Actor restoring", attribution)
 
 	// Same as RunWorkload: hostActor retains the attribution before the boot,
@@ -891,7 +922,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	if err != nil {
 		return nil, err
 	}
-	hosted, err := s.hostActor(ctx, attribution, req.GetEgressGateway() != nil)
+	hosted, err := s.hostActor(ctx, act, attribution, req.GetEgressGateway() != nil)
 	if err != nil {
 		return nil, err
 	}
@@ -899,6 +930,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		path:     req.GetRunscPath(),
 		actorUID: req.GetActorUid(),
 		size:     sizing.FromLimits(req.GetCpuMilli(), req.GetMemoryBytes()),
+		act:      act,
 	}
 	var containersToDelete []string
 	defer func() {
@@ -924,7 +956,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	// Compose the pause rootfs before create (see RunWorkload). runsc restore
 	// only needs the rootfs to hold the correct content; whether it came from
 	// an untar or an overlay of cached layers is transparent to it.
-	if err := imagecache.SetupBundleRootfs(ateompath.OCIBundlePath(req.GetActorUid(), "pause")); err != nil {
+	if err := setupBundleRootfs(act, req.GetActorUid(), "pause"); err != nil {
 		return nil, fmt.Errorf("while composing pause rootfs: %w", err)
 	}
 
@@ -959,7 +991,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 			return nil, fmt.Errorf("while starting json log pipe for %q: %w", ac.GetName(), err)
 		}
 		defer pw.Close()
-		if err := imagecache.SetupBundleRootfs(ateompath.OCIBundlePath(req.GetActorUid(), ac.GetName())); err != nil {
+		if err := setupBundleRootfs(act, req.GetActorUid(), ac.GetName()); err != nil {
 			return nil, fmt.Errorf("while composing %q rootfs: %w", ac.GetName(), err)
 		}
 		if err := maybeInjectGPU(ctx, req.GetActorUid(), ac.GetName()); err != nil {
@@ -988,10 +1020,14 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	}
 
 	// Block until every readyz-enabled container reports 200.
-	if err := readyz.WaitAll(ctx, req.GetSpec().GetContainers(), hosted.network.PodSideIP.String()); err != nil {
+	if err := act.Step(ateattr.ActivationPhaseReadyz, func() error {
+		return readyz.WaitAll(ctx, req.GetSpec().GetContainers(), hosted.network.PodSideIP.String())
+	}); err != nil {
 		return nil, fmt.Errorf("while waiting for container readyz: %w", err)
 	}
-	if err := s.activateActorNetworking(hosted, req.GetAtespace(), req.GetActorName(), egress); err != nil {
+	if err := act.Step(ateattr.ActivationPhaseIngress, func() error {
+		return s.activateActorNetworking(hosted, req.GetAtespace(), req.GetActorName(), egress)
+	}); err != nil {
 		return nil, err
 	}
 
