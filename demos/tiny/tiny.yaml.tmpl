@@ -38,9 +38,14 @@ metadata:
   labels:
     workload: tiny
 spec:
-  # ONE worker. The question is how many Actors fit on a single worker, so a
-  # second replica would only split the population and hide the ceiling.
-  replicas: 1
+  # One worker per node, eight of them.
+  #
+  # This started at one, to find what a single worker holds. That answer is in
+  # hand (~4000, stopped by declared capacity, with the machine at 5% CPU), and
+  # the question moved: a million actors is a FLEET, and the costs that matter
+  # at a fleet are the ones that scale with worker count rather than with one
+  # worker's occupancy. Nothing about a single worker exercises those.
+  replicas: 8
 
   # What the whole exercise turns on. Admission is per dimension against the
   # worker's capacity, so this is the number that decides when the scheduler
@@ -81,12 +86,19 @@ spec:
         # them at the 2000m tiny-fast declares. That is a declaration, not a
         # reservation -- an idle actor draws nothing, and only the actors
         # restoring at once spend anything -- which is the same reasoning the
-        # memory limit above rests on, and why a 32-core node carries it.
+        # memory limit below rests on, and why a 32-core node carries it.
         cpu: "8200"
-        memory: 220Gi
+        # Above the request, so the limit is not what decides placement, and
+        # high enough that declared capacity is not what stops a pack.
+        memory: 200Gi
+      # Requests are what place the pod, and they are deliberately more than half
+      # a node: two of these cannot share one, so the fleet lands one worker per
+      # node and each worker's numbers are its own rather than a share of a
+      # neighbour's CPU. That plus atelet is the two-pods-per-node shape the
+      # real deployment is aiming at.
       requests:
         cpu: "4"
-        memory: 100Gi
+        memory: 150Gi
 
 ---
 
