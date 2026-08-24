@@ -323,11 +323,13 @@ func (w *ActorWorkflow) ensureWorkerAssigned(ctx context.Context, actorRef resou
 		return nil, nil, status.Errorf(codes.FailedPrecondition, "AssignWorker prerequisite not met for Actor: %s (got: %v, want %s or %s)", actorRef, actor.GetStatus().GetState(), ateapipb.ActorState_ACTOR_STATE_SUSPENDED, ateapipb.ActorState_ACTOR_STATE_PAUSED)
 	}
 
+	// Bound contention retries to about three seconds.
 	backoff := wait.Backoff{
-		Steps:    5,
-		Duration: 10 * time.Millisecond,
+		Steps:    12,
+		Duration: 15 * time.Millisecond,
 		Factor:   2.0,
 		Jitter:   1.0,
+		Cap:      250 * time.Millisecond,
 	}
 	var assignedActor *ateapipb.Actor
 	var assignedWorker *ateapipb.Worker
@@ -340,7 +342,7 @@ func (w *ActorWorkflow) ensureWorkerAssigned(ctx context.Context, actorRef resou
 			assignedActor, assignedWorker = attemptActor, attemptWorker
 			return true, nil
 		}
-		if errors.Is(attemptErr, store.ErrVersionConflict) {
+		if errors.Is(attemptErr, store.ErrVersionConflict) || errors.Is(attemptErr, errWorkerFilledUp) {
 			if attemptActor != nil {
 				actor = attemptActor // retry with the refreshed actor
 			}
@@ -527,8 +529,17 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 	}
 	assignment.ActorTemplateRef = actorTemplateObjectRef(actor)
 
-	if err := w.store.BindActorToWorker(ctx, assignedWorker.GetMetadata().GetName(),
-		assignedWorker.GetMetadata().GetVersion(), assignment); err != nil {
+	// The candidate came from a watch-fed cache, so it may already be full or no
+	// longer eligible. The store re-asks under the Worker's row lock, where the
+	// answer holds until the bind commits, so nothing here needs a fresh read
+	// and two claims for the last place cannot both be admitted.
+	admit := func(fresh *ateapipb.Worker) error {
+		if !w.scheduler.Applies(fresh, constraints) || !w.scheduler.HasRoom(fresh, constraints) {
+			return errWorkerFilledUp
+		}
+		return nil
+	}
+	if err := w.store.BindActorToWorker(ctx, assignedWorker.GetMetadata().GetName(), assignment, admit); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			w.workerCache.Forget(assignedWorker.GetMetadata().GetName())
 			return nil, nil, fmt.Errorf("selected worker disappeared before claim: %w", store.ErrVersionConflict)
@@ -565,6 +576,11 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 	outcome = ateattr.SchedulerOutcomeAssigned
 	return storedActor, assignedWorker, nil
 }
+
+// errWorkerFilledUp reports that the Worker the scheduler picked would not take
+// the Actor once the store asked under its row lock. Retryable: the next
+// attempt re-runs scheduling.
+var errWorkerFilledUp = errors.New("picked worker no longer has room")
 
 func workerAssignmentFrom(w *ateapipb.Worker) *ateapipb.WorkerAssignment {
 	return &ateapipb.WorkerAssignment{

@@ -233,9 +233,14 @@ type Interface interface {
 	// BindActorToWorker assigns an Actor and updates the Worker's allocation.
 	// Rebinding the same Actor replaces its assignment.
 	//
-	// ErrNotFound if the Worker is gone, ErrVersionConflict if it has moved past
-	// expectedVersion, which is how a claim loses to a concurrent one.
-	BindActorToWorker(ctx context.Context, workerName string, expectedVersion int64, assignment *ateapipb.ActorAssignment) error
+	// admit decides whether the Worker will take the Actor, and runs against the
+	// Worker as it stands with its row locked, so the answer cannot go stale
+	// between the check and the bind. Returning an error from it refuses the
+	// bind and is returned unchanged. It is consulted only for a new binding: an
+	// Actor already on this Worker is already counted against it.
+	//
+	// ErrNotFound if the Worker is gone.
+	BindActorToWorker(ctx context.Context, workerName string, assignment *ateapipb.ActorAssignment, admit func(*ateapipb.Worker) error) error
 
 	// ReleaseActorFromWorker removes an assignment and updates allocation,
 	// returning the Worker as it now stands so the caller can feed the
