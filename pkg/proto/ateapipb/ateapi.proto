@@ -1187,6 +1187,21 @@ message WorkerStatus {
   // than reserving it: the two are wire-compatible, so a record written before
   // the Worker could hold a set reads back as a set of one.
   repeated ActorAssignment assignments = 2;
+
+  // What the assignments above have taken from this Worker's capacity, kept in
+  // step with the list as it changes rather than derived from it on read.
+  //
+  // Stored because the scheduler reads it for EVERY worker on EVERY placement,
+  // so summing the list makes one placement decision cost the whole fleet's
+  // actor count. Measured: a placement takes 4us against one worker holding
+  // 1000 actors, and 6.26ms against 1000 workers holding 1000 each -- so
+  // filling a fleet is quadratic in the actors already in it.
+  //
+  // The invariant is that this equals the sum of assignments, and the only
+  // safe way to hold it is for nothing to edit the list directly: bind and
+  // release maintain both together, and anything setting the list wholesale
+  // recomputes. See worker_assignments.go.
+  WorkerCapacity allocated = 3;
 }
 
 // WorkerCapacity is what a worker pod has to give the Actors it hosts, and is

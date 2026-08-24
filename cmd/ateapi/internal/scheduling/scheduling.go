@@ -194,20 +194,29 @@ func (s *scheduler) HasRoom(worker *ateapipb.Worker, constraints Constraints) bo
 	return true
 }
 
-// Allocated sums what a worker's current assignments took from it. It is
-// derived from the assignment list on every read rather than stored, so it
-// cannot drift from the list it describes.
+// Allocated is what a worker's current assignments took from it: the running
+// total the control plane maintains as it binds and releases them.
 //
-// An assignment that records no resources contributes only to the actor count.
-// That is the honest reading: the actor declared no limits, so nothing is known
-// to have been reserved, which matches how a zero constraint is treated as
-// unconstrained at placement.
+// Stored rather than summed per call because Schedule reads it for every worker
+// on every placement, which would otherwise cost the fleet's whole actor count
+// each time.
+//
+// An assignment that records no resources contributes only to the actor count:
+// the actor declared no limits, so nothing is known to have been reserved,
+// matching how a zero constraint is unconstrained at placement.
 func Allocated(worker *ateapipb.Worker) *ateapipb.WorkerCapacity {
-	used := &ateapipb.WorkerCapacity{}
-	for _, assignment := range worker.GetStatus().GetAssignments() {
-		used.Actors++
-		used.CpuMilli += assignment.GetResources().GetCpuMilli()
-		used.MemoryBytes += assignment.GetResources().GetMemoryBytes()
+	status := worker.GetStatus()
+	if allocated := status.GetAllocated(); allocated != nil || len(status.GetAssignments()) == 0 {
+		return allocated
 	}
-	return used
+	// Assignments with no total should not happen, but trusting one would read a
+	// full worker as empty and keep placing actors on it. Summing is slower and
+	// correct.
+	total := &ateapipb.WorkerCapacity{}
+	for _, assignment := range status.GetAssignments() {
+		total.Actors++
+		total.CpuMilli += assignment.GetResources().GetCpuMilli()
+		total.MemoryBytes += assignment.GetResources().GetMemoryBytes()
+	}
+	return total
 }

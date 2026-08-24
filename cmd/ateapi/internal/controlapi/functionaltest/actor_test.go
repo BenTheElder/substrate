@@ -1809,7 +1809,11 @@ func TestResumeActor(t *testing.T) {
 				},
 				ActorUid: getResp.GetMetadata().GetUid(),
 			}},
-			State: ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+			// The running total of what the assignments took. The actor
+			// declares no compute limits, so it registers as one actor and
+			// nothing else -- the same reading capacity gets above.
+			Allocated: &ateapipb.WorkerCapacity{Actors: 1},
+			State:     ateapipb.WorkerState_WORKER_STATE_ACTIVE,
 		},
 	}
 
