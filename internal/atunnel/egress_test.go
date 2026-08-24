@@ -36,11 +36,12 @@ func TestEgressActivationFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	egress.actorSource = pipeActorSource
 	dialer := egressDialerFunc(func(context.Context, string) (net.Conn, error) {
 		t.Fatal("dialed after failed activation")
 		return nil, nil
 	})
-	if err := egress.Activate(dialer, fakeActorCertificateSource{err: errors.New("renewal failed")}, time.Time{}); err == nil {
+	if err := egress.Activate(testActorIP, dialer, fakeActorCertificateSource{err: errors.New("renewal failed")}, time.Time{}); err == nil {
 		t.Fatal("Activate() succeeded")
 	}
 	actor, proxy := net.Pipe()
@@ -67,7 +68,8 @@ func TestEgressExpiryRejectsNewButPreservesEstablished(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := egress.Activate(dialer, fakeActorCertificateSource{err: errors.New("renewal failed"), calls: &mints}, time.Now().Add(50*time.Millisecond)); err != nil {
+	egress.actorSource = pipeActorSource
+	if err := egress.Activate(testActorIP, dialer, fakeActorCertificateSource{err: errors.New("renewal failed"), calls: &mints}, time.Now().Add(50*time.Millisecond)); err != nil {
 		t.Fatal(err)
 	}
 	actor, proxy := net.Pipe()
@@ -102,7 +104,7 @@ func TestEgressExpiryRejectsNewButPreservesEstablished(t *testing.T) {
 	if got := mints.Load(); got > 3 {
 		t.Fatalf("mint attempts = %d, retry loop spun near expiry", got)
 	}
-	_ = egress.Deactivate(context.Background())
+	_ = egress.Deactivate(context.Background(), testActorIP)
 }
 
 func TestEgressRenewsBeforeExpiry(t *testing.T) {
@@ -123,7 +125,8 @@ func TestEgressRenewsBeforeExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := egress.Activate(dialer, source, time.Now().Add(80*time.Millisecond)); err != nil {
+	egress.actorSource = pipeActorSource
+	if err := egress.Activate(testActorIP, dialer, source, time.Now().Add(80*time.Millisecond)); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -134,7 +137,7 @@ func TestEgressRenewsBeforeExpiry(t *testing.T) {
 	deadline := time.Now().Add(time.Second)
 	for {
 		egress.mu.Lock()
-		expiresAt := egress.active.expiresAt
+		expiresAt := egress.active[testActorIP.String()].expiresAt
 		egress.mu.Unlock()
 		if expiresAt.Equal(renewedExpiry) {
 			break
@@ -147,7 +150,7 @@ func TestEgressRenewsBeforeExpiry(t *testing.T) {
 	actor, proxy := net.Pipe()
 	defer actor.Close()
 	egress.handle(proxy)
-	_ = egress.Deactivate(context.Background())
+	_ = egress.Deactivate(context.Background(), testActorIP)
 }
 
 func TestEgressRetriesRenewalAfterExpiry(t *testing.T) {
@@ -166,7 +169,7 @@ func TestEgressStopsAfterTerminalRenewalFailure(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := egress.Activate(egressDialerFunc(func(context.Context, string) (net.Conn, error) {
+			if err := egress.Activate(testActorIP, egressDialerFunc(func(context.Context, string) (net.Conn, error) {
 				t.Fatal("dialed after renewal was denied")
 				return nil, nil
 			}), fakeActorCertificateSource{
@@ -184,7 +187,7 @@ func TestEgressStopsAfterTerminalRenewalFailure(t *testing.T) {
 			deadline := time.Now().Add(time.Second)
 			for {
 				egress.mu.Lock()
-				expiresAt := egress.active.expiresAt
+				expiresAt := egress.active[testActorIP.String()].expiresAt
 				egress.mu.Unlock()
 				if expiresAt.IsZero() {
 					break
@@ -194,7 +197,7 @@ func TestEgressStopsAfterTerminalRenewalFailure(t *testing.T) {
 				}
 				time.Sleep(time.Millisecond)
 			}
-			_ = egress.Deactivate(context.Background())
+			_ = egress.Deactivate(context.Background(), testActorIP)
 		})
 	}
 }
@@ -206,8 +209,9 @@ func TestEgressDeactivationDropsConcurrentRenewal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	egress.actorSource = pipeActorSource
 	dialer := egressDialerFunc(func(context.Context, string) (net.Conn, error) { return nil, nil })
-	if err := egress.Activate(dialer, fakeActorCertificateSource{
+	if err := egress.Activate(testActorIP, dialer, fakeActorCertificateSource{
 		expiresAt: time.Now().Add(time.Hour),
 		called:    started,
 		release:   release,
@@ -215,7 +219,7 @@ func TestEgressDeactivationDropsConcurrentRenewal(t *testing.T) {
 		t.Fatal(err)
 	}
 	egress.mu.Lock()
-	active := egress.active
+	active := egress.active[testActorIP.String()]
 	egress.mu.Unlock()
 	select {
 	case <-started:
@@ -223,7 +227,7 @@ func TestEgressDeactivationDropsConcurrentRenewal(t *testing.T) {
 		t.Fatal("certificate renewal did not start")
 	}
 	done := make(chan error, 1)
-	go func() { done <- egress.Deactivate(context.Background()) }()
+	go func() { done <- egress.Deactivate(context.Background(), testActorIP) }()
 	<-active.ctx.Done()
 	close(release)
 	if err := <-done; err != nil {
@@ -276,7 +280,8 @@ func TestEgressEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := egress.Activate(client, fakeActorCertificateSource{expiresAt: time.Now().Add(time.Hour)}, time.Now().Add(time.Hour)); err != nil {
+	egress.actorSource = pipeActorSource
+	if err := egress.Activate(testActorIP, client, fakeActorCertificateSource{expiresAt: time.Now().Add(time.Hour)}, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -315,7 +320,7 @@ func TestEgressEndToEnd(t *testing.T) {
 	}
 	<-gatewayDone
 
-	if err := egress.Deactivate(context.Background()); err != nil {
+	if err := egress.Deactivate(context.Background(), testActorIP); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -328,6 +333,7 @@ func TestEgressRejectsInactiveConnection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	egress.actorSource = pipeActorSource
 	actor, proxy := net.Pipe()
 	defer actor.Close()
 	if err := actor.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
@@ -368,3 +374,11 @@ func (s fakeActorCertificateSource) Mint(context.Context) (time.Time, error) {
 	}
 	return s.expiresAt, s.err
 }
+
+// testActorIP stands in for the pod-side address a worker rewrites an actor's
+// traffic to; it is the key egress files actors under.
+var testActorIP = net.ParseIP("169.254.32.1")
+
+// pipeActorSource makes a net.Pipe look like it came from testActorIP. Pipes
+// have no socket address, so the production resolver cannot answer for them.
+func pipeActorSource(net.Conn) (string, bool) { return testActorIP.String(), true }

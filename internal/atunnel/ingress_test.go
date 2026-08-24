@@ -136,15 +136,15 @@ func TestServeHTTP(t *testing.T) {
 	}
 
 	s := newTestServer(t, upstreamURL)
-	s.proxy.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+	s.newTransport = staticTransport(roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		upstreamHost <- r.Host
 		return &http.Response{
 			StatusCode: http.StatusNoContent,
 			Header:     make(http.Header),
 			Body:       http.NoBody,
 		}, nil
-	})
-	if err := s.Activate("team-a", "actor-1"); err != nil {
+	}))
+	if err := s.Activate("team-a", "actor-1", upstreamURL); err != nil {
 		t.Fatal(err)
 	}
 
@@ -197,7 +197,7 @@ func TestServeHTTPHonorsTargetPortHeader(t *testing.T) {
 
 	s := newTestServer(t, upstreamURL)
 	var gotURLHost, gotHost, gotHeader string
-	s.proxy.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+	s.newTransport = staticTransport(roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		gotURLHost = r.URL.Host
 		gotHost = r.Host
 		gotHeader = r.Header.Get(TargetPortHeader)
@@ -206,8 +206,8 @@ func TestServeHTTPHonorsTargetPortHeader(t *testing.T) {
 			Header:     make(http.Header),
 			Body:       http.NoBody,
 		}, nil
-	})
-	if err := s.Activate("team-a", "actor-1"); err != nil {
+	}))
+	if err := s.Activate("team-a", "actor-1", upstreamURL); err != nil {
 		t.Fatal(err)
 	}
 
@@ -252,7 +252,7 @@ func TestServeConnectHTTPValidatesMethodAndAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := newTestServer(t, upstreamURL)
-	if err := s.Activate("team-a", "actor-1"); err != nil {
+	if err := s.Activate("team-a", "actor-1", upstreamURL); err != nil {
 		t.Fatal(err)
 	}
 
@@ -309,8 +309,8 @@ func TestDeactivateClosesIdleUpstreamConnections(t *testing.T) {
 	}
 	s := newTestServer(t, upstream)
 	transport := &idleClosingRoundTripper{}
-	s.proxy.Transport = transport
-	if err := s.Activate("team-a", "actor-1"); err != nil {
+	s.newTransport = staticTransport(transport)
+	if err := s.Activate("team-a", "actor-1", upstream); err != nil {
 		t.Fatal(err)
 	}
 
@@ -321,7 +321,7 @@ func TestDeactivateClosesIdleUpstreamConnections(t *testing.T) {
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
 	}
-	if err := s.Deactivate(context.Background()); err != nil {
+	if err := s.Deactivate(context.Background(), "team-a", "actor-1"); err != nil {
 		t.Fatal(err)
 	}
 	if !transport.closed {
@@ -347,10 +347,10 @@ func TestInactive(t *testing.T) {
 			}
 		})
 		if phase == "before activation" {
-			if err := s.Activate("team-a", "actor-1"); err != nil {
+			if err := s.Activate("team-a", "actor-1", upstream); err != nil {
 				t.Fatal(err)
 			}
-			if err := s.Deactivate(context.Background()); err != nil {
+			if err := s.Deactivate(context.Background(), "team-a", "actor-1"); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -367,15 +367,10 @@ func TestMutualTLSClientIdentity(t *testing.T) {
 	if err := os.WriteFile(trustPath, ca.certPEM, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	upstream, err := url.Parse("http://actor.internal:80")
-	if err != nil {
-		t.Fatal(err)
-	}
 	s, err := NewServer(Config{
 		CredentialBundlePath: bundlePath,
 		TrustBundlePath:      trustPath,
 		AllowedClientID:      "spiffe://cluster.local/ns/ate-system/sa/atenet-router",
-		Upstream:             upstream,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -448,12 +443,12 @@ func TestServeNegotiatesH2(t *testing.T) {
 		CredentialBundlePath: bundlePath,
 		TrustBundlePath:      trustPath,
 		AllowedClientID:      "spiffe://cluster.local/ns/ate-system/sa/atenet-router",
-		Upstream:             upstream,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Activate("team-a", "actor-1"); err != nil {
+	// The upstream is per actor now, so it arrives with the activation.
+	if err := s.Activate("team-a", "actor-1", upstream); err != nil {
 		t.Fatal(err)
 	}
 
@@ -535,15 +530,17 @@ func TestDeactivateCancelsInflightRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := newTestServer(t, upstream)
-	if err := s.Activate("team-a", "actor-1"); err != nil {
-		t.Fatal(err)
-	}
 	started := make(chan struct{})
-	s.proxy.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+	// Set before activating: each actor's proxy is built when it is activated,
+	// so a transport installed afterwards would not reach it.
+	s.newTransport = staticTransport(roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		close(started)
 		<-r.Context().Done()
 		return nil, r.Context().Err()
-	})
+	}))
+	if err := s.Activate("team-a", "actor-1", upstream); err != nil {
+		t.Fatal(err)
+	}
 
 	done := make(chan struct{})
 	go func() {
@@ -553,7 +550,7 @@ func TestDeactivateCancelsInflightRequest(t *testing.T) {
 		s.ServeHTTP(httptest.NewRecorder(), req)
 	}()
 	<-started
-	if err := s.Deactivate(context.Background()); err != nil {
+	if err := s.Deactivate(context.Background(), "team-a", "actor-1"); err != nil {
 		t.Fatal(err)
 	}
 	<-done
@@ -567,7 +564,6 @@ func newTestServer(t *testing.T, upstream *url.URL) *Server {
 		CredentialBundlePath: bundle,
 		TrustBundlePath:      trust,
 		AllowedClientID:      "spiffe://cluster.local/ns/ate-system/sa/atenet-router",
-		Upstream:             upstream,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -845,4 +841,10 @@ func TestProtocolMirrorTransport(t *testing.T) {
 			}
 		})
 	}
+}
+
+// staticTransport makes every actor's proxy use the same round tripper, which
+// is what a test wants and production does not (see Server.newTransport).
+func staticTransport(rt http.RoundTripper) func() http.RoundTripper {
+	return func() http.RoundTripper { return rt }
 }
