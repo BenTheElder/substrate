@@ -25,8 +25,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/agent-substrate/substrate/internal/ateomnet"
-
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/ch"
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/kata"
 	"github.com/agent-substrate/substrate/internal/ateompath"
@@ -62,15 +60,20 @@ import (
 // Allow checkpointing even if the pod is shutting down. This will allow actors
 // (or the harness) to suspend on shutdown.
 func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.CheckpointWorkloadRequest) (*ateompb.CheckpointWorkloadResponse, error) {
-	s.lock.Lock()
-	defer s.lock.Unlock()
+	s.inFlight.Add(1)
+	defer s.inFlight.Done()
+	if !s.actorLocks.Lock(ctx, req.GetActorUid()) {
+		return nil, status.Error(codes.Canceled, "cancelled while waiting for the actor lock")
+	}
+	defer s.actorLocks.Unlock(req.GetActorUid())
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	s.setActiveRPC(rpcCheckpointWorkload, cancel)
-	defer s.clearActiveRPC()
+	s.setActiveRPC(req.GetActorUid(), rpcCheckpointWorkload, cancel)
+	defer s.clearActiveRPC(req.GetActorUid())
 
-	if err := s.deactivateActorNetworking(ctx); err != nil {
+	// Only this actor stops serving; the others on this worker are untouched.
+	if err := s.deactivateActorNetworking(ctx, req.GetActorUid()); err != nil {
 		return nil, err
 	}
 
@@ -104,7 +107,7 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 
 	// The actor's CH was booted by RunWorkload or relaunched by RestoreWorkload;
 	// either way ateom owns it and tracks its api-socket.
-	ra := s.running[actorUID]
+	ra := s.vmFor(actorUID)
 	chSocket := kata.CLHSocketPath(actorUID)
 	if ra != nil && ra.apiSocket != "" {
 		chSocket = ra.apiSocket
@@ -289,7 +292,7 @@ func (s *AteomService) teardownActor(ctx context.Context, id string, ra *running
 	// attribution is what keeps a poll that lands mid-teardown on the
 	// FAILED_PRECONDITION path ("no numbers right now") instead of surfacing a
 	// closed connection as a failed read.
-	s.guestStats.Store(nil)
+	s.setGuestTarget(id, nil)
 
 	var errs []error
 	if client != nil {
@@ -353,8 +356,14 @@ func (s *AteomService) teardownActor(ctx context.Context, id string, ra *running
 // TerminateWorkload stops the running actor, tears down its VMM, and cleans up
 // networking and overlays.
 func (s *AteomService) TerminateWorkload(ctx context.Context, req *ateompb.TerminateWorkloadRequest) (*ateompb.TerminateWorkloadResponse, error) {
-	s.lock.Lock()
-	defer s.lock.Unlock()
+	s.inFlight.Add(1)
+	defer s.inFlight.Done()
+	// Per actor: terminating one says nothing about the others this worker
+	// hosts, and must not queue behind their activations.
+	if !s.actorLocks.Lock(ctx, req.GetActorUid()) {
+		return nil, status.Error(codes.Canceled, "cancelled while waiting for the actor lock")
+	}
+	defer s.actorLocks.Unlock(req.GetActorUid())
 
 	attribution := ateomstats.ActorAttributionFromRequest(req)
 
@@ -369,11 +378,11 @@ func (s *AteomService) TerminateWorkload(ctx context.Context, req *ateompb.Termi
 
 func (s *AteomService) terminateWorkload(ctx context.Context, actorUID string) error {
 	var errs []error
-	if err := s.deactivateActorNetworking(ctx); err != nil {
+	if err := s.deactivateActorNetworking(ctx, actorUID); err != nil {
 		errs = append(errs, fmt.Errorf("while deactivating actor networking: %w", err))
 	}
 
-	ra := s.running[actorUID]
+	ra := s.vmFor(actorUID)
 	chSocket := kata.CLHSocketPath(actorUID)
 	if ra != nil && ra.apiSocket != "" {
 		chSocket = ra.apiSocket
@@ -383,23 +392,20 @@ func (s *AteomService) terminateWorkload(ctx context.Context, actorUID string) e
 	if err := s.teardownActor(ctx, actorUID, ra, client); err != nil {
 		errs = append(errs, fmt.Errorf("while tearing down actor: %w", err))
 	}
-	delete(s.running, actorUID)
 
-	// The guest is gone as of the teardown above, so the ateom is back to
-	// "available": there is nothing left to measure, and holding the attribution
-	// would let a later GetWorkloadStats report a checkpointed actor as though it
-	// were still running.
+	// The guest is gone as of the teardown above, so this actor is no longer
+	// hosted: there is nothing left to measure, and keeping it would let a later
+	// GetWorkloadStats report a checkpointed actor as though it were still
+	// running. Unhosting takes its network, its slot, and its registry entry
+	// with it, and reapplies the ruleset for the actors that remain.
 	//
-	// Nothing above this point clears it, unlike the gVisor ateom, which clears
-	// as soon as its checkpoint call has taken the sandbox down. Here the guest
-	// is only paused until this teardown, so a checkpoint that failed earlier has
-	// left it present, and reporting its usage is then the honest answer. This is
-	// the same point at which the running entry goes away, which is what keeps
-	// the two views of "is an actor here" from disagreeing.
-	s.activeActor.Store(nil)
-
-	if err := ateomnet.CleanupActorNetwork(ctx, s.interiorNetNS); err != nil {
-		errs = append(errs, fmt.Errorf("while cleaning up actor network: %w", err))
+	// Nothing above this point removes it, unlike the gVisor ateom, which drops
+	// the actor as soon as its checkpoint call has taken the sandbox down. Here
+	// the guest is only paused until this teardown, so a checkpoint that failed
+	// earlier has left it present, and reporting its usage is then the honest
+	// answer.
+	if err := s.unhostActor(ctx, actorUID); err != nil {
+		errs = append(errs, fmt.Errorf("while removing actor: %w", err))
 	}
 	return errors.Join(errs...)
 }

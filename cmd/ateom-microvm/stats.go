@@ -28,7 +28,6 @@ import (
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/agentstats"
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/third_party/kata/agentpb"
 	"github.com/agent-substrate/substrate/internal/proto/ateompb"
-	"github.com/agent-substrate/substrate/internal/resources"
 )
 
 // statsCallTimeout bounds one container's guest-agent call. The RPC is polled
@@ -48,10 +47,11 @@ type containerStatsReader interface {
 
 // guestStatsTarget is everything GetWorkloadStats needs to sample a live guest.
 //
-// It exists so the handler never reads AteomService.running, which lock guards:
-// the handler must not take lock (see below), and a map read racing a lifecycle
-// RPC's write is a data race whatever the read is for. The fields it holds are
-// the ones RunWorkload and RestoreWorkload already produce.
+// It is published separately from the runningActor it is drawn from so the
+// handler holds actorsMu for a map read and nothing more: the guest-agent calls
+// below are vsock round trips, and running them under the lock every lifecycle
+// transition takes would put a checkpoint behind telemetry. The fields it holds
+// are the ones RunWorkload and RestoreWorkload already produce.
 type guestStatsTarget struct {
 	// actorUID is the actor these containers belong to. Checked against the
 	// attribution before anything is reported, so a target left behind by a
@@ -82,12 +82,13 @@ type guestStatsTarget struct {
 // actor and a saturated one. The guest kernel is what accounts for the
 // workload, and the kata-agent is what can read it out.
 //
-// Unlike the three lifecycle RPCs this does not take s.lock, and must not
-// start: it is polled on a timer for the whole life of a workload, while lock
-// is held across an entire cold boot with its retry, across a snapshot write,
-// and across a restore. Blocking on it would silence the poller through exactly
-// the phases whose usage is most interesting. Both pieces of state it reads —
-// the attribution and the guest target — are atomics for that reason.
+// Unlike the three lifecycle RPCs this does not take the actor's lifecycle
+// lock, and must not start: it is polled on a timer for the whole life of a
+// workload, while that lock is held across an entire cold boot with its retry,
+// across a snapshot write, and across a restore. Blocking on it would silence
+// the poller through exactly the phases whose usage is most interesting. It
+// reads the registry under actorsMu instead, which is never held across
+// anything slower than a map access.
 func (s *AteomService) GetWorkloadStats(ctx context.Context, req *ateompb.GetWorkloadStatsRequest) (*ateompb.GetWorkloadStatsResponse, error) {
 	if req.GetActorUid() == "" {
 		return nil, status.Error(codes.InvalidArgument, "actor_uid is required")
@@ -96,15 +97,15 @@ func (s *AteomService) GetWorkloadStats(ctx context.Context, req *ateompb.GetWor
 	// Both of these are NOT_FOUND rather than FAILED_PRECONDITION: they tell the
 	// caller the requested actor is not here, which no amount of retrying on the
 	// same timer will change. Its worker-to-actor mapping wants re-resolving.
-	active := s.activeActor.Load()
-	if active == nil {
-		return nil, status.Errorf(codes.NotFound, "ateom is available; it is not executing actor %q", req.GetActorUid())
-	}
-	if active.UID != req.GetActorUid() {
-		return nil, status.Errorf(codes.NotFound, "ateom is executing actor %q, not the requested %q", active.UID, req.GetActorUid())
+	hosted := s.lookupActor(req.GetActorUid())
+	if hosted == nil {
+		if len(s.hostedActors()) == 0 {
+			return nil, status.Errorf(codes.NotFound, "ateom is available; it is not executing actor %q", req.GetActorUid())
+		}
+		return nil, status.Errorf(codes.NotFound, "ateom is not executing the requested actor %q", req.GetActorUid())
 	}
 
-	sample, err := s.sampleGuest(ctx, active)
+	sample, err := s.sampleGuest(ctx, hosted)
 	if err != nil {
 		if errors.Is(err, errStaleGuestTarget) {
 			return nil, status.Error(codes.Internal, err.Error())
@@ -119,18 +120,18 @@ func (s *AteomService) GetWorkloadStats(ctx context.Context, req *ateompb.GetWor
 		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
 
-	// Re-check that the same workload is still the active one. The calls above
-	// hold no lock, so a checkpoint plus a fresh run can complete underneath
-	// them, and the numbers would then belong to an actor other than the one
-	// being reported. Pointer identity is enough: activeActor is stored as a new
-	// pointer on every Run and Restore and never mutated in place, so an
+	// Re-check that this is still the same hosting of the same actor. The calls
+	// above hold no lock, so a checkpoint plus a fresh run can complete
+	// underneath them, and the numbers would then belong to an actor other than
+	// the one being reported. Pointer identity is enough: hostActor stores a new
+	// hostedActor on every Run and Restore and never mutates one in place, so an
 	// unchanged pointer means no transition happened across the read.
 	//
 	// NOT_FOUND, like the two checks above and for the same reason: the
 	// requested actor is no longer the one here, so a retry lands on one of them
 	// and gets that answer anyway. The same state should not report two
 	// different codes depending on where in the handler it was noticed.
-	if s.activeActor.Load() != active {
+	if s.lookupActor(req.GetActorUid()) != hosted {
 		return nil, status.Errorf(codes.NotFound, "ateom stopped executing actor %q while the sample was being taken", req.GetActorUid())
 	}
 
@@ -138,51 +139,48 @@ func (s *AteomService) GetWorkloadStats(ctx context.Context, req *ateompb.GetWor
 }
 
 // GetActiveWorkloadStats implements
-// ateompb.Ateom/GetActiveWorkloadStats: the discovery read, sampling
-// whatever is executing with no identity asserted. Same lock discipline as
-// GetWorkloadStats above, for the same reasons.
+// ateompb.Ateom/GetActiveWorkloadStats: the discovery read, sampling everything
+// executing with no identity asserted. Same lock discipline as GetWorkloadStats
+// above, for the same reasons.
 func (s *AteomService) GetActiveWorkloadStats(ctx context.Context, req *ateompb.GetActiveWorkloadStatsRequest) (*ateompb.GetActiveWorkloadStatsResponse, error) {
-	active := s.activeActor.Load()
-	if active == nil {
+	hosted := s.hostedActors()
+	if len(hosted) == 0 {
 		return noSample(ateompb.NoSampleReason_NO_SAMPLE_REASON_NO_WORKLOAD), nil
 	}
 
-	sample, err := s.sampleGuest(ctx, active)
-	if err != nil {
-		if errors.Is(err, errStaleGuestTarget) {
-			return nil, status.Error(codes.Internal, err.Error())
+	// One sample per actor. An actor with no numbers yet contributes none and
+	// does not stop the others being reported: on a worker hosting several, one
+	// of them booting is the common case, and dropping the whole answer for it
+	// would blind the caller to everything else running here.
+	samples := make([]*ateompb.WorkloadStatsSample, 0, len(hosted))
+	for _, h := range hosted {
+		sample, err := s.sampleGuest(ctx, h)
+		if err != nil {
+			if errors.Is(err, errStaleGuestTarget) {
+				return nil, status.Error(codes.Internal, err.Error())
+			}
+			// Every routine way sampleGuest declines is a workload with no
+			// numbers yet -- boot, restore, teardown in progress, a guest that
+			// has stopped answering -- and for a caller with no prior knowledge
+			// each is as normal a finding as an available ateom.
+			continue
 		}
-		// Every routine way sampleGuest declines is a workload with no numbers
-		// yet -- boot, restore, teardown in progress, a guest that has stopped
-		// answering -- and for a caller with no prior knowledge each is as
-		// normal a finding as an available ateom. A reason, not an error.
+		samples = append(samples, sample)
+	}
+
+	// Everything here is still booting, or stopped answering while being read.
+	// Either way there is nothing to attribute yet, which the next tick
+	// resolves.
+	if len(samples) == 0 {
 		return noSample(ateompb.NoSampleReason_NO_SAMPLE_REASON_NOT_MEASURABLE_YET), nil
 	}
-
-	// Same re-check as GetWorkloadStats, different answer: with no uid asserted
-	// there is no "requested actor" for NOT_FOUND to disown, and a transition
-	// underneath the read just means these numbers cannot be attributed to any
-	// single actor. Report the reason as of now -- the next tick resolves it
-	// either way.
-	if latest := s.activeActor.Load(); latest != active {
-		reason := ateompb.NoSampleReason_NO_SAMPLE_REASON_NOT_MEASURABLE_YET
-		if latest == nil {
-			reason = ateompb.NoSampleReason_NO_SAMPLE_REASON_NO_WORKLOAD
-		}
-		return noSample(reason), nil
-	}
-
-	return &ateompb.GetActiveWorkloadStatsResponse{
-		Result: &ateompb.GetActiveWorkloadStatsResponse_Sample{Sample: sample},
-	}, nil
+	return &ateompb.GetActiveWorkloadStatsResponse{Samples: samples}, nil
 }
 
 // noSample is the discovery read's "nothing to give, and that is normal"
 // answer.
 func noSample(reason ateompb.NoSampleReason) *ateompb.GetActiveWorkloadStatsResponse {
-	return &ateompb.GetActiveWorkloadStatsResponse{
-		Result: &ateompb.GetActiveWorkloadStatsResponse_NoSampleReason{NoSampleReason: reason},
-	}
+	return &ateompb.GetActiveWorkloadStatsResponse{NoSampleReason: reason}
 }
 
 // errStaleGuestTarget is the one bug-shaped failure sampleGuest can return:
@@ -192,16 +190,17 @@ func noSample(reason ateompb.NoSampleReason) *ateompb.GetActiveWorkloadStatsResp
 var errStaleGuestTarget = errors.New("guest agent connection belongs to a different actor")
 
 // sampleGuest reads the guest's container cgroups through the agent and builds
-// the sample attributed to active. With one exception its errors mean "no
+// the sample attributed to hosted. With one exception its errors mean "no
 // numbers right now" rather than a bug -- a guest that has stopped answering
 // is routine here, and unlike the gVisor runtime's local file reads, a vsock
 // call offers no error type that separates "gone" from "broken". The
 // exception is errStaleGuestTarget, above. Errors come back raw because the
 // two RPCs express the routine ones differently: an error code for the keyed
-// read, a NoSampleReason for the discovery read. Callers re-check
-// s.activeActor against the pointer they loaded after this returns; the read
-// holds no lock.
-func (s *AteomService) sampleGuest(ctx context.Context, active *resources.ActorAttribution) (*ateompb.WorkloadStatsSample, error) {
+// read, a skipped actor for the discovery read. Callers re-check the registry
+// against the pointer they looked up after this returns; the guest-agent calls
+// hold no lock.
+func (s *AteomService) sampleGuest(ctx context.Context, hosted *hostedActor) (*ateompb.WorkloadStatsSample, error) {
+	active := &hosted.attribution
 	// The actor is the one here, but there is no guest to ask yet. Usually that
 	// is a poll landing in the boot or the restore: the ateom retains the
 	// attribution from the moment it accepts the actor, and the target is only
@@ -209,12 +208,12 @@ func (s *AteomService) sampleGuest(ctx context.Context, active *resources.ActorA
 	// like from here, since teardownActor clears the target before it closes
 	// the connection, and what a restore whose post-restore agent dial failed
 	// looks like for the rest of that activation.
-	target := s.guestStats.Load()
+	target := s.guestTarget(hosted)
 	if target == nil {
 		return nil, errors.New("no guest agent connection to measure yet")
 	}
 	// Belt and braces against the one thing that must never happen. The target
-	// is published and cleared under lock alongside the attribution, so this
+	// is published on the same hostedActor the attribution came from, so this
 	// should be unreachable; if the two ever disagree, decline rather than
 	// report a stale guest's numbers under the requested actor's name.
 	if target.actorUID != active.UID {
