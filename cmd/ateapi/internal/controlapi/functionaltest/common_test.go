@@ -417,7 +417,15 @@ func createWorkerPool(t *testing.T, tc *testContext, ns string, name string, lab
 		t.Fatalf("failed to create WorkerPool: %v", err)
 	}
 
-	err = wait.PollUntilContextTimeout(context.Background(), 100*time.Millisecond, 5*time.Second, true, func(ctx context.Context) (bool, error) {
+	waitForWorkerPoolInInformer(t, tc, ns, name)
+}
+
+// waitForWorkerPoolInInformer blocks until the pool the test just created is
+// visible to the scheduler, which reads it through an informer rather than the
+// API.
+func waitForWorkerPoolInInformer(t *testing.T, tc *testContext, ns, name string) {
+	t.Helper()
+	err := wait.PollUntilContextTimeout(context.Background(), 100*time.Millisecond, 5*time.Second, true, func(ctx context.Context) (bool, error) {
 		_, err := tc.workerPoolLister.WorkerPools(ns).Get(name)
 		return err == nil, nil
 	})

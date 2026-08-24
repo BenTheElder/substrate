@@ -72,6 +72,10 @@ const (
 
 var (
 	mode = pflag.String("mode", "restore", "restore (pack actors on) or terminate (tear them back down).")
+	// The whole point of having both: the difference between them IS the control
+	// plane's share of an activation, and nothing else measures it. Same process,
+	// same concurrency, same clock -- only the layer being dialed changes.
+	via = pflag.String("via", "atelet", "atelet (dial the node's AteomHerder, control plane removed) or ateapi (create+resume through the control plane, as any client would).")
 
 	poolNamespace     = pflag.String("pool-namespace", "ate-scale-tiny", "Namespace of the WorkerPool to pack.")
 	poolName          = pflag.String("pool-name", "tiny", "Name of the WorkerPool to pack.")
@@ -107,8 +111,14 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if *mode == "restore" && *goldenURI == "" {
-		return fmt.Errorf("--golden-snapshot-uri is required for --mode=restore")
+	if *mode == "restore" && *via == "atelet" && *goldenURI == "" {
+		return fmt.Errorf("--golden-snapshot-uri is required for --mode=restore --via=atelet")
+	}
+	if *via != "atelet" && *via != "ateapi" {
+		return fmt.Errorf("--via must be atelet or ateapi, got %q", *via)
+	}
+	if *via == "ateapi" {
+		return driveViaAteapi(ctx)
 	}
 
 	cfg, err := rest.InClusterConfig()

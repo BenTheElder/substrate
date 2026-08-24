@@ -316,11 +316,16 @@ func (w *ActorWorkflow) ensureWorkerAssigned(ctx context.Context, actorRef resou
 		return nil, nil, status.Errorf(codes.FailedPrecondition, "AssignWorker prerequisite not met for Actor: %s (got: %v, want %s or %s)", actorRef, actor.GetStatus().GetState(), ateapipb.ActorState_ACTOR_STATE_SUSPENDED, ateapipb.ActorState_ACTOR_STATE_PAUSED)
 	}
 
+	// Sized for N activations racing onto one worker, not one or two. The cap
+	// keeps the tail bounded while letting attempts spread -- with a shared row
+	// the jitter decides who gets through, not the growth factor. ~3s against a
+	// 10 minute RPC deadline.
 	backoff := wait.Backoff{
-		Steps:    5,
-		Duration: 10 * time.Millisecond,
+		Steps:    12,
+		Duration: 15 * time.Millisecond,
 		Factor:   2.0,
 		Jitter:   1.0,
+		Cap:      250 * time.Millisecond,
 	}
 	var assignedActor *ateapipb.Actor
 	var assignedWorker *ateapipb.Worker
@@ -333,7 +338,7 @@ func (w *ActorWorkflow) ensureWorkerAssigned(ctx context.Context, actorRef resou
 			assignedActor, assignedWorker = attemptActor, attemptWorker
 			return true, nil
 		}
-		if errors.Is(attemptErr, store.ErrVersionConflict) {
+		if errors.Is(attemptErr, store.ErrVersionConflict) || errors.Is(attemptErr, errWorkerFilledUp) {
 			if attemptActor != nil {
 				actor = attemptActor // retry with the refreshed actor
 			}
@@ -509,6 +514,26 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 		assignedWorker = pickedWorker
 		slog.InfoContext(ctx, "Picked worker", slog.Any("worker", pickedWorker.String()))
 	}
+
+	// Everything from here to the write is the claim, serialized per worker
+	// within this process; see claimLocks.
+	unlock := w.claimLocks.lock(assignedWorker.GetMetadata().GetName())
+	defer unlock()
+
+	// Re-read under the lock: the pick came from a watch-fed cache, which does
+	// not see a claim that has just succeeded until its event arrives.
+	fresh, err := w.store.GetWorker(ctx, assignedWorker.GetMetadata().GetName())
+	if err != nil {
+		return nil, nil, fmt.Errorf("while re-reading worker %q before claiming it: %w",
+			assignedWorker.GetMetadata().GetName(), err)
+	}
+	// And re-check it still fits: the scheduler judged room from the stale copy,
+	// and serializing the claim means a wrong answer no longer shows up as a
+	// failed compare-and-swap. Retrying re-runs scheduling.
+	if workerAssignmentForActor(fresh, actor.GetMetadata().GetUid()) == nil && !w.scheduler.HasRoom(fresh, constraints) {
+		return nil, nil, errWorkerFilledUp
+	}
+	assignedWorker = fresh
 
 	assignment := &ateapipb.ActorAssignment{
 		Actor: &ateapipb.ObjectRef{
