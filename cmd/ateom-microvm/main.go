@@ -39,11 +39,11 @@ import (
 
 	"cloud.google.com/go/compute/metadata"
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/reaper"
+	"github.com/agent-substrate/substrate/internal/activation"
 	"github.com/agent-substrate/substrate/internal/actorlock"
 	"github.com/agent-substrate/substrate/internal/actorlog"
 	"github.com/agent-substrate/substrate/internal/ateinterceptors"
 	"github.com/agent-substrate/substrate/internal/ateomcapacity"
-	"github.com/agent-substrate/substrate/internal/ateomnet"
 	"github.com/agent-substrate/substrate/internal/ateompath"
 	"github.com/agent-substrate/substrate/internal/atunnel"
 	"github.com/agent-substrate/substrate/internal/otlprelay"
@@ -51,6 +51,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/serverboot"
 	"github.com/agent-substrate/substrate/internal/version"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/otel"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -245,6 +246,13 @@ func do(ctx context.Context) error {
 
 	ateomService := NewService(*podUID, *chBinary, *kataConfig, *kataDebug, *vmmMemReserve, actorLogger, atunnelIngress, atunnelEgress, atunnelEgressPort, *workerCredentialBundle, *podIdentityTrustBundle, *egressGatewayTrustBundle)
 
+	// Assigned rather than passed: NewService's parameter list is already long,
+	// and every test constructs a service that wants the nil no-op anyway.
+	ateomService.instruments, err = activation.NewInstruments(otel.Meter(serviceName))
+	if err != nil {
+		serverboot.Fatal(ctx, "Failed to create activation instruments", err)
+	}
+
 	svr := grpc.NewServer(
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.UnaryInterceptor(ateinterceptors.InternalServerUnaryInterceptor),
@@ -407,6 +415,10 @@ type AteomService struct {
 	podIdentityTrustBundlePath string
 	// egressGatewayTrustBundlePath verifies the remote gateway's serving cert.
 	egressGatewayTrustBundlePath string
+
+	// instruments records the activation phase breakdown. Nil is a working
+	// no-op, which is what every test gets.
+	instruments *activation.Instruments
 
 	// actorsMu guards actors and the mutable fields of the hostedActors in it.
 	// Separate from the per-actor lifecycle locks, and deliberately: those are

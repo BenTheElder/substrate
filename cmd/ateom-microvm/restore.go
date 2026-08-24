@@ -28,7 +28,10 @@ import (
 
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/ch"
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/kata"
+	"github.com/agent-substrate/substrate/internal/activation"
+	"github.com/agent-substrate/substrate/internal/ateattr"
 	"github.com/agent-substrate/substrate/internal/ateompath"
+	"github.com/agent-substrate/substrate/internal/ateomstats"
 	"github.com/agent-substrate/substrate/internal/imagecache"
 	"github.com/agent-substrate/substrate/internal/proto/ateompb"
 	"github.com/agent-substrate/substrate/internal/readyz"
@@ -82,9 +85,13 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	}
 	s.inFlight.Add(1)
 	defer s.inFlight.Done()
+
+	act := activation.New(ateattr.OperationResume, ateomstats.ActorAttributionFromRequest(req))
+	lockWait := time.Now()
 	if !s.actorLocks.Lock(ctx, req.GetActorUid()) {
 		return nil, status.Error(codes.Canceled, "cancelled while waiting for the actor lock")
 	}
+	act.Since(ateattr.ActivationPhaseActorLockWait, lockWait)
 	defer s.actorLocks.Unlock(req.GetActorUid())
 
 	// Same as RunWorkload: a restore is a boot, and graceful shutdown cancels it
@@ -120,7 +127,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	// different way than a cold boot does, but the window between accepting the
 	// actor and serving it is the same window, and a poll landing in it should
 	// name the actor either way.
-	hosted, err := s.hostActor(ctx, attribution, req.GetEgressGateway() != nil)
+	hosted, err := s.hostActor(ctx, act, attribution, req.GetEgressGateway() != nil)
 	if err != nil {
 		return nil, err
 	}
@@ -152,7 +159,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		// files, and the untar above re-materialized the ACTOR's durable-dir
 		// data, so resuming the golden guest picks up the actor's data through
 		// the durable virtio-fs share.
-		if err := s.restoreFullScope(ctx, hosted, p, restoreDir, tStart); err != nil {
+		if err := s.restoreFullScope(ctx, act, hosted, p, restoreDir, tStart); err != nil {
 			return nil, err
 		}
 	case ateompb.SnapshotScope_SNAPSHOT_SCOPE_DATA:
@@ -184,7 +191,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 // and resume. Guest RAM — the actor's in-memory state and the frozen network config —
 // comes back from the memory snapshot; the durable-dir volumes were restored by the
 // caller from their tar.
-func (s *AteomService) restoreFullScope(ctx context.Context, hosted *hostedActor, p actorBootParams, restoreDir string, tStart time.Time) (retErr error) {
+func (s *AteomService) restoreFullScope(ctx context.Context, act *activation.Activation, hosted *hostedActor, p actorBootParams, restoreDir string, tStart time.Time) (retErr error) {
 	actorUID := p.actorUID
 
 	rr := s.resolveRuntime(p.assetPaths)
@@ -366,7 +373,14 @@ func (s *AteomService) restoreFullScope(ctx context.Context, hosted *hostedActor
 	// which hid that a first (cold) restore and a later (warm) one differ by more
 	// than 5x on the same actor. upper/lowers is the host reassembling the rootfs;
 	// vm_restore is cloud-hypervisor reading guest RAM back.
-	slog.InfoContext(ctx, "Actor restore phases", slog.String("id", actorUID),
+	//
+	// The shared phases (occupancy, actor network, ruleset) come from act rather
+	// than from a second line, so one grep covers both runtimes: prep here
+	// CONTAINS them, and the split is what says whether a slow prep is this
+	// runtime's own work or the worker filling up.
+	total := time.Since(tStart)
+	phases := []slog.Attr{
+		slog.String("id", actorUID),
 		slog.Duration("prep", tPrep.Sub(tStart)),
 		slog.Duration("bundles", tBundles.Sub(tPrep)),
 		slog.Duration("upper_join", tUpper.Sub(tBundles)),
@@ -377,7 +391,10 @@ func (s *AteomService) restoreFullScope(ctx context.Context, hosted *hostedActor
 		slog.Duration("vm_restore", tVMRestore.Sub(tLaunch)),
 		slog.Duration("resume", tResume.Sub(tVMRestore)),
 		slog.Duration("readyz", time.Since(tResume)),
-		slog.Duration("total", time.Since(tStart)))
+		slog.Duration("total", total),
+	}
+	slog.LogAttrs(ctx, slog.LevelInfo, "Actor restore phases", append(phases, act.Attrs()...)...)
+	act.RecordMetrics(ctx, s.instruments, nil, total)
 
 	// An eager restore has read the whole snapshot into guest memory, and nothing
 	// merges against it afterwards, so the staged copy is dead weight from here on —

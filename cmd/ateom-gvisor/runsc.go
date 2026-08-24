@@ -27,6 +27,8 @@ import (
 	"slices"
 	"syscall"
 
+	"github.com/agent-substrate/substrate/internal/activation"
+	"github.com/agent-substrate/substrate/internal/ateattr"
 	"github.com/agent-substrate/substrate/internal/ateompath"
 	"github.com/agent-substrate/substrate/internal/ocispec"
 	"github.com/agent-substrate/substrate/internal/proto/ateompb"
@@ -41,6 +43,10 @@ type runsc struct {
 	size sizing.SandboxSize
 	// durableVolumes are the durable-dir volume names declared to the sandbox.
 	durableVolumes []string
+	// act collects the timings of the create/start/restore commands, which run
+	// once per container and so are summed rather than reported individually.
+	// Nil outside an activation (checkpoint, teardown).
+	act *activation.Activation
 }
 
 // durableVolumeNames returns the sorted, deduplicated durable-dir volume names
@@ -82,6 +88,7 @@ func (r *runsc) shapeSpec(containerName string) error {
 }
 
 func (r *runsc) cmdCreate(ctx context.Context, out io.Writer, containerName string, additionalArgs []string) error {
+	defer r.act.Timing(ateattr.ActivationPhaseSandboxCreate)()
 	slog.InfoContext(ctx, "About to run runsc create", slog.String("container", containerName))
 
 	if err := r.shapeSpec(containerName); err != nil {
@@ -127,6 +134,7 @@ func (r *runsc) cmdCreate(ctx context.Context, out io.Writer, containerName stri
 }
 
 func (r *runsc) cmdStart(ctx context.Context, out io.Writer, containerName string) error {
+	defer r.act.Timing(ateattr.ActivationPhaseSandboxRestore)()
 	slog.InfoContext(ctx, "About to run runsc start", slog.String("container", containerName))
 
 	startArgs := []string{
@@ -270,6 +278,7 @@ func (r *runsc) cmdResume(ctx context.Context, containerName string) error {
 // We take a checkpoint only of the root container of the sandbox, but we need
 // to call restore on each container, using the same checkpoint.
 func (r *runsc) cmdRestore(ctx context.Context, out io.Writer, containerName, checkpointPath string) error {
+	defer r.act.Timing(ateattr.ActivationPhaseSandboxRestore)()
 	slog.InfoContext(ctx, "About to run runsc restore", slog.String("container", containerName))
 
 	if err := r.shapeSpec(containerName); err != nil {
