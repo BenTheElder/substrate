@@ -315,11 +315,13 @@ func (w *ActorWorkflow) ensureWorkerAssigned(ctx context.Context, actorRef resou
 		return nil, nil, status.Errorf(codes.FailedPrecondition, "AssignWorker prerequisite not met for Actor: %s (got: %v, want %s or %s)", actorRef, actor.GetStatus().GetState(), ateapipb.ActorState_ACTOR_STATE_SUSPENDED, ateapipb.ActorState_ACTOR_STATE_PAUSED)
 	}
 
+	// Bound contention retries to about three seconds.
 	backoff := wait.Backoff{
-		Steps:    5,
-		Duration: 10 * time.Millisecond,
+		Steps:    12,
+		Duration: 15 * time.Millisecond,
 		Factor:   2.0,
 		Jitter:   1.0,
+		Cap:      250 * time.Millisecond,
 	}
 	var assignedActor *ateapipb.Actor
 	var assignedWorker *ateapipb.Worker
@@ -332,7 +334,7 @@ func (w *ActorWorkflow) ensureWorkerAssigned(ctx context.Context, actorRef resou
 			assignedActor, assignedWorker = attemptActor, attemptWorker
 			return true, nil
 		}
-		if errors.Is(attemptErr, store.ErrVersionConflict) {
+		if errors.Is(attemptErr, store.ErrVersionConflict) || errors.Is(attemptErr, errWorkerFilledUp) {
 			if attemptActor != nil {
 				actor = attemptActor // retry with the refreshed actor
 			}
@@ -516,6 +518,26 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 		assignedWorker = pickedWorker
 		slog.InfoContext(ctx, "Picked worker", slog.Any("worker", pickedWorker.String()))
 	}
+
+	// Serialize the claim within this process.
+	unlock := w.claimLocks.lock(assignedWorker.GetMetadata().GetName())
+	defer unlock()
+
+	// Refresh the watch-fed candidate under the claim lock.
+	fresh, err := w.store.GetWorker(ctx, assignedWorker.GetMetadata().GetName())
+	if err != nil {
+		return nil, nil, fmt.Errorf("while re-reading worker %q before claiming it: %w",
+			assignedWorker.GetMetadata().GetName(), err)
+	}
+	// Recheck capacity against authoritative state.
+	hosted, err := workerHostsActor(ctx, w.store, fresh.GetMetadata().GetName(), actor.GetMetadata().GetUid())
+	if err != nil {
+		return nil, nil, err
+	}
+	if !hosted && !w.scheduler.HasRoom(fresh, constraints) {
+		return nil, nil, errWorkerFilledUp
+	}
+	assignedWorker = fresh
 
 	assignment := &ateapipb.ActorAssignment{
 		Actor: &ateapipb.ObjectRef{

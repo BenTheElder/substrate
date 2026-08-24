@@ -79,6 +79,10 @@ type ActorWorkflow struct {
 	instruments          *Instruments
 	egressGatewayAddress string
 	pluginRegistry       VolumePluginRegistry
+	// claimLocks keeps this process's own goroutines from racing each other for
+	// the same worker record; see claimlock.go. Usable zero value, and 64KiB, so
+	// keep ActorWorkflow behind a pointer.
+	claimLocks claimLocks
 }
 
 // NewActorWorkflow creates a new ActorWorkflow. instruments may be nil.
