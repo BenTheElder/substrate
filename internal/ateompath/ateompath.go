@@ -98,6 +98,20 @@ func AteomSocketPath(podUID string) string {
 	)
 }
 
+// ActorNetNSName is the named network namespace one actor's sandbox runs in.
+// Per actor, not per worker pod: a worker hosts several actors and every one of
+// them holds the same address, so each needs its own namespace to hold it in.
+func ActorNetNSName(actorUID string) string {
+	return "ateom-actor:" + actorUID
+}
+
+// ActorNetNSPath is where ActorNetNSName is bound. atelet writes it into the
+// OCI bundle and ateom creates the namespace there, so both derive it from the
+// actor UID rather than passing it between them.
+func ActorNetNSPath(actorUID string) string {
+	return filepath.Join("/run/netns", ActorNetNSName(actorUID))
+}
+
 func AteomNetNSName(podUID string) string {
 	return "ateom:" + podUID
 }

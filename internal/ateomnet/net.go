@@ -25,6 +25,7 @@ import (
 	"net"
 	"os"
 	"runtime"
+	"strings"
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/binaryutil"
@@ -193,30 +194,69 @@ func PodIPv4() (net.IP, error) {
 }
 
 // EnableIPv4Forwarding enables IPv4 forwarding in the current network namespace.
+//
+// Forwarding is required because actor packets enter the worker pod via the
+// host-side veth and then leave through the pod's eth0. Without this, the kernel
+// would not route traffic between those interfaces even though both live in the
+// worker pod network namespace.
 func EnableIPv4Forwarding() error {
-	// Forwarding is required because actor packets now enter the worker pod via
-	// the host-side veth and then leave through the pod's eth0. Without this, the
-	// kernel would not route traffic between those interfaces even though both
-	// live in the worker pod network namespace.
-	//
-	// Without privileged, the container runtime bind-mounts /proc/sys read-only.
-	// The worker holds CAP_SYS_ADMIN and uses no user namespace, so the ro flag
-	// is not locked: clear it, write the sysctl, restore ro.
-	const path = "/proc/sys/net/ipv4/ip_forward"
-	if b, err := os.ReadFile(path); err == nil && len(b) > 0 && b[0] == '1' {
+	return setNetSysctl("net/ipv4/ip_forward", "1")
+}
+
+// DisableReversePathFilter turns off reverse-path validation for the actor veths
+// in the current (worker pod) network namespace.
+//
+// Reverse-path validation cannot work here, by construction. Every actor holds
+// the SAME frozen address, so every host-side veth carries the same /30 and the
+// kernel has one connected route per actor for it. Asked which interface
+// 169.254.17.2 lives behind, it can only answer "the first one" -- so with
+// rp_filter on, every actor but that one is a martian source. What actually
+// tells the actors apart is the iifname map in nftables, which runs at raw
+// prerouting, before the routing decision.
+//
+// For IP that rewrite lands first and the packet passes. ARP is what suffers:
+// it is not IP, so no nftables ip rule sees it, and arp_process runs the same
+// reverse-path check on the sender address. The check fails, the kernel drops
+// the request WITHOUT replying, and logs "martian source 169.254.17.1 from
+// 169.254.17.2". An actor that has to resolve its gateway itself -- rather than
+// learning the MAC from an inbound request, or restoring a snapshot with the
+// entry already in it -- cannot.
+//
+// Scoped deliberately. Setting only conf.all leaves each interface's own value
+// in force (the effective setting is the max of the two), so eth0 keeps the
+// validation it was created with and only the veths created afterwards, which
+// inherit conf.default, give it up.
+func DisableReversePathFilter() error {
+	for _, key := range []string{"net/ipv4/conf/all/rp_filter", "net/ipv4/conf/default/rp_filter"} {
+		if err := setNetSysctl(key, "0"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// setNetSysctl writes value to the named sysctl in the current network
+// namespace, and is a no-op when it already reads that way.
+//
+// Without privileged, the container runtime bind-mounts /proc/sys read-only.
+// The worker holds CAP_SYS_ADMIN and uses no user namespace, so the ro flag is
+// not locked: clear it, write the sysctl, restore ro.
+func setNetSysctl(key, value string) error {
+	path := "/proc/sys/" + key
+	if b, err := os.ReadFile(path); err == nil && strings.TrimSpace(string(b)) == value {
 		return nil
 	}
-	if err := os.WriteFile(path, []byte("1\n"), 0o644); err == nil {
+	if err := os.WriteFile(path, []byte(value+"\n"), 0o644); err == nil {
 		return nil
 	}
 	if err := unix.Mount("none", "/proc/sys", "", unix.MS_BIND|unix.MS_REMOUNT, ""); err != nil {
-		return fmt.Errorf("while remounting /proc/sys read-write to enable IPv4 forwarding: %w", err)
+		return fmt.Errorf("while remounting /proc/sys read-write to set %s: %w", key, err)
 	}
 	defer func() {
 		_ = unix.Mount("none", "/proc/sys", "", unix.MS_BIND|unix.MS_REMOUNT|unix.MS_RDONLY, "")
 	}()
-	if err := os.WriteFile(path, []byte("1\n"), 0o644); err != nil {
-		return fmt.Errorf("while enabling IPv4 forwarding in worker pod netns: %w", err)
+	if err := os.WriteFile(path, []byte(value+"\n"), 0o644); err != nil {
+		return fmt.Errorf("while setting %s in worker pod netns: %w", key, err)
 	}
 	return nil
 }
