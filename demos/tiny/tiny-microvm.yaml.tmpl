@@ -15,15 +15,11 @@
 # The micro-VM counterpart of tiny.yaml.tmpl: the same density measurement
 # against the other sandbox runtime, so the two are comparable on one axis.
 #
-# Deliberately a lower target. A micro-VM actor is a real guest, and the KVM
-# node pools are c3-standard-4 (4 vCPU, 16GB) rather than the n2-highmem-32 the
-# gVisor fixture packs. The question here is not how many fit -- it is whether
-# the per-activation cost grows the same way, which needs far fewer actors to
-# answer.
-#
-# No nodeSelector: atecontroller stamps ate.dev/sandboxClass=microvm on the
-# worker pods of a micro-VM pool and the KVM nodes carry the matching label, so
-# placement is already constrained to a node that can run a guest.
+# Pinned to the big KVM node (scale-microvm, c3-highmem-44: 44 vCPU, 332GiB).
+# atecontroller already constrains a micro-VM pool to nodes labelled
+# ate.dev/sandboxClass=microvm and tolerates the matching taint; the extra
+# selector below picks the ONE large node out of those, so a packing run does
+# not land on a 16GB c3-standard-4 beside other people's demos.
 
 apiVersion: v1
 kind: Namespace
@@ -50,6 +46,9 @@ spec:
   maxActorsPerWorker: 4094
 
   template:
+    nodeSelector:
+      substrate-scale: microvm-big
+
     # Capacity and placement are decoupled the same way tiny.yaml.tmpl explains:
     # workerCapacity reads the LIMITS, the kube-scheduler places by the REQUESTS,
     # and limits are never checked against the node.
@@ -57,17 +56,30 @@ spec:
     # The memory limit is set from MEASUREMENT, and it is the one number here
     # that has to be honest. An idle micro-VM actor costs ~180MB of real RSS --
     # 6x a gVisor one, and well over the 256Mi it declares once the guest is
-    # resident. The first attempt advertised 30Gi on a 16GB node and the kubelet
-    # evicted the worker at 70 actors, with the pod holding 12.5GB. 10Gi keeps
-    # the ceiling inside the pod, where it is a bounded failure, instead of at
-    # the node, where it takes the worker out mid-run.
+    # resident. An earlier run advertised 30Gi on a 16GB node and the kubelet
+    # evicted the worker at 70 actors holding 12.5GB.
+    #
+    # So the limit is set to what the NODE can really back, not to what the
+    # declarations add up to. 300Gi against the node's ~332GiB allocatable
+    # keeps the ceiling inside the pod, where hitting it fails an activation
+    # instead of evicting the worker mid-run.
+    #
+    # That admits 1200 actors, and 1200 is then the ceiling for a REASON worth
+    # recording: the declaration, not the machine. Measured, a micro-VM actor
+    # holds ~88MB, so 1200 of them is ~106GB of a 332GiB node -- the scheduler
+    # is refusing placements the hardware would take three times over. The
+    # declaration cannot go lower either: the API floors a micro-VM actor at
+    # 256Mi (128Mi VMM reserve + 128Mi guest minimum), below which the VM will
+    # not boot. Closing the gap between 256Mi declared and 88MB resident is
+    # what would raise micro-VM density, and it is a platform change rather
+    # than a fixture one.
     resources:
       limits:
-        cpu: "30"
-        memory: 10Gi
+        cpu: "600"
+        memory: 300Gi
       requests:
-        cpu: 500m
-        memory: 2Gi
+        cpu: "2"
+        memory: 4Gi
 
 ---
 
@@ -108,3 +120,4 @@ spec:
   snapshotsConfig:
     onPause: Full
     location: gs://${BUCKET_NAME}/ate-scale-tiny-microvm/
+
