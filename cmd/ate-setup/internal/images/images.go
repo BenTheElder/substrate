@@ -51,6 +51,7 @@ var Components = []string{
 	"demos/egress",
 	"demos/multi-template/fspersist",
 	"demos/sandbox",
+	"demos/tiny",
 }
 
 // KoReference is the ko:// reference the manifests name pkg by.

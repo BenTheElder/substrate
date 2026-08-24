@@ -38,18 +38,16 @@ metadata:
   labels:
     workload: tiny
 spec:
-  # ONE worker. The question is how many Actors fit on a single worker, so a
-  # second replica would only split the population and hide the ceiling.
-  replicas: 1
+  # One worker per node, eight of them.
+  #
+  # This started at one, to find what a single worker holds. That answer is in
+  # hand (~4000, stopped by declared capacity, with the machine at 5% CPU), and
+  # the question moved: a million actors is a FLEET, and the costs that matter
+  # at a fleet are the ones that scale with worker count rather than with one
+  # worker's occupancy. Nothing about a single worker exercises those.
+  replicas: 8
 
-  # What the whole exercise turns on. Admission is per dimension against the
-  # worker's capacity, so this is the number that decides when the scheduler
-  # stops placing -- and it is the constant that was raised from 64 for exactly
-  # this. Set at the addressing ceiling so the scheduler is never the first
-  # thing to say no: the point is to find out what actually binds.
-  maxActorsPerWorker: 4094
-
-  ateomImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
+  workerImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
   template:
     # Keep the density test to itself, in both directions.
     nodeSelector:
@@ -77,11 +75,23 @@ spec:
     # this pod gets OOM-killed and the node survives.
     resources:
       limits:
-        cpu: "2100"
-        memory: 220Gi
+        # Sized so the ACTOR's cpu limit is never what caps occupancy: 4094 of
+        # them at the 2000m tiny-fast declares. That is a declaration, not a
+        # reservation -- an idle actor draws nothing, and only the actors
+        # restoring at once spend anything -- which is the same reasoning the
+        # memory limit below rests on, and why a 32-core node carries it.
+        cpu: "8200"
+        # Above the request, so the limit is not what decides placement, and
+        # high enough that declared capacity is not what stops a pack.
+        memory: 200Gi
+      # Requests are what place the pod, and they are deliberately more than half
+      # a node: two of these cannot share one, so the fleet lands one worker per
+      # node and each worker's numbers are its own rather than a share of a
+      # neighbour's CPU. That plus atelet is the two-pods-per-node shape the
+      # real deployment is aiming at.
       requests:
         cpu: "4"
-        memory: 100Gi
+        memory: 150Gi
 
 ---
 
@@ -130,3 +140,54 @@ spec:
   snapshotsConfig:
     onPause: Full
     location: gs://${BUCKET_NAME}/ate-scale-tiny/
+
+---
+
+# The same actor with 4x the CPU, to separate "a restore is expensive" from "a
+# restore is being throttled".
+#
+# Measured on a full worker: an actor's own cgroup stalls on its quota for 2.28s
+# of an ~11.8s activation, and 30.8% of its scheduling periods are throttled --
+# while the node itself sits at 5-16% of 32 cores. So the limit, not the
+# machine, is what the restore is waiting for. A restore is ~0.85 core-seconds
+# of real work, which at 500m cannot finish in under 1.7s however idle the node
+# is.
+#
+# CPU is an ACTIVATION dial, not a steady-state cost: an idle actor draws
+# nothing, so the worker's declared CPU only has to cover the actors restoring
+# at once, not all of them. That is why the pool can advertise far less CPU
+# than 4094 x 2000m and still admit a full worker.
+#
+# A separate template rather than an edit, because an ActorTemplate spec is
+# immutable -- the size is baked into its snapshots -- and because having both
+# side by side is what makes the comparison a comparison.
+
+apiVersion: ate.dev/v1alpha1
+kind: ActorTemplate
+metadata:
+  name: tiny-fast
+  namespace: ate-scale-tiny
+spec:
+  containers:
+  - name: tiny
+    image: ko://github.com/agent-substrate/substrate/demos/tiny
+    command:
+    - /ko-app/tiny
+    readyz:
+      httpGet:
+        path: /readyz
+        port: 80
+
+  resources:
+    limits:
+      cpu: "2"
+      memory: 56Mi
+
+  # The same pool as tiny: the point is to change one thing.
+  workerSelector:
+    matchLabels:
+      workload: tiny
+
+  snapshotsConfig:
+    onPause: Full
+    location: gs://${BUCKET_NAME}/ate-scale-tiny-fast/
