@@ -104,8 +104,7 @@ func (r *runsc) shapeSpec(containerName string) error {
 
 func (r *runsc) cmdCreate(ctx context.Context, out io.Writer, containerName string, additionalArgs []string) error {
 	defer r.act.Timing(ateattr.ActivationPhaseSandboxCreate)()
-	reapLock.RLock()
-	defer reapLock.RUnlock()
+	defer reaper.Enter()()
 
 	slog.InfoContext(ctx, "About to run runsc create", slog.String("container", containerName))
 
@@ -154,8 +153,7 @@ func (r *runsc) cmdCreate(ctx context.Context, out io.Writer, containerName stri
 
 func (r *runsc) cmdStart(ctx context.Context, out io.Writer, containerName string) error {
 	defer r.act.Timing(ateattr.ActivationPhaseSandboxRestore)()
-	reapLock.RLock()
-	defer reapLock.RUnlock()
+	defer reaper.Enter()()
 
 	slog.InfoContext(ctx, "About to run runsc start", slog.String("container", containerName))
 
@@ -184,8 +182,7 @@ func (r *runsc) cmdStart(ctx context.Context, out io.Writer, containerName strin
 }
 
 func (r *runsc) cmdCheckpoint(ctx context.Context, containerName, checkpointPath string) error {
-	reapLock.RLock()
-	defer reapLock.RUnlock()
+	defer reaper.Enter()()
 
 	slog.InfoContext(ctx, "About to run runsc checkpoint", slog.String("container", containerName))
 
@@ -214,8 +211,7 @@ func (r *runsc) cmdCheckpoint(ctx context.Context, containerName, checkpointPath
 }
 
 func (r *runsc) cmdFsCheckpoint(ctx context.Context, containerName, checkpointPath string, durableDirMounts []string) error {
-	reapLock.RLock()
-	defer reapLock.RUnlock()
+	defer reaper.Enter()()
 
 	slog.InfoContext(ctx, "About to run runsc fscheckpoint", slog.String("container", containerName))
 
@@ -256,8 +252,7 @@ func (r *runsc) cmdFsCheckpoint(ctx context.Context, containerName, checkpointPa
 // to call restore on each container, using the same checkpoint.
 func (r *runsc) cmdRestore(ctx context.Context, out io.Writer, containerName, checkpointPath string) error {
 	defer r.act.Timing(ateattr.ActivationPhaseSandboxRestore)()
-	reapLock.RLock()
-	defer reapLock.RUnlock()
+	defer reaper.Enter()()
 
 	slog.InfoContext(ctx, "About to run runsc restore", slog.String("container", containerName))
 
@@ -298,8 +293,7 @@ func (r *runsc) cmdRestore(ctx context.Context, out io.Writer, containerName, ch
 }
 
 func (r *runsc) cmdDelete(ctx context.Context, containerName string) error {
-	reapLock.RLock()
-	defer reapLock.RUnlock()
+	defer reaper.Enter()()
 
 	// token := rand.Text()
 	// logFile := "/tmp/runsc.delete." + token + ".log"
@@ -327,8 +321,7 @@ func (r *runsc) cmdDelete(ctx context.Context, containerName string) error {
 }
 
 func (r *runsc) cmdState(ctx context.Context, containerName string) error {
-	reapLock.RLock()
-	defer reapLock.RUnlock()
+	defer reaper.Enter()()
 
 	cmd := exec.CommandContext(
 		ctx,
@@ -363,8 +356,7 @@ func (r *runsc) killArgs(containerName, signal string) []string {
 // cmdKill sends signal to the given container's process(es) inside the gVisor
 // sandbox. Used during graceful shutdown to propagate SIGTERM to the actor.
 func (r *runsc) cmdKill(ctx context.Context, containerName, signal string) error {
-	reapLock.RLock()
-	defer reapLock.RUnlock()
+	defer reaper.Enter()()
 
 	slog.InfoContext(ctx, "About to run runsc kill", slog.String("container", containerName), slog.String("signal", signal))
 
@@ -392,20 +384,22 @@ func (r *runsc) waitArgs(containerName string) []string {
 // cmdWait blocks until the given container's process exits. Used during
 // graceful shutdown to confirm the actor has stopped before ateom exits.
 //
-// We deliberately DO NOT acquire reapLock here. If we held reapLock.RLock()
-// during this long wait, a pending background reaper write lock (reapLock.Lock())
-// would block, starving any subsequent read lock attempts (like CheckpointWorkload
-// which needs to run runsc checkpoint).
+// This used to run OUTSIDE the reaper's protection, on purpose: holding the old
+// read lock for a wait this long left the reaper's pending write lock blocking
+// every other invocation behind it. The cost was that reaping could collect the
+// `runsc wait` process before this one did, and a clean shutdown would report
+// ECHILD as a failure.
+//
+// Entering is no longer expensive -- that is the point of childreap -- so it
+// takes the protection and the race is gone.
 func (r *runsc) cmdWait(ctx context.Context, containerName string) error {
+	defer reaper.Enter()()
 	slog.InfoContext(ctx, "About to run runsc wait", slog.String("container", containerName))
 
 	cmd := exec.CommandContext(ctx, r.path, r.waitArgs(containerName)...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		// TODO: If the background child reaper collects the runsc wait process before
-		// cmd.Run's own wait finishes, it returns ECHILD. In these cases we return an error
-		// when we shouldn't. We can fix this by forking the reap.ReapChildren() call in main.
 		return fmt.Errorf("while running `runsc wait`: %w", err)
 	}
 	return nil

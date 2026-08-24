@@ -121,8 +121,7 @@ func generateCDISpec(ctx context.Context, outDir string) error {
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return fmt.Errorf("creating CDI output dir %s: %w", outDir, err)
 	}
-	reapLock.RLock()
-	defer reapLock.RUnlock()
+	defer reaper.Enter()()
 	// No --nvidia-cdi-hook-path: we discard the CDI hooks (staging SONAME symlinks
 	// ourselves), so the hook paths nvidia-ctk writes into the spec are never used.
 	cmd := exec.CommandContext(ctx, toolkitBinary("nvidia-ctk"),
