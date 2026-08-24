@@ -28,6 +28,7 @@ import (
 	"google.golang.org/protobuf/testing/protocmp"
 
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/third_party/kata/agentpb"
+	"github.com/agent-substrate/substrate/internal/actorlock"
 	"github.com/agent-substrate/substrate/internal/ateomstats"
 	"github.com/agent-substrate/substrate/internal/proto/ateompb"
 	"github.com/agent-substrate/substrate/internal/resources"
@@ -101,8 +102,8 @@ func TestActorBootParamsAttributionMatchesRequest(t *testing.T) {
 	}
 }
 
-// The lifecycle transitions that maintain s.activeActor and s.guestStats — set
-// by RunWorkload and RestoreWorkload, cleared by CheckpointWorkload's teardown —
+// The lifecycle transitions that maintain the hosted-actor registry — set by
+// RunWorkload and RestoreWorkload, cleared by CheckpointWorkload's teardown —
 // have no unit test, because those three RPCs each reach for netlink,
 // cloud-hypervisor, and the worker pod's netns within a few lines of entry and
 // cannot be driven from `go test`. The mapping they use is covered above and in
@@ -125,8 +126,8 @@ type fakeAgent struct {
 
 	// onCall, when set, runs at the top of every StatsContainer. It is how a
 	// test interleaves a lifecycle transition with the handlers' lock-free
-	// read: the handler has loaded activeActor by the time the agent is asked,
-	// so flipping it here lands in the window the re-check guards.
+	// read: the handler has looked the actor up by the time the agent is asked,
+	// so unhosting it here lands in the window the re-check guards.
 	onCall func()
 
 	// calls records the container ids asked for, in order, so a test can tell
@@ -163,14 +164,34 @@ func containerStats(usage, peak, inactiveFile, cpuNanos uint64) *agentpb.CgroupS
 }
 
 // newStatsService builds a service executing testActor with the given guest
-// containers published to GetWorkloadStats. lock is constructed like NewService
-// does, since it is a pointer with no usable zero value and
-// TestGetWorkloadStatsDoesNotTakeLock holds it.
+// containers published to GetWorkloadStats. actorLocks is constructed like
+// NewService does, since it is a pointer with no usable zero value and
+// TestGetWorkloadStatsDoesNotTakeLock takes one.
 func newStatsService(agent containerStatsReader, workloadIDs ...string) *AteomService {
-	s := &AteomService{lock: newCancelableMutex()}
-	s.activeActor.Store(&testActor)
-	s.guestStats.Store(&guestStatsTarget{actorUID: testActor.UID, agent: agent, workloadIDs: workloadIDs})
+	s := &AteomService{actorLocks: actorlock.New(), actors: map[string]*hostedActor{}}
+	hostTestActor(s, testActor, &guestStatsTarget{actorUID: testActor.UID, agent: agent, workloadIDs: workloadIDs})
 	return s
+}
+
+// hostTestActor puts one actor in the registry with the given guest target,
+// standing in for what RunWorkload and RestoreWorkload publish. A nil target is
+// an actor mid-boot: accepted and attributable, with no guest to ask yet.
+func hostTestActor(s *AteomService, attribution resources.ActorAttribution, target *guestStatsTarget) *hostedActor {
+	s.actorsMu.Lock()
+	defer s.actorsMu.Unlock()
+	if s.actors == nil {
+		s.actors = map[string]*hostedActor{}
+	}
+	hosted := &hostedActor{attribution: attribution, guest: target}
+	s.actors[attribution.UID] = hosted
+	return hosted
+}
+
+// unhostTestActor removes one actor, standing in for CheckpointWorkload.
+func unhostTestActor(s *AteomService, actorUID string) {
+	s.actorsMu.Lock()
+	defer s.actorsMu.Unlock()
+	delete(s.actors, actorUID)
 }
 
 func TestGetWorkloadStats(t *testing.T) {
@@ -335,20 +356,21 @@ func TestGetWorkloadStatsErrors(t *testing.T) {
 			name: "no guest agent connection yet",
 			service: func() *AteomService {
 				s := &AteomService{}
-				s.activeActor.Store(&testActor)
+				hostTestActor(s, testActor, nil)
 				return s
 			},
 			actorUID: "uid-a",
 			want:     codes.FailedPrecondition,
 		},
 		{
-			// Should be unreachable — the two atomics are written together under
-			// lock — so a disagreement is an invariant violation, not a routine
-			// state: Internal, unlike every other way sampleGuest declines.
+			// Should be unreachable — the target is published on the same
+			// hostedActor the attribution came from — so a disagreement is an
+			// invariant violation, not a routine state: Internal, unlike every
+			// other way sampleGuest declines.
 			name: "guest agent connection belongs to another actor",
 			service: func() *AteomService {
 				s := newStatsService(healthy, "app_ovl")
-				s.guestStats.Store(&guestStatsTarget{actorUID: "uid-b", agent: healthy, workloadIDs: []string{"app_ovl"}})
+				hostTestActor(s, testActor, &guestStatsTarget{actorUID: "uid-b", agent: healthy, workloadIDs: []string{"app_ovl"}})
 				return s
 			},
 			actorUID: "uid-a",
@@ -393,18 +415,21 @@ func TestGetWorkloadStatsErrors(t *testing.T) {
 }
 
 // TestGetWorkloadStatsDoesNotTakeLock is the regression test for the property
-// the design turns on: a stats poll must not queue behind a lifecycle RPC.
-// s.lock is held for the duration of the call here, so a handler that reached
-// for it — or that looked up the agent client in s.running, which lock guards —
-// would deadlock and fail this test by timing out rather than by assertion.
+// the design turns on: a stats poll must not queue behind a lifecycle RPC. The
+// actor's lock is held for the duration of the call here, so a handler that
+// reached for it — or that looked up the agent client through the live VM,
+// which the lifecycle RPCs own — would deadlock and fail this test by timing
+// out rather than by assertion.
 func TestGetWorkloadStatsDoesNotTakeLock(t *testing.T) {
 	agent := &fakeAgent{stats: map[string]*agentpb.CgroupStats{"app_ovl": containerStats(1000, 2000, 100, 5000)}}
 	s := newStatsService(agent, "app_ovl")
 
-	// Stands in for a RunWorkload or CheckpointWorkload in flight, which hold
-	// the lock across their entire bodies.
-	s.lock.Lock()
-	defer s.lock.Unlock()
+	// Stands in for a RunWorkload or CheckpointWorkload in flight against this
+	// actor, which holds its lock across the entire body.
+	if !s.actorLocks.Lock(context.Background(), testActor.UID) {
+		t.Fatal("could not take the actor lock")
+	}
+	defer s.actorLocks.Unlock(testActor.UID)
 
 	if _, err := s.GetWorkloadStats(context.Background(), &ateompb.GetWorkloadStatsRequest{ActorUid: "uid-a"}); err != nil {
 		t.Errorf("GetWorkloadStats() error = %v, want nil", err)
@@ -412,17 +437,17 @@ func TestGetWorkloadStatsDoesNotTakeLock(t *testing.T) {
 }
 
 // TestAteomServiceStartsAvailable checks that a freshly constructed service
-// retains no attribution and offers no guest, mirroring the gVisor ateom's test
-// of the same name. GetWorkloadStats's NOT_FOUND-when-available behavior is
-// built on the first: a non-nil zero value would make an idle ateom report an
-// empty actor's usage instead of refusing.
+// hosts nothing, mirroring the gVisor ateom's test of the same name.
+// GetWorkloadStats's NOT_FOUND-when-available behavior is built on it: an actor
+// present at the zero value would make an idle ateom report an empty actor's
+// usage instead of refusing.
 func TestAteomServiceStartsAvailable(t *testing.T) {
 	s := &AteomService{}
-	if got := s.activeActor.Load(); got != nil {
-		t.Errorf("new AteomService.activeActor = %v, want nil", got)
+	if got := s.hostedActors(); len(got) != 0 {
+		t.Errorf("new AteomService hosts %d actors, want none", len(got))
 	}
-	if got := s.guestStats.Load(); got != nil {
-		t.Errorf("new AteomService.guestStats = %v, want nil", got)
+	if got := s.lookupActor(testActor.UID); got != nil {
+		t.Errorf("new AteomService.lookupActor(%q) = %v, want nil", testActor.UID, got)
 	}
 }
 
@@ -436,8 +461,8 @@ func TestGetActiveWorkloadStats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetActiveWorkloadStats() error = %v, want nil", err)
 	}
-	if got.GetSample() == nil {
-		t.Fatalf("GetActiveWorkloadStats() = %v, want a sample", got)
+	if len(got.GetSamples()) != 1 {
+		t.Fatalf("GetActiveWorkloadStats() = %v, want exactly one sample", got)
 	}
 
 	// The keyed read against the same fake is the reference: the discovery read
@@ -447,7 +472,7 @@ func TestGetActiveWorkloadStats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetWorkloadStats() error = %v, want nil", err)
 	}
-	sample := got.GetSample()
+	sample := got.GetSamples()[0]
 	sample.ObservedAtUnixNano = 0
 	want.GetSample().ObservedAtUnixNano = 0
 	if diff := cmp.Diff(want.GetSample(), sample, protocmp.Transform()); diff != "" {
@@ -475,7 +500,7 @@ func TestGetActiveWorkloadStatsAvailable(t *testing.T) {
 // workers.
 func TestGetActiveWorkloadStatsBooting(t *testing.T) {
 	s := &AteomService{}
-	s.activeActor.Store(&testActor) // attribution retained, target not published
+	hostTestActor(s, testActor, nil) // attribution retained, target not published
 
 	got, err := s.GetActiveWorkloadStats(context.Background(), &ateompb.GetActiveWorkloadStatsRequest{})
 	if err != nil {
@@ -486,46 +511,67 @@ func TestGetActiveWorkloadStatsBooting(t *testing.T) {
 	}
 }
 
-// The transition tests cover the re-check that runs after the lock-free
-// measurement: the fake agent's onCall hook flips activeActor while the
-// handler is mid-read, which is exactly the window a checkpoint plus a fresh
-// run (or a checkpoint alone) can land in.
+// TestGetActiveWorkloadStatsSeveralActors is why the discovery read returns a
+// list: a caller that took the first sample would under-report a worker hosting
+// more than one, silently and in the direction that looks healthy.
+func TestGetActiveWorkloadStatsSeveralActors(t *testing.T) {
+	second := testActor
+	second.UID = "uid-b"
+	second.Ref.Name = "actor-b"
 
-func TestGetActiveWorkloadStatsTransition(t *testing.T) {
-	otherActor := testActor
-	otherActor.UID = "uid-b"
+	agent := &fakeAgent{stats: map[string]*agentpb.CgroupStats{
+		"app_ovl": containerStats(1000, 2000, 100, 5000),
+		"b_ovl":   containerStats(3000, 4000, 200, 7000),
+	}}
+	s := newStatsService(agent, "app_ovl")
+	hostTestActor(s, second, &guestStatsTarget{actorUID: second.UID, agent: agent, workloadIDs: []string{"b_ovl"}})
 
-	tests := []struct {
-		name string
-		to   *resources.ActorAttribution
-		want ateompb.NoSampleReason
-	}{
-		// A new actor took the slot: there is a workload, its numbers are just
-		// not attributable this tick.
-		{name: "to another actor", to: &otherActor, want: ateompb.NoSampleReason_NO_SAMPLE_REASON_NOT_MEASURABLE_YET},
-		// A checkpoint emptied the slot: report what is true now.
-		{name: "to available", to: nil, want: ateompb.NoSampleReason_NO_SAMPLE_REASON_NO_WORKLOAD},
+	got, err := s.GetActiveWorkloadStats(context.Background(), &ateompb.GetActiveWorkloadStatsRequest{})
+	if err != nil {
+		t.Fatalf("GetActiveWorkloadStats() error = %v, want nil", err)
 	}
+	if len(got.GetSamples()) != 2 {
+		t.Fatalf("GetActiveWorkloadStats() returned %d samples, want 2: %v", len(got.GetSamples()), got)
+	}
+	byUID := map[string]*ateompb.WorkloadStatsSample{}
+	for _, sample := range got.GetSamples() {
+		byUID[sample.GetActorUid()] = sample
+	}
+	for _, want := range []string{testActor.UID, second.UID} {
+		if byUID[want] == nil {
+			t.Errorf("no sample for actor %q; got %v", want, byUID)
+		}
+	}
+	// Each actor's numbers are its own, not the worker's total: the whole point
+	// of sampling per actor is that they are separately attributable.
+	if got := byUID[second.UID].GetMemoryCurrentBytes(); got != 3000 {
+		t.Errorf("actor %q memory_current_bytes = %d, want 3000", second.UID, got)
+	}
+}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			agent := &fakeAgent{stats: map[string]*agentpb.CgroupStats{
-				"app_ovl": containerStats(1000, 2000, 100, 5000),
-			}}
-			s := newStatsService(agent, "app_ovl")
-			agent.onCall = func() { s.activeActor.Store(tc.to) }
+// TestGetActiveWorkloadStatsOneBooting pins that one actor with no numbers does
+// not suppress the rest. On a worker hosting several, one of them booting is
+// the ordinary case, and dropping the whole answer for it would blind the
+// caller to everything else running here.
+func TestGetActiveWorkloadStatsOneBooting(t *testing.T) {
+	booting := testActor
+	booting.UID = "uid-b"
 
-			got, err := s.GetActiveWorkloadStats(context.Background(), &ateompb.GetActiveWorkloadStatsRequest{})
-			if err != nil {
-				t.Fatalf("GetActiveWorkloadStats() during transition: error = %v, want nil", err)
-			}
-			if got.GetSample() != nil {
-				t.Errorf("GetActiveWorkloadStats() during transition returned sample %v, want none", got.GetSample())
-			}
-			if got.GetNoSampleReason() != tc.want {
-				t.Errorf("GetActiveWorkloadStats() during transition = %v, want %v reason", got, tc.want)
-			}
-		})
+	agent := &fakeAgent{stats: map[string]*agentpb.CgroupStats{
+		"app_ovl": containerStats(1000, 2000, 100, 5000),
+	}}
+	s := newStatsService(agent, "app_ovl")
+	hostTestActor(s, booting, nil) // accepted, no guest to ask yet
+
+	got, err := s.GetActiveWorkloadStats(context.Background(), &ateompb.GetActiveWorkloadStatsRequest{})
+	if err != nil {
+		t.Fatalf("GetActiveWorkloadStats() error = %v, want nil", err)
+	}
+	if len(got.GetSamples()) != 1 {
+		t.Fatalf("GetActiveWorkloadStats() returned %d samples, want 1: %v", len(got.GetSamples()), got)
+	}
+	if uid := got.GetSamples()[0].GetActorUid(); uid != testActor.UID {
+		t.Errorf("sample is for actor %q, want the one that is up (%q)", uid, testActor.UID)
 	}
 }
 
@@ -537,7 +583,7 @@ func TestGetWorkloadStatsTransition(t *testing.T) {
 		"app_ovl": containerStats(1000, 2000, 100, 5000),
 	}}
 	s := newStatsService(agent, "app_ovl")
-	agent.onCall = func() { s.activeActor.Store(nil) }
+	agent.onCall = func() { unhostTestActor(s, testActor.UID) }
 
 	_, err := s.GetWorkloadStats(context.Background(), &ateompb.GetWorkloadStatsRequest{ActorUid: "uid-a"})
 	if got := status.Code(err); got != codes.NotFound {
@@ -553,7 +599,7 @@ func TestGetActiveWorkloadStatsStaleTarget(t *testing.T) {
 		"app_ovl": containerStats(1000, 2000, 100, 5000),
 	}}
 	s := newStatsService(agent, "app_ovl")
-	s.guestStats.Store(&guestStatsTarget{actorUID: "uid-b", agent: agent, workloadIDs: []string{"app_ovl"}})
+	hostTestActor(s, testActor, &guestStatsTarget{actorUID: "uid-b", agent: agent, workloadIDs: []string{"app_ovl"}})
 
 	_, err := s.GetActiveWorkloadStats(context.Background(), &ateompb.GetActiveWorkloadStatsRequest{})
 	if got := status.Code(err); got != codes.Internal {

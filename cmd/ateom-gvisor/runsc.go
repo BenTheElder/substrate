@@ -29,6 +29,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/ocispec"
 	"github.com/agent-substrate/substrate/internal/proto/ateompb"
 	"github.com/agent-substrate/substrate/internal/sizing"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 )
 
 type runsc struct {
@@ -76,6 +77,15 @@ func (r *runsc) shapeSpec(containerName string) error {
 	spec, err := ocispec.Load(bundle)
 	if err != nil {
 		return err
+	}
+	// Per actor, not per container: a worker hosts several actors and each has
+	// a container named "pause", so the container name alone is not a unique
+	// cgroup. Set before shaping, which only fills in a default.
+	if spec.Linux == nil {
+		spec.Linux = &specs.Linux{}
+	}
+	if spec.Linux.CgroupsPath == "" {
+		spec.Linux.CgroupsPath = "/" + actorCgroupLeaf(r.actorUID, containerName)
 	}
 	ocispec.ShapeGVisor(spec, ocispec.GVisorOptions{
 		ActorUID:       r.actorUID,
