@@ -208,7 +208,6 @@ func do(ctx context.Context) error {
 		CredentialBundlePath: *workerCredentialBundle,
 		TrustBundlePath:      *podIdentityTrustBundle,
 		AllowedClientID:      *atunnelClientIdentity,
-		Upstream:             upstream,
 	})
 	if err != nil {
 		return fmt.Errorf("while configuring atunnel: %w", err)
@@ -254,7 +253,7 @@ func do(ctx context.Context) error {
 	}()
 	slog.InfoContext(ctx, "atunnel egress serving", slog.String("address", *atunnelEgressListenAddress))
 
-	ateomService := NewService(*podUID, *chBinary, *kataConfig, *kataDebug, *vmmMemReserve, interiorNetNS, actorLogger, atunnelIngress, atunnelEgress, atunnelEgressPort, *workerCredentialBundle, *podIdentityTrustBundle, *egressGatewayTrustBundle)
+	ateomService := NewService(*podUID, *chBinary, *kataConfig, *kataDebug, *vmmMemReserve, interiorNetNS, upstream, actorLogger, atunnelIngress, atunnelEgress, atunnelEgressPort, *workerCredentialBundle, *podIdentityTrustBundle, *egressGatewayTrustBundle)
 
 	svr := grpc.NewServer(
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
@@ -411,6 +410,12 @@ type AteomService struct {
 	atunnelIngress *atunnel.Server
 	atunnelEgress  *atunnel.Egress
 
+	// actorUpstream is where atunnel reaches the actor. Supplied per activation
+	// rather than fixed on the server, because a worker that hosts several
+	// actors addresses each of them differently; this ateom still runs one at a
+	// time, so it is the same address every time.
+	actorUpstream *url.URL
+
 	// atunnelEgressPort is the local atunnel listener used as the target of the
 	// actor network's transparent TCP redirect.
 	atunnelEgressPort uint16
@@ -474,7 +479,7 @@ type AteomService struct {
 var _ ateompb.AteomServer = (*AteomService)(nil)
 
 // NewService creates a new AteomService.
-func NewService(podUID, chBinary, kataConfig string, kataDebug bool, memReserveMiB int, interiorNetNS netns.NsHandle, actorLogger *actorlog.ActorLogger, atunnelIngress *atunnel.Server, atunnelEgress *atunnel.Egress, atunnelEgressPort uint16, workerCredentialBundlePath, podIdentityTrustBundlePath, egressGatewayTrustBundlePath string) *AteomService {
+func NewService(podUID, chBinary, kataConfig string, kataDebug bool, memReserveMiB int, interiorNetNS netns.NsHandle, actorUpstream *url.URL, actorLogger *actorlog.ActorLogger, atunnelIngress *atunnel.Server, atunnelEgress *atunnel.Egress, atunnelEgressPort uint16, workerCredentialBundlePath, podIdentityTrustBundlePath, egressGatewayTrustBundlePath string) *AteomService {
 	return &AteomService{
 		lock:                         newCancelableMutex(),
 		podUID:                       podUID,
@@ -483,6 +488,7 @@ func NewService(podUID, chBinary, kataConfig string, kataDebug bool, memReserveM
 		kataDebug:                    kataDebug,
 		memReserveMiB:                memReserveMiB,
 		interiorNetNS:                interiorNetNS,
+		actorUpstream:                actorUpstream,
 		actorLogger:                  actorLogger,
 		atunnelIngress:               atunnelIngress,
 		atunnelEgress:                atunnelEgress,
@@ -541,22 +547,36 @@ func (s *AteomService) prepareActorEgress(ctx context.Context, actorUID string, 
 }
 
 func (s *AteomService) activateActorNetworking(atespace, actorName string, egress *actorEgress) error {
-	if err := s.atunnelIngress.Activate(atespace, actorName); err != nil {
+	if err := s.atunnelIngress.Activate(atespace, actorName, s.actorUpstream); err != nil {
 		return fmt.Errorf("while activating actor ingress: %w", err)
 	}
 	if egress == nil {
 		return nil
 	}
-	if err := s.atunnelEgress.Activate(egress.client, egress.certificateSource, egress.expiresAt); err != nil {
+	// Egress is filed under the address the actor's redirected traffic arrives
+	// from. With one actor per worker that is the actor address itself; a worker
+	// hosting several rewrites each actor's source to something unique first.
+	if err := s.atunnelEgress.Activate(ateomnet.MustParseIP(ateomnet.ActorVethIP), egress.client, egress.certificateSource, egress.expiresAt); err != nil {
 		return fmt.Errorf("while activating actor egress: %w", err)
 	}
 	return nil
 }
 
 func (s *AteomService) deactivateActorNetworking(ctx context.Context) error {
+	// Deactivation now names an actor, so it needs to know which one is here.
+	// The attribution is retained from the moment the workload is accepted, so
+	// it is the answer even when the guest failed to come up; nothing retained
+	// means nothing to deactivate.
+	active := s.activeActor.Load()
+	if active == nil {
+		return nil
+	}
 	// Stop admitting traffic and drain active streams before the Actor network
 	// is torn down. Attempt both directions even if one fails to deactivate.
-	err := errors.Join(s.atunnelIngress.Deactivate(ctx), s.atunnelEgress.Deactivate(ctx))
+	err := errors.Join(
+		s.atunnelIngress.Deactivate(ctx, active.Ref.Atespace, active.Ref.Name),
+		s.atunnelEgress.Deactivate(ctx, ateomnet.MustParseIP(ateomnet.ActorVethIP)),
+	)
 	if err != nil {
 		return fmt.Errorf("while deactivating actor networking: %w", err)
 	}
