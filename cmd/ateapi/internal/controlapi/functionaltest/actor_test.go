@@ -1794,8 +1794,11 @@ func TestResumeActor(t *testing.T) {
 		NodeName:        "node1",
 		SandboxClass:    "gvisor",
 		Labels:          map[string]string{poolLabelKey: ns},
+		// The worker pod sets no compute limits, so capacity reports only how
+		// many actors the pool allows on one worker.
+		Capacity: &ateapipb.WorkerCapacity{Actors: 1},
 		Status: &ateapipb.WorkerStatus{
-			Assignment: &ateapipb.ActorAssignment{
+			Assignments: []*ateapipb.ActorAssignment{{
 				ActorTemplate: &ateapipb.KubeNamespacedObjectRef{
 					Namespace: ns,
 					Name:      "tmpl1",
@@ -1805,7 +1808,7 @@ func TestResumeActor(t *testing.T) {
 					Atespace: testAtespace,
 				},
 				ActorUid: getResp.GetMetadata().GetUid(),
-			},
+			}},
 			State: ateapipb.WorkerState_WORKER_STATE_ACTIVE,
 		},
 	}
@@ -2473,17 +2476,17 @@ func TestResumeActor_ReleasesStaleWorkerWhenPoolBecomesIneligible(t *testing.T) 
 		}
 		switch w.GetWorkerPool() {
 		case "pool-a":
-			if wass := w.GetStatus().GetAssignment(); wass != nil {
+			if assignments := w.GetStatus().GetAssignments(); len(assignments) > 0 {
 				got := "<nil-actor>"
-				if wass.Actor != nil {
+				if wass := assignments[0]; wass.Actor != nil {
 					got = wass.Actor.Name
 				}
 				t.Errorf("expected worker-a (now-ineligible pool-a) to be released, got actor name=%q", got)
 			}
 		case "pool-b":
-			if wass := w.GetStatus().GetAssignment(); wass != nil {
+			if assignments := w.GetStatus().GetAssignments(); len(assignments) > 0 {
 				got := "<nil-actor>"
-				if wass.Actor != nil {
+				if wass := assignments[0]; wass.Actor != nil {
 					got = wass.Actor.Name
 				}
 				t.Errorf("expected worker-b to stay free (actor crashed, not migrated), got actor name=%q", got)
@@ -2598,8 +2601,8 @@ func TestResumeActor_CrashesIfAssignedWorkerIsDraining(t *testing.T) {
 			continue
 		}
 		if w.GetWorkerPod() == assignedPod {
-			if w.GetStatus().GetAssignment() != nil {
-				t.Errorf("expected draining worker %q to be released, still assigned to %q", assignedPod, w.GetStatus().GetAssignment().GetActor().GetName())
+			if assignments := w.GetStatus().GetAssignments(); len(assignments) != 0 {
+				t.Errorf("expected draining worker %q to be released, still assigned to %q", assignedPod, assignments[0].GetActor().GetName())
 			}
 		}
 	}

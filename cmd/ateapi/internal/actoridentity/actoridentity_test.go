@@ -210,10 +210,10 @@ func TestMintCertReadsThroughStaleWorkerCache(t *testing.T) {
 					if toUpdate.Status == nil {
 						toUpdate.Status = &ateapipb.WorkerStatus{}
 					}
-					toUpdate.Status.Assignment = &ateapipb.ActorAssignment{
+					toUpdate.Status.Assignments = []*ateapipb.ActorAssignment{{
 						Actor:    (resources.ActorRef{Atespace: testAtespace, Name: testActorName}).ToObjectRef(),
 						ActorUid: actor.GetMetadata().GetUid(),
-					}
+					}}
 					return nil
 				})
 				if err != nil {
@@ -279,10 +279,10 @@ func TestMintCertReadsThroughWorkerCacheMiss(t *testing.T) {
 					NodeName:        testNode,
 					Status: &ateapipb.WorkerStatus{
 						State: ateapipb.WorkerState_WORKER_STATE_ACTIVE,
-						Assignment: &ateapipb.ActorAssignment{
+						Assignments: []*ateapipb.ActorAssignment{{
 							Actor:    (resources.ActorRef{Atespace: testAtespace, Name: testActorName}).ToObjectRef(),
 							ActorUid: actor.GetMetadata().GetUid(),
-						},
+						}},
 					},
 				}); err != nil {
 					t.Fatalf("register worker in store: %v", err)
@@ -442,14 +442,14 @@ func seedActor(t *testing.T, ctx context.Context, st store.Interface, f actorFix
 		NodeName:        f.workerNode,
 		Status: &ateapipb.WorkerStatus{
 			State: ateapipb.WorkerState_WORKER_STATE_ACTIVE,
-			Assignment: &ateapipb.ActorAssignment{
+			Assignments: []*ateapipb.ActorAssignment{{
 				Actor:    assigned.ToObjectRef(),
 				ActorUid: assignedActorUID,
-			},
+			}},
 		},
 	}
 	if f.unassigned {
-		worker.Status.Assignment = nil
+		worker.Status.Assignments = nil
 	}
 	if _, err := st.CreateWorker(ctx, worker); err != nil {
 		t.Fatalf("seed worker: %v", err)

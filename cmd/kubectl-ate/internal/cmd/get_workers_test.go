@@ -32,10 +32,10 @@ func TestGetWorkersRunner_Filters(t *testing.T) {
 			SandboxClass:    "microvm",
 			Labels:          map[string]string{"ate.dev/worker-pool": "counter"},
 			Status: &ateapipb.WorkerStatus{
-				Assignment: &ateapipb.ActorAssignment{
+				Assignments: []*ateapipb.ActorAssignment{{
 					ActorTemplate: &ateapipb.KubeNamespacedObjectRef{Namespace: "ns-1", Name: "counter"},
 					Actor:         &ateapipb.ObjectRef{Atespace: "space-a", Name: "actor-a"},
-				},
+				}},
 			},
 		},
 		{
@@ -52,18 +52,18 @@ func TestGetWorkersRunner_Filters(t *testing.T) {
 			SandboxClass:    "gvisor",
 			Labels:          map[string]string{"ate.dev/worker-pool": "counter"},
 			Status: &ateapipb.WorkerStatus{
-				Assignment: &ateapipb.ActorAssignment{
+				Assignments: []*ateapipb.ActorAssignment{{
 					ActorTemplate: &ateapipb.KubeNamespacedObjectRef{Namespace: "ns-2", Name: "counter"},
 					Actor:         &ateapipb.ObjectRef{Atespace: "space-b", Name: "actor-b"},
-				},
+				}},
 			},
 		},
 	}
 
-	header := "NAMESPACE   POOL      CLASS     POD     STATUS     ASSIGNED ACTOR\n"
-	row1 := "ns-1        counter   microvm   pod-1   ASSIGNED   ns-1/counter/space-a/actor-a\n"
-	row2 := "ns-1        other     gvisor    pod-2   FREE       <none>\n"
-	row3 := "ns-2        counter   gvisor    pod-3   ASSIGNED   ns-2/counter/space-b/actor-b\n"
+	header := "NAMESPACE   POOL      CLASS     POD     STATUS          ASSIGNED ACTOR\n"
+	row1 := "ns-1        counter   microvm   pod-1   ASSIGNED(1/1)   ns-1/counter/space-a/actor-a\n"
+	row2 := "ns-1        other     gvisor    pod-2   FREE            <none>\n"
+	row3 := "ns-2        counter   gvisor    pod-3   ASSIGNED(1/1)   ns-2/counter/space-b/actor-b\n"
 
 	tests := []struct {
 		name         string
@@ -81,9 +81,9 @@ func TestGetWorkersRunner_Filters(t *testing.T) {
 		{name: "selector", selector: "ate.dev/worker-pool=counter", expected: header + row1 + row3},
 		{name: "sandbox class", sandboxClass: "microvm", expected: header + row1},
 		// gvisor-only rows shrink the CLASS column to the widest survivor.
-		{name: "sandbox class gvisor", sandboxClass: "gvisor", expected: "NAMESPACE   POOL      CLASS    POD     STATUS     ASSIGNED ACTOR\n" +
-			"ns-1        other     gvisor   pod-2   FREE       <none>\n" +
-			"ns-2        counter   gvisor   pod-3   ASSIGNED   ns-2/counter/space-b/actor-b\n"},
+		{name: "sandbox class gvisor", sandboxClass: "gvisor", expected: "NAMESPACE   POOL      CLASS    POD     STATUS          ASSIGNED ACTOR\n" +
+			"ns-1        other     gvisor   pod-2   FREE            <none>\n" +
+			"ns-2        counter   gvisor   pod-3   ASSIGNED(1/1)   ns-2/counter/space-b/actor-b\n"},
 		{name: "combined", namespace: "ns-1", selector: "ate.dev/worker-pool=counter", expected: header + row1},
 	}
 

@@ -45,7 +45,7 @@ func (w *WorkerWorkflow) DeleteWorker(ctx context.Context, name string, pre stor
 	// Order matters: the delete is what erases the Actor's pointer at the
 	// Worker, so a failed release has to leave the record in place for the
 	// caller to rediscover and retry.
-	if err := w.ensureBoundActorReleased(ctx, worker); err != nil {
+	if err := w.ensureBoundActorsReleased(ctx, worker); err != nil {
 		return nil, err
 	}
 
@@ -81,16 +81,32 @@ func (w *WorkerWorkflow) loadWorkerForDelete(ctx context.Context, name string) (
 //
 // A concurrent SuspendActor or ResumeActor wins the optimistic version check;
 // this attempt fails as ABORTED so the caller retries against the newer state.
-func (w *WorkerWorkflow) ensureBoundActorReleased(ctx context.Context, worker *ateapipb.Worker) (err error) {
-	ctx, done := stepSpan(ctx, "ReleaseBoundActor")
+func (w *WorkerWorkflow) ensureBoundActorsReleased(ctx context.Context, worker *ateapipb.Worker) (err error) {
+	ctx, done := stepSpan(ctx, "ReleaseBoundActors")
 	defer func() { err = done(err) }()
 
-	if worker.GetStatus().GetAssignment().GetActor() == nil {
-		markSkipped(ctx, "worker has no actor assigned")
+	assignments := worker.GetStatus().GetAssignments()
+	if len(assignments) == 0 {
+		markSkipped(ctx, "worker has no actors assigned")
+		return nil
+	}
+	for _, assignment := range assignments {
+		if err := w.releaseBoundActor(ctx, worker, assignment); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// releaseBoundActor releases one of the Worker's Actors. The skip reasons are
+// per-Actor, so on a Worker hosting many the step records the last one.
+func (w *WorkerWorkflow) releaseBoundActor(ctx context.Context, worker *ateapipb.Worker, assignment *ateapipb.ActorAssignment) error {
+	if assignment.GetActor() == nil {
+		markSkipped(ctx, "assignment names no actor")
 		return nil
 	}
 	name := worker.GetMetadata().GetName()
-	actorRef := resources.ActorRefFromObjectRef(worker.GetStatus().GetAssignment().GetActor())
+	actorRef := resources.ActorRefFromObjectRef(assignment.GetActor())
 	actor, err := w.store.GetActor(ctx, actorRef)
 	if errors.Is(err, store.ErrNotFound) {
 		markSkipped(ctx, "assigned actor no longer exists")
@@ -99,7 +115,7 @@ func (w *WorkerWorkflow) ensureBoundActorReleased(ctx context.Context, worker *a
 	if err != nil {
 		return fmt.Errorf("while getting actor to release from worker %s: %w", name, err)
 	}
-	if actor.GetMetadata().GetUid() != worker.GetStatus().GetAssignment().GetActorUid() {
+	if actor.GetMetadata().GetUid() != assignment.GetActorUid() {
 		markSkipped(ctx, "assignment names a superseded actor incarnation")
 		return nil
 	}

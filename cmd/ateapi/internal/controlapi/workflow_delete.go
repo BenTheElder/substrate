@@ -127,8 +127,10 @@ func (w *ActorWorkflow) ensureAteletTerminated(ctx context.Context, actorRef res
 			}
 			return fmt.Errorf("while checking worker assignment: %w", err)
 		}
-		wass := worker.GetStatus().GetAssignment()
-		if wass == nil || wass.GetActorUid() != actor.GetMetadata().GetUid() {
+		// Ask whether the worker still HOSTS this actor, not whether its one
+		// assignment happens to be this actor: a worker hosting several is the
+		// ordinary case, and the others are none of this delete's business.
+		if workerAssignmentForActor(worker, actor.GetMetadata().GetUid()) == nil {
 			slog.InfoContext(ctx, "worker is no longer assigned to this actor, skipping atelet terminate request",
 				slog.String("worker", workerName),
 				slog.Any("actor", actorRef))

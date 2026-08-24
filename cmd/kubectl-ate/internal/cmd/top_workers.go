@@ -19,6 +19,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
+
+	"github.com/agent-substrate/substrate/internal/resources"
 
 	"github.com/agent-substrate/substrate/cmd/kubectl-ate/internal/printer"
 	"github.com/agent-substrate/substrate/internal/ateclient"
@@ -114,23 +117,34 @@ func (r *TopWorkersRunner) Run(ctx context.Context) error {
 		podName := w.GetWorkerPod()
 		pool := w.GetWorkerPool()
 
+		// A worker can host several actors, so the status is how full it is and
+		// every actor is named. Capacity reports zero actors when unknown, in
+		// which case there is no limit to show against.
 		status := "FREE"
 		assignedActor := "<none>"
-		if wass := w.GetStatus().GetAssignment(); wass != nil && wass.GetActor() != nil {
-			status = "ASSIGNED"
+		var names []string
+		for _, wass := range w.GetStatus().GetAssignments() {
+			if wass.GetActor() == nil {
+				continue
+			}
 			if tpl := wass.GetActorTemplate(); tpl != nil && tpl.GetNamespace() != "" {
-				assignedActor = fmt.Sprintf("%s/%s/%s/%s",
+				names = append(names, fmt.Sprintf("%s/%s/%s/%s",
 					tpl.GetNamespace(),
 					tpl.GetName(),
 					wass.GetActor().GetAtespace(),
 					wass.GetActor().GetName(),
-				)
-			} else {
-				assignedActor = fmt.Sprintf("%s/%s",
-					wass.GetActor().GetAtespace(),
-					wass.GetActor().GetName(),
-				)
+				))
+				continue
 			}
+			names = append(names, fmt.Sprintf("%s/%s",
+				wass.GetActor().GetAtespace(),
+				wass.GetActor().GetName(),
+			))
+		}
+		if len(names) > 0 {
+			status = fmt.Sprintf("ASSIGNED(%d/%d)", len(names),
+				resources.WorkerMaxActors(w.GetCapacity()))
+			assignedActor = strings.Join(names, ",")
 		}
 
 		cpuStr := "metrics unavailable"

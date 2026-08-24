@@ -1179,19 +1179,43 @@ enum WorkerState {
 message WorkerStatus {
   WorkerState state = 1;
 
-  // The Actor currently bound to this Worker, if any.
-  ActorAssignment assignment = 2;
+  // The Actors currently bound to this Worker. Empty when the Worker is idle.
+  // How many may be bound at once is not a fixed number: it is whatever
+  // capacity admits, including capacity.actors as one of its dimensions.
+  //
+  // Field 2 held the single ActorAssignment this replaces, and keeps it rather
+  // than reserving it: the two are wire-compatible, so a record written before
+  // the Worker could hold a set reads back as a set of one.
+  repeated ActorAssignment assignments = 2;
 }
 
-// WorkerCapacity is the worker pod's compute capacity available to host an
-// actor sandbox, taken from the ateom container's resource limits. The
-// scheduler only places an actor on a worker whose capacity is >= the actor's
-// declared resource limits. An unset message, or a zero field within it, means
-// "unknown/unset" for that dimension: treated as unconstrained so placement is
-// not blocked (matching the pre-capacity behavior).
+// WorkerCapacity is what a worker pod has to give the Actors it hosts, and is
+// also the shape of what those Actors have taken: the scheduler places an Actor
+// only where capacity minus the sum of the assignments' resources still covers
+// the Actor's declared limits, in every dimension.
+//
+// The compute dimensions come from the ateom container's resource limits. An
+// unset message, or a zero field within it, means "unknown/unset" for that
+// dimension: treated as unconstrained so placement is not blocked (matching the
+// pre-capacity behavior).
 message WorkerCapacity {
   int64 cpu_milli = 1;    // CPU capacity in millicores (1000 = one core).
   int64 memory_bytes = 2; // Memory capacity in bytes.
+
+  // How many Actors may be bound to the Worker at once, from the WorkerPool's
+  // maxActorsPerWorker. It is a capacity dimension rather than a separate limit
+  // because it bounds the same thing the others do -- what one more Actor
+  // costs -- for the per-Actor costs that are not CPU or memory: network
+  // namespaces, mounts, file descriptors, and the blast radius of losing the
+  // pod. Kubernetes bounds a node the same way, with allocatable pods alongside
+  // allocatable cpu and memory.
+  //
+  // Unset means one, unlike the compute dimensions above, where unset means
+  // unconstrained. A worker that has not said it can host more than one actor
+  // is assumed not to be able to, so that a Worker created without capacity
+  // does not accept actors without limit. The syncer always sets this from the
+  // pool, which itself defaults to 1.
+  int32 actors = 3;
 }
 
 // ActorAssignment names the Actor currently bound to a Worker — the inverse of
@@ -1207,6 +1231,19 @@ message ActorAssignment {
   string actor_uid = 3;
   // +k8s:opaqueType
   ObjectRef actor_template_ref = 4;
+
+  // What the Worker admitted this Actor for, from the Actor's declared limits
+  // at placement time.
+  //
+  // Recorded on the assignment rather than looked up from the Actor, because
+  // releasing has to give back exactly what binding took: an ActorTemplate
+  // edited in between would otherwise return a different amount than it
+  // reserved, and WorkerStatus.allocated would drift by the difference every
+  // time the Actor moved.
+  //
+  // The actors dimension is not meaningful here and is left unset; one
+  // assignment is one Actor.
+  WorkerCapacity resources = 5;
 }
 
 message KubeNamespacedObjectRef {

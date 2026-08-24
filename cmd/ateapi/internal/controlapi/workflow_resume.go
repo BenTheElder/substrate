@@ -386,11 +386,11 @@ func (w *ActorWorkflow) validateAssignedWorker(ctx context.Context, actorRef res
 		}
 		return nil, status.Errorf(codes.Aborted, "actor %s crashed", actorRef.String())
 	}
-	// Verify the worker is still assigned to the same Actor.
-	if worker.GetStatus().GetAssignment().GetActorUid() != actor.GetMetadata().GetUid() {
-		slog.ErrorContext(ctx, "crashing actor because its assigned worker no longer belongs to it",
+	// Verify the worker is still hosting this Actor.
+	if workerAssignmentForActor(worker, actor.GetMetadata().GetUid()) == nil {
+		slog.ErrorContext(ctx, "crashing actor because its assigned worker no longer hosts it",
 			slog.String("worker", worker.GetWorkerPod()),
-			slog.Any("assignment", worker.GetStatus().GetAssignment()))
+			slog.Any("assignments", worker.GetStatus().GetAssignments()))
 		if cerr := crashActor(ctx, w.store, actorRef, ateattr.OperationResume, ateattr.ReasonWorkerReassigned); cerr != nil {
 			return nil, fmt.Errorf("while crashing actor: %w", cerr)
 		}
@@ -406,8 +406,9 @@ func (w *ActorWorkflow) validateAssignedWorker(ctx context.Context, actorRef res
 		// worker_selector was updated after the failed attempt), release it back
 		// to the free pool instead of leaving it claimed forever — nothing else
 		// reclaims a healthy worker whose actor moved on to a different pool.
+		// Only this actor's assignment goes; the worker may host others.
 		if _, err := w.store.UpdateWorker(ctx, worker.GetMetadata().GetName(), store.PreconditionFrom(worker), func(toUpdate *ateapipb.Worker) error {
-			toUpdate.Status.Assignment = nil
+			releaseActorFromWorker(toUpdate, actor.GetMetadata().GetUid())
 			return nil
 		}); err != nil {
 			return nil, fmt.Errorf("while releasing stale worker assignment: %w", err)
@@ -464,12 +465,12 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 	// This can happen if ateapi crashed after updating worker with actor assignment,
 	// but has not yet updated the actor.
 	for _, worker := range workers {
-		if worker.GetStatus().GetAssignment() == nil {
+		if workerAssignmentForActor(worker, actor.GetMetadata().GetUid()) == nil {
 			continue
 		}
-		if worker.GetStatus().GetAssignment().GetActorUid() != actor.GetMetadata().GetUid() {
-			continue
-		}
+		// Only Applies, not HasRoom: this worker is already hosting the actor,
+		// so its own resources are counted against the worker's capacity and a
+		// room check would reject a placement that is already in force.
 		if w.scheduler.Applies(worker, constraints) {
 			assignedWorker = worker
 			break
@@ -486,7 +487,7 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 			bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			if _, err := w.store.UpdateWorker(bgCtx, release.GetMetadata().GetName(), store.PreconditionFrom(release), func(toUpdate *ateapipb.Worker) error {
-				toUpdate.Status.Assignment = nil
+				releaseActorFromWorker(toUpdate, actor.GetMetadata().GetUid())
 				return nil
 			}); err != nil {
 				slog.ErrorContext(bgCtx, "Failed to release stale worker assignment",
@@ -515,6 +516,12 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 			Name:     actor.GetMetadata().GetName(),
 		},
 		ActorUid: actor.GetMetadata().GetUid(),
+		// What this placement consumes, recorded on the assignment so the
+		// worker's allocation is the sum of what it hosts. These are the same
+		// limits the scheduler just checked for room. Left unset when the actor
+		// declared none, rather than written as an all-zero message that says
+		// the same thing (matching workerCapacity in the syncer).
+		Resources: admittedResources(constraints),
 	}
 	if ref := actorTemplateObjectRef(actor); ref != nil {
 		assignment.ActorTemplateRef = ref
@@ -529,7 +536,7 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 	// by mutating the store's own copy; the cached one is only read, for the
 	// version this claim is conditioned on.
 	stored, err := w.store.UpdateWorker(ctx, assignedWorker.GetMetadata().GetName(), store.PreconditionFrom(assignedWorker), func(toUpdate *ateapipb.Worker) error {
-		toUpdate.Status.Assignment = assignment
+		bindActorToWorker(toUpdate, assignment)
 		return nil
 	})
 	if err != nil {
@@ -811,4 +818,16 @@ func (w *ActorWorkflow) finalizeRunning(ctx context.Context, actorRef resources.
 		return nil, err
 	}
 	return storedActor, nil
+}
+
+// admittedResources is what an actor's declared limits reserve on the worker it
+// is placed on, or nil when it declared none.
+func admittedResources(constraints scheduling.Constraints) *ateapipb.WorkerCapacity {
+	if constraints.CPUMilli == 0 && constraints.MemoryBytes == 0 {
+		return nil
+	}
+	return &ateapipb.WorkerCapacity{
+		CpuMilli:    constraints.CPUMilli,
+		MemoryBytes: constraints.MemoryBytes,
+	}
 }

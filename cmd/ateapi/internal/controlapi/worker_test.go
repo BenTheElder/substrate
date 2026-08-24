@@ -94,7 +94,7 @@ func assignAPIWorker(t *testing.T, ctx context.Context, persistence store.Interf
 		t.Fatalf("getting worker %s to assign: %v", name, err)
 	}
 	assigned, err := persistence.UpdateWorker(ctx, name, store.PreconditionFrom(observed), func(toUpdate *ateapipb.Worker) error {
-		toUpdate.Status.Assignment = newAPIAssignment(actorUID)
+		toUpdate.Status.Assignments = []*ateapipb.ActorAssignment{newAPIAssignment(actorUID)}
 		return nil
 	})
 	if err != nil {
@@ -223,8 +223,8 @@ func TestCreateWorker_IgnoresRequestStatus(t *testing.T) {
 
 	in := newAPIWorker(apiWorkerName)
 	in.Status = &ateapipb.WorkerStatus{
-		State:      ateapipb.WorkerState_WORKER_STATE_DRAINING,
-		Assignment: newAPIAssignment("actor-uid-1"),
+		State:       ateapipb.WorkerState_WORKER_STATE_DRAINING,
+		Assignments: []*ateapipb.ActorAssignment{newAPIAssignment("actor-uid-1")},
 	}
 
 	got, err := svc.CreateWorker(ctx, &ateapipb.CreateWorkerRequest{Worker: in})
@@ -510,6 +510,23 @@ func TestDeleteWorker_Absent(t *testing.T) {
 	}
 }
 
+// An assigned worker deletes like any other: the delete does not cascade, and
+// an Actor pointing at a Worker that is gone is an expected steady state.
+func TestDeleteWorker_AssignedWorkerDeletesAnyway(t *testing.T) {
+	ctx := context.Background()
+	svc, persistence := newWorkerAPIService(t)
+	seedAPIWorker(t, ctx, persistence, newAPIWorker(apiWorkerName))
+	assignAPIWorker(t, ctx, persistence, apiWorkerName, "actor-uid-1")
+
+	got, err := svc.DeleteWorker(ctx, &ateapipb.DeleteWorkerRequest{Worker: workerRef(apiWorkerName)})
+	if err != nil {
+		t.Fatalf("DeleteWorker() failed: %v", err)
+	}
+	if firstAssignment(got).GetActorUid() != "actor-uid-1" {
+		t.Errorf("deleted worker assignment = %v, want the one it was holding", firstAssignment(got))
+	}
+}
+
 func TestDeleteWorker_Preconditions(t *testing.T) {
 	ctx := context.Background()
 	svc, persistence := newWorkerAPIService(t)
@@ -592,8 +609,8 @@ func TestDrainWorker_KeepsAssignment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DrainWorker() failed: %v", err)
 	}
-	if got.GetStatus().GetAssignment().GetActorUid() != "actor-uid-1" {
-		t.Errorf("assignment = %v, want it left in place", got.GetStatus().GetAssignment())
+	if firstAssignment(got).GetActorUid() != "actor-uid-1" {
+		t.Errorf("assignment = %v, want it left in place", firstAssignment(got))
 	}
 }
 
@@ -636,8 +653,8 @@ func TestValidateWorker(t *testing.T) {
 		name: "status is not validated",
 		mutate: func(w *ateapipb.Worker) {
 			w.Status = &ateapipb.WorkerStatus{
-				State:      ateapipb.WorkerState(99),
-				Assignment: &ateapipb.ActorAssignment{Actor: &ateapipb.ObjectRef{Name: "actor"}},
+				State:       ateapipb.WorkerState(99),
+				Assignments: []*ateapipb.ActorAssignment{{Actor: &ateapipb.ObjectRef{Name: "actor"}}},
 			}
 		},
 	}, {

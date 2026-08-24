@@ -41,41 +41,70 @@ func TestWorkerCapacity(t *testing.T) {
 	tests := []struct {
 		name       string
 		pod        *corev1.Pod
+		maxActors  int32
 		wantCPU    int64
 		wantMemory int64
+		wantActors int32
 	}{
 		{
 			name:       "no ateom container yields zero",
 			pod:        pod(limited("sidecar", "1", "1Gi")),
+			maxActors:  1,
 			wantCPU:    0,
 			wantMemory: 0,
+			wantActors: 1,
 		},
 		{
 			name:       "ateom container limits become capacity",
 			pod:        pod(limited(ateomContainerName, "4", "8Gi")),
+			maxActors:  1,
 			wantCPU:    4000,
 			wantMemory: 8 << 30,
+			wantActors: 1,
 		},
 		{
 			name:       "only the ateom container counts, not the pod total",
 			pod:        pod(limited("sidecar", "16", "64Gi"), limited(ateomContainerName, "2", "2Gi")),
+			maxActors:  1,
 			wantCPU:    2000,
 			wantMemory: 2 << 30,
+			wantActors: 1,
 		},
 		{
 			name:       "unset dimension reports zero",
 			pod:        pod(limited(ateomContainerName, "2", "")),
+			maxActors:  1,
 			wantCPU:    2000,
 			wantMemory: 0,
+			wantActors: 1,
+		},
+		{
+			// The actors dimension comes from the pool, not the pod, so it is the
+			// one that moves without the pod being resized.
+			name:       "the pool's actor ceiling is a capacity dimension",
+			pod:        pod(limited(ateomContainerName, "4", "8Gi")),
+			maxActors:  4094,
+			wantCPU:    4000,
+			wantMemory: 8 << 30,
+			wantActors: 4094,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := workerCapacity(tc.pod)
-			if got.GetCpuMilli() != tc.wantCPU || got.GetMemoryBytes() != tc.wantMemory {
-				t.Fatalf("workerCapacity() = (%d, %d), want (%d, %d)",
-					got.GetCpuMilli(), got.GetMemoryBytes(), tc.wantCPU, tc.wantMemory)
+			got := workerCapacity(tc.pod, tc.maxActors)
+			if got.GetCpuMilli() != tc.wantCPU || got.GetMemoryBytes() != tc.wantMemory || got.GetActors() != tc.wantActors {
+				t.Fatalf("workerCapacity() = (%d, %d, %d), want (%d, %d, %d)",
+					got.GetCpuMilli(), got.GetMemoryBytes(), got.GetActors(),
+					tc.wantCPU, tc.wantMemory, tc.wantActors)
 			}
 		})
 	}
+
+	// No dimension set at all is the one case that reports nothing rather than a
+	// zeroed message, so placement treats it as unknown instead of full.
+	t.Run("no dimension at all reports nothing", func(t *testing.T) {
+		if got := workerCapacity(pod(limited("sidecar", "1", "1Gi")), 0); got != nil {
+			t.Fatalf("workerCapacity() = %v, want nil", got)
+		}
+	})
 }

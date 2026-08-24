@@ -214,7 +214,7 @@ func TestPrintWorkersTo_Table(t *testing.T) {
 			WorkerPod:       "pod-1",
 			SandboxClass:    "gvisor",
 			Status: &ateapipb.WorkerStatus{
-				Assignment: &ateapipb.ActorAssignment{
+				Assignments: []*ateapipb.ActorAssignment{{
 					ActorTemplate: &ateapipb.KubeNamespacedObjectRef{
 						Namespace: "default",
 						Name:      "template-1",
@@ -223,7 +223,7 @@ func TestPrintWorkersTo_Table(t *testing.T) {
 						Atespace: "space-1",
 						Name:     "id-1",
 					},
-				},
+				}},
 			},
 		},
 	}
@@ -233,8 +233,8 @@ func TestPrintWorkersTo_Table(t *testing.T) {
 	}
 	output := buf.String()
 
-	expected := `NAMESPACE   POOL     CLASS    POD     STATUS     ASSIGNED ACTOR
-default     pool-1   gvisor   pod-1   ASSIGNED   default/template-1/space-1/id-1
+	expected := `NAMESPACE   POOL     CLASS    POD     STATUS          ASSIGNED ACTOR
+default     pool-1   gvisor   pod-1   ASSIGNED(1/1)   default/template-1/space-1/id-1
 `
 	if diff := cmp.Diff(expected, output); diff != "" {
 		t.Errorf("output mismatch (-want +got):\n%s", diff)

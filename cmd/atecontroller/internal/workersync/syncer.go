@@ -27,6 +27,7 @@ import (
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
@@ -265,7 +266,7 @@ func (s *WorkerPoolSyncer) createOrUpdateWorker(ctx context.Context, key workerK
 			NodeName:        pod.Spec.NodeName,
 			SandboxClass:    string(pool.Spec.SandboxClass),
 			Labels:          pool.GetLabels(),
-			Capacity:        workerCapacity(pod),
+			Capacity:        workerCapacity(pod, pool.Spec.MaxActors()),
 		}
 		// status is output-only: CreateWorker sets STATE_ACTIVE itself.
 		//
@@ -294,6 +295,13 @@ func (s *WorkerPoolSyncer) createOrUpdateWorker(ctx context.Context, key workerK
 	if !maps.Equal(w.GetLabels(), pool.GetLabels()) {
 		slog.InfoContext(ctx, "Syncer: updating worker (labels changed)", key.logAttrs()...)
 		w.Labels = pool.GetLabels()
+		changed = true
+	}
+	// Capacity moves when the pool's maxActorsPerWorker changes, not only when
+	// the pod is resized, so it is compared like the rest.
+	if capacity := workerCapacity(pod, pool.Spec.MaxActors()); !proto.Equal(w.GetCapacity(), capacity) {
+		slog.InfoContext(ctx, "Syncer: updating worker in store (capacity changed)", key.logAttrs()...)
+		w.Capacity = capacity
 		changed = true
 	}
 	if w.GetIp() != pod.Status.PodIP {
@@ -331,15 +339,22 @@ func isWorkerEligible(pod *corev1.Pod) bool {
 // actor's sandbox; its resource limits bound what an actor placed here can use.
 const ateomContainerName = "ateom"
 
-// workerCapacity returns the worker pod's capacity for hosting an actor — CPU
-// in millicores and memory in bytes — taken from the ateom container's resource
-// limits. A dimension the pod does not limit reports 0, which the scheduler
-// treats as "unknown" (unconstrained); a pod that limits neither reports nil
-// rather than an all-zero message that says the same thing. The actor sandbox
-// runs nested in the ateom container's cgroup, so that container's limits — not
-// the pod total — are the relevant envelope.
-func workerCapacity(pod *corev1.Pod) *ateapipb.WorkerCapacity {
-	var capacity ateapipb.WorkerCapacity
+// workerCapacity returns the worker pod's whole capacity for hosting actors:
+// CPU in millicores and memory in bytes from the ateom container's resource
+// limits, plus how many actors the pool allows on one pod.
+//
+// The compute dimensions are the pod's total, not a share of it. What is left
+// is a question the scheduler answers by subtracting the actors already placed
+// (scheduling.Allocated), so an actor smaller than an equal share still leaves
+// the remainder available to its neighbors — which a fixed per-actor slice
+// would strand.
+//
+// A compute dimension the pod does not limit reports 0, which the scheduler
+// treats as "unknown" (unconstrained). The actor sandbox runs nested in the
+// ateom container's cgroup, so that container's limits — not the pod total —
+// are the relevant envelope.
+func workerCapacity(pod *corev1.Pod, maxActors int32) *ateapipb.WorkerCapacity {
+	capacity := ateapipb.WorkerCapacity{Actors: maxActors}
 	for i := range pod.Spec.Containers {
 		c := &pod.Spec.Containers[i]
 		if c.Name != ateomContainerName {
@@ -353,7 +368,7 @@ func workerCapacity(pod *corev1.Pod) *ateapipb.WorkerCapacity {
 		}
 		break
 	}
-	if capacity.CpuMilli == 0 && capacity.MemoryBytes == 0 {
+	if capacity.CpuMilli == 0 && capacity.MemoryBytes == 0 && capacity.Actors == 0 {
 		return nil
 	}
 	return &capacity

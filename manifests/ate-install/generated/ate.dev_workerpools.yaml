@@ -73,6 +73,32 @@ spec:
                   workers.
                 minLength: 1
                 type: string
+              maxActorsPerWorker:
+                default: 1
+                description: |-
+                  MaxActorsPerWorker is how many Actors may be bound to one worker Pod at
+                  once. It bounds the per-Actor costs that CPU and memory limits do not --
+                  network namespaces, mounts, file descriptors, and how much is lost with
+                  the pod -- and is enforced as one dimension of the worker's capacity,
+                  alongside the compute limits taken from the ateom container. An Actor is
+                  placed only where every dimension still has room.
+
+                  The ceiling is the worker's pod-side address space: actornet gives each
+                  Actor an address out of a /20, so 4094 is what the addressing supports
+                  and the API refuses to promise more than the implementation can number.
+                  The practical limit is far lower and is set by the pod's memory: a
+                  worker cannot host more Actors than it can hold guests for.
+
+                  It defaults to 1, which behaves exactly as single-Actor workers always
+                  have. Raising it is supported on both sandbox classes -- each Actor gets
+                  its own network namespace, sandbox, and atunnel activation -- but has
+                  been exercised end to end at 2, not at hundreds. Treat large values as
+                  unproven rather than unsupported: what is known to hold is the design,
+                  not the constant.
+                format: int32
+                maximum: 4094
+                minimum: 1
+                type: integer
               replicas:
                 description: Replicas is the number of worker pods to run.
                 format: int32
