@@ -101,6 +101,7 @@ const (
 	SnapshotKindKey         = attribute.Key("ate.snapshot.kind")
 	SnapshotScopeKey        = attribute.Key("ate.snapshot.scope")
 	SnapshotPhaseKey        = attribute.Key("ate.snapshot.phase")
+	ActivationPhaseKey      = attribute.Key("ate.activation.phase")
 	ImageCacheOutcomeKey    = attribute.Key("ate.imagecache.outcome")
 	SchedulerOutcomeKey     = attribute.Key("ate.scheduler.outcome")
 	SchedulingConstraintKey = attribute.Key("ate.scheduling.constraint")
@@ -261,6 +262,28 @@ const (
 	// for local); SnapshotKindKey already says which.
 	SnapshotPhasePersist = "persist"
 	SnapshotPhaseTotal   = "total"
+)
+
+// Values for ActivationPhaseKey: the ateom's breakdown of bringing one actor up,
+// which is what atelet's SnapshotPhaseAteomRestore contains.
+//
+// Unlike the snapshot phases these are sequential and do partition the total,
+// with one exception worth knowing about: NftWait and NftWork are the two halves
+// of the same step, separated because the whole point of measuring here is to
+// tell queueing apart from work. A worker whose activations are slow because
+// they wait needs a different fix from one whose activations are slow because
+// the work grew, and a single combined number cannot say which.
+const (
+	ActivationPhaseActorNetwork   = "actor_network"
+	ActivationPhaseNftWait        = "nft_wait"
+	ActivationPhaseNftWork        = "nft_work"
+	ActivationPhaseBundleRootfs   = "bundle_rootfs"
+	ActivationPhaseSandboxCreate  = "sandbox_create"
+	ActivationPhaseSandboxRestore = "sandbox_restore"
+	ActivationPhaseReadyz         = "readyz"
+	ActivationPhaseIngress        = "ingress"
+	ActivationPhaseActorLockWait  = "actor_lock_wait"
+	ActivationPhaseTotal          = "total"
 )
 
 // FailureReason classifies err onto the bounded ateerrors taxonomy, reading the

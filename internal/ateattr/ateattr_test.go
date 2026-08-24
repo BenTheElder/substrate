@@ -165,6 +165,7 @@ func TestKeySpellings(t *testing.T) {
 		{SnapshotKindKey, "ate.snapshot.kind"},
 		{SnapshotScopeKey, "ate.snapshot.scope"},
 		{SnapshotPhaseKey, "ate.snapshot.phase"},
+		{ActivationPhaseKey, "ate.activation.phase"},
 		{ImageCacheOutcomeKey, "ate.imagecache.outcome"},
 		{SchedulerOutcomeKey, "ate.scheduler.outcome"},
 		{ErrorTypeKey, "error.type"},
@@ -412,6 +413,17 @@ func TestMetricLabelValues(t *testing.T) {
 		{SnapshotPhaseAteomCheckpoint, "ateom_checkpoint"},
 		{SnapshotPhasePersist, "persist"},
 		{SnapshotPhaseTotal, "total"},
+
+		{ActivationPhaseActorNetwork, "actor_network"},
+		{ActivationPhaseNftWait, "nft_wait"},
+		{ActivationPhaseNftWork, "nft_work"},
+		{ActivationPhaseBundleRootfs, "bundle_rootfs"},
+		{ActivationPhaseSandboxCreate, "sandbox_create"},
+		{ActivationPhaseSandboxRestore, "sandbox_restore"},
+		{ActivationPhaseReadyz, "readyz"},
+		{ActivationPhaseIngress, "ingress"},
+		{ActivationPhaseActorLockWait, "actor_lock_wait"},
+		{ActivationPhaseTotal, "total"},
 
 		{SandboxClassUnknown, "unknown"},
 	}

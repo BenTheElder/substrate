@@ -34,7 +34,10 @@ import (
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/ch"
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/kata"
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/third_party/kata/agentpb"
+	"github.com/agent-substrate/substrate/internal/activation"
+	"github.com/agent-substrate/substrate/internal/ateattr"
 	"github.com/agent-substrate/substrate/internal/ateompath"
+	"github.com/agent-substrate/substrate/internal/ateomstats"
 	"github.com/agent-substrate/substrate/internal/imagecache"
 	"github.com/agent-substrate/substrate/internal/ocispec"
 	"github.com/agent-substrate/substrate/internal/proto/ateompb"
@@ -274,11 +277,17 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	}
 	s.inFlight.Add(1)
 	defer s.inFlight.Done()
+
+	act := activation.New(ateattr.OperationCreate, ateomstats.ActorAttributionFromRequest(req))
+	defer func() { act.Finish(ctx, s.instruments, retErr) }()
+
 	// Per actor, not per process: another actor booting on this worker is the
 	// point of hosting several, and shares nothing with this boot.
+	lockWait := time.Now()
 	if !s.actorLocks.Lock(ctx, req.GetActorUid()) {
 		return nil, status.Error(codes.Canceled, "cancelled while waiting for the actor lock")
 	}
+	act.Since(ateattr.ActivationPhaseActorLockWait, lockWait)
 	defer s.actorLocks.Unlock(req.GetActorUid())
 
 	// Register the boot so a SIGTERM arriving mid-cold-boot cancels it rather than
@@ -314,7 +323,7 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	// reaches readyz is one whose usage is worth reporting rather than the one
 	// case that reports nothing. The defer unhosts it if the boot fails
 	// outright. Matches ateom-gvisor's RunWorkload.
-	hosted, err := s.hostActor(ctx, attribution, req.GetEgressGateway() != nil)
+	hosted, err := s.hostActor(ctx, act, attribution, req.GetEgressGateway() != nil)
 	if err != nil {
 		return nil, err
 	}

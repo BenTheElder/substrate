@@ -21,8 +21,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"time"
 
+	"github.com/agent-substrate/substrate/internal/activation"
 	"github.com/agent-substrate/substrate/internal/actornet"
+	"github.com/agent-substrate/substrate/internal/ateattr"
 	"github.com/agent-substrate/substrate/internal/resources"
 )
 
@@ -85,7 +88,10 @@ const actorHTTPPort = 80
 // hostActor registers an actor as hosted and gives it a network. The slot it
 // allocates fixes the actor's veth name, tap name, and pod-side address for as
 // long as it is here, and is reusable once it leaves.
-func (s *AteomService) hostActor(ctx context.Context, attribution resources.ActorAttribution, tunneledEgress bool) (*hostedActor, error) {
+//
+// act may be nil; it collects the phase timings when there is an activation to
+// attribute them to.
+func (s *AteomService) hostActor(ctx context.Context, act *activation.Activation, attribution resources.ActorAttribution, tunneledEgress bool) (*hostedActor, error) {
 	uid := attribution.UID
 	if uid == "" {
 		return nil, fmt.Errorf("actor UID is required")
@@ -109,21 +115,28 @@ func (s *AteomService) hostActor(ctx context.Context, attribution resources.Acto
 	// during setup can still attribute what it finds.
 	hosted := &hostedActor{attribution: attribution, slot: slot}
 	s.actors[uid] = hosted
+	occupancy := len(s.actors)
 	s.actorsMu.Unlock()
+	act.SetHosted(occupancy)
 
-	network, err := actornet.SetupActorNetwork(ctx, actornet.ActorNetworkConfig{
-		ActorUID: uid,
-		Slot:     slot,
-		// Fixed, unlike gVisor's kernel-random veth MAC: a CH snapshot freezes
-		// the guest kernel's ARP entry for the gateway, so a new veth pair with
-		// a random MAC would blackhole guest egress until that entry expired.
-		HostVethHWAddr: hostVethHWAddr,
-		// The interior namespace is created fresh per activation, but a previous
-		// activation of this actor can have left the kata tap behind in it.
-		SweepInteriorLinks: true,
-		// Only this actor's egress is redirected into atunnel, and only when it
-		// asked for it: the rule is keyed on its pod-side address.
-		TunneledEgress: tunneledEgress,
+	var network *actornet.ActorNetwork
+	err = act.Step(ateattr.ActivationPhaseActorNetwork, func() (err error) {
+		network, err = actornet.SetupActorNetwork(ctx, actornet.ActorNetworkConfig{
+			ActorUID: uid,
+			Slot:     slot,
+			// Fixed, unlike gVisor's kernel-random veth MAC: a CH snapshot freezes
+			// the guest kernel's ARP entry for the gateway, so a new veth pair with
+			// a random MAC would blackhole guest egress until that entry expired.
+			HostVethHWAddr: hostVethHWAddr,
+			// The interior namespace is created fresh per activation, but a
+			// previous activation of this actor can have left the kata tap behind
+			// in it.
+			SweepInteriorLinks: true,
+			// Only this actor's egress is redirected into atunnel, and only when
+			// it asked for it: the rule is keyed on its pod-side address.
+			TunneledEgress: tunneledEgress,
+		})
+		return err
 	})
 	if err != nil {
 		// Drop the reservation; the actor is not here after all.
@@ -139,7 +152,7 @@ func (s *AteomService) hostActor(ctx context.Context, attribution resources.Acto
 
 	// The rules describe the whole set, so they are reapplied whenever it
 	// changes rather than edited for one actor.
-	if err := s.applyNetworkRules(); err != nil {
+	if err := s.applyNetworkRules(act); err != nil {
 		if cleanupErr := s.unhostActor(ctx, uid); cleanupErr != nil {
 			slog.WarnContext(ctx, "Failed to clean up actor after rule application failed",
 				slog.String("actorUID", uid), slog.Any("err", cleanupErr))
@@ -173,7 +186,7 @@ func (s *AteomService) unhostActor(ctx context.Context, actorUID string) error {
 	// Reapply even when teardown failed: the actor is out of the set either way,
 	// and leaving its rules in place would send the next actor to take the slot
 	// down a path built for its predecessor.
-	if ruleErr := s.applyNetworkRules(); ruleErr != nil && err == nil {
+	if ruleErr := s.applyNetworkRules(nil); ruleErr != nil && err == nil {
 		err = ruleErr
 	}
 	return err
@@ -262,7 +275,10 @@ func (s *AteomService) freeSlotLocked() (int, error) {
 
 // applyNetworkRules rebuilds the worker's nftables ruleset from the actors it is
 // currently hosting.
-func (s *AteomService) applyNetworkRules() error {
+// The wait for rulesMu is timed separately from the work done under it, for the
+// reason given on the gVisor runtime's copy: queueing and slowness want opposite
+// fixes, and one combined number cannot tell them apart.
+func (s *AteomService) applyNetworkRules(act *activation.Activation) error {
 	hosted := s.hostedActors()
 	networks := make([]*actornet.ActorNetwork, 0, len(hosted))
 	for _, h := range hosted {
@@ -273,10 +289,15 @@ func (s *AteomService) applyNetworkRules() error {
 	// The ruleset is the one thing an activation shares with the others, so it
 	// gets its own short lock rather than relying on activations being
 	// serialized -- they no longer are.
+	wait := time.Now()
 	s.rulesMu.Lock()
 	defer s.rulesMu.Unlock()
-	if err := actornet.ApplyActorNetworkRules(networks, s.atunnelEgressPort); err != nil {
-		return fmt.Errorf("while applying actor network rules: %w", err)
-	}
-	return nil
+	act.Since(ateattr.ActivationPhaseNftWait, wait)
+
+	return act.Step(ateattr.ActivationPhaseNftWork, func() error {
+		if err := actornet.ApplyActorNetworkRules(networks, s.atunnelEgressPort); err != nil {
+			return fmt.Errorf("while applying actor network rules: %w", err)
+		}
+		return nil
+	})
 }
