@@ -1,0 +1,110 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The micro-VM counterpart of tiny.yaml.tmpl: the same density measurement
+# against the other sandbox runtime, so the two are comparable on one axis.
+#
+# Deliberately a lower target. A micro-VM actor is a real guest, and the KVM
+# node pools are c3-standard-4 (4 vCPU, 16GB) rather than the n2-highmem-32 the
+# gVisor fixture packs. The question here is not how many fit -- it is whether
+# the per-activation cost grows the same way, which needs far fewer actors to
+# answer.
+#
+# No nodeSelector: atecontroller stamps ate.dev/sandboxClass=microvm on the
+# worker pods of a micro-VM pool and the KVM nodes carry the matching label, so
+# placement is already constrained to a node that can run a guest.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ate-scale-tiny-microvm
+
+---
+
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: tiny-microvm
+  namespace: ate-scale-tiny-microvm
+  labels:
+    workload: tiny-microvm
+spec:
+  # ONE worker, for the same reason as the gVisor fixture: density is per
+  # worker, and a second replica would only split the population.
+  replicas: 1
+  sandboxClass: microvm
+  sandboxConfigName: microvm
+  ateomImage: ko://github.com/agent-substrate/substrate/cmd/ateom-microvm
+
+  maxActorsPerWorker: 4094
+
+  template:
+    # Capacity and placement are decoupled the same way tiny.yaml.tmpl explains:
+    # workerCapacity reads the LIMITS, the kube-scheduler places by the REQUESTS,
+    # and limits are never checked against the node.
+    #
+    # The memory limit is set from MEASUREMENT, and it is the one number here
+    # that has to be honest. An idle micro-VM actor costs ~180MB of real RSS --
+    # 6x a gVisor one, and well over the 256Mi it declares once the guest is
+    # resident. The first attempt advertised 30Gi on a 16GB node and the kubelet
+    # evicted the worker at 70 actors, with the pod holding 12.5GB. 10Gi keeps
+    # the ceiling inside the pod, where it is a bounded failure, instead of at
+    # the node, where it takes the worker out mid-run.
+    resources:
+      limits:
+        cpu: "30"
+        memory: 10Gi
+      requests:
+        cpu: 500m
+        memory: 2Gi
+
+---
+
+apiVersion: ate.dev/v1alpha1
+kind: ActorTemplate
+metadata:
+  name: tiny-microvm
+  namespace: ate-scale-tiny-microvm
+spec:
+  sandboxClass: microvm
+  containers:
+  - name: tiny
+    image: ko://github.com/agent-substrate/substrate/demos/tiny
+    command:
+    - /ko-app/tiny
+    readyz:
+      httpGet:
+        path: /readyz
+        port: 80
+      # A cold guest boot is not a gVisor sandbox start. The gVisor fixture
+      # leaves this at the ateom's default; here the first boot has a kernel to
+      # get through.
+      timeoutSeconds: 120
+
+  # CPU matches the gVisor fixture at 500m so activation latency is comparable.
+  # Memory does not and cannot: 56Mi is a plausible process, not a plausible
+  # guest, and the limit here sizes the VM's RAM.
+  resources:
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+  workerSelector:
+    matchLabels:
+      workload: tiny-microvm
+
+  # No volumes, matching the gVisor fixture: this measures the floor.
+  snapshotsConfig:
+    onPause: Full
+    location: gs://${BUCKET_NAME}/ate-scale-tiny-microvm/
