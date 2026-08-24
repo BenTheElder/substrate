@@ -23,6 +23,7 @@ import (
 	"os"
 
 	"github.com/vishvananda/netlink"
+	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
 
 	"github.com/agent-substrate/substrate/internal/ateomnet"
@@ -50,16 +51,20 @@ var (
 	hostVethHWAddr = ateomnet.MustParseMAC(hostVethMAC)
 )
 
-// setupRestoreTap recreates, in the interior netns, the tap + TC-mirror wiring
+// setupRestoreTap recreates, in the actor's own netns, the tap + TC-mirror wiring
 // kata's tcfilter network model builds at boot: a tap device cross-connected to
 // eth0 (the actor veth peer) with mirred-redirect ingress filters in both
 // directions. Returns the open tap FDs (one per queue pair) for
 // cloud-hypervisor to adopt via vm.restore net_fds (the snapshot's virtio-net
-// device is fd-backed, so CH requires fresh FDs on restore). Call after
-// setupActorNetwork.
-func (s *AteomService) setupRestoreTap(ctx context.Context, name string, queuePairs int) ([]*os.File, error) {
+// device is fd-backed, so CH requires fresh FDs on restore). Call after the
+// actor's network exists.
+//
+// The namespace is the actor's rather than the pod's, which is also why the tap
+// name need not be unique across the worker: two actors' "tap0_kata" are in
+// different namespaces and cannot collide.
+func setupRestoreTap(ctx context.Context, actorNetNS netns.NsHandle, name string, queuePairs int) ([]*os.File, error) {
 	var fds []*os.File
-	err := ateomnet.NetNSDo(ctx, s.interiorNetNS, func(ctx context.Context) error {
+	err := ateomnet.NetNSDo(ctx, actorNetNS, func(ctx context.Context) error {
 		eth0, err := netlink.LinkByName(ateomnet.ActorVethName)
 		if err != nil {
 			return fmt.Errorf("acquiring actor veth in interior netns: %w", err)
@@ -121,12 +126,12 @@ func (s *AteomService) setupRestoreTap(ctx context.Context, name string, queuePa
 	return fds, nil
 }
 
-// actorVethMTU reads the MTU of the actor veth (eth0 in the interior netns) so
+// actorVethMTU reads the MTU of the actor veth (eth0 in the actor's netns) so
 // ateom can configure the guest eth0 with a matching MTU via the agent
 // (UpdateInterface). Defaults to 1500 if the link can't be read.
-func (s *AteomService) actorVethMTU(ctx context.Context) int {
+func actorVethMTU(ctx context.Context, actorNetNS netns.NsHandle) int {
 	mtu := 1500
-	_ = ateomnet.NetNSDo(ctx, s.interiorNetNS, func(ctx context.Context) error {
+	_ = ateomnet.NetNSDo(ctx, actorNetNS, func(ctx context.Context) error {
 		if l, err := netlink.LinkByName(ateomnet.ActorVethName); err == nil {
 			mtu = l.Attrs().MTU
 		} else {

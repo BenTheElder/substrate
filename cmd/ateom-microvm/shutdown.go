@@ -59,46 +59,46 @@ const (
 )
 
 // gracefulShutdown propagates SIGTERM into every running actor's guest and waits
-// for the workloads to exit, so the caller can exit cleanly. It holds lock only
-// long enough to snapshot the running actors, and releases it before any blocking
-// signaling or waiting, so it never holds it for the whole grace period and a
-// suspend can still land mid-drain.
+// for the workloads to exit, so the caller can exit cleanly. It waits for the
+// lifecycle RPCs in flight, then snapshots the hosted actors, and does the
+// blocking signaling with nothing held, so it never blocks for the whole grace
+// period and a suspend can still land mid-drain.
 func (s *AteomService) gracefulShutdown(ctx context.Context) {
 	// Set this first, before contending for lock, so an RPC that arrives while we
 	// are still waiting is turned away rather than queued behind us.
 	s.shuttingDown.Store(true)
 
-	// Cancel an in-flight run or restore. Waiting for a cold boot to finish only to
-	// SIGTERM the guest it just produced is strictly worse than aborting it.
-	s.cancelActiveRestoreOrRunRPC()
+	// Cancel every in-flight run or restore. Waiting for a cold boot to finish
+	// only to SIGTERM the guest it just produced is strictly worse than aborting
+	// it, and a worker hosting several actors can be part-way through several.
+	s.cancelActiveRestoreOrRunRPCs()
 
-	// Wait for whatever still holds lock — a suspend, a resume — to finish, but
-	// only for the grace period. In the worst case that RPC burns nearly all of it
-	// and then fails, and the stop below spends another grace period on top; that
-	// is bounded well inside the pod's own termination grace period, and is the
-	// price of not truncating an RPC that may be saving the actor's state.
-	lockCtx, lockCancel := context.WithTimeout(ctx, workloadGracePeriod)
-	defer lockCancel()
-	if !s.lock.LockContext(lockCtx) {
-		slog.ErrorContext(ctx, "Failed to acquire lock during graceful shutdown; another RPC is still running")
-		return
+	// Wait for whatever is still running — a suspend, a resume — to finish, but
+	// only for the grace period. In the worst case those RPCs burn nearly all of
+	// it and then fail, and the stop below spends another grace period on top;
+	// that is bounded well inside the pod's own termination grace period, and is
+	// the price of not truncating an RPC that may be saving an actor's state.
+	//
+	// A count of in-flight RPCs, not a lock: activations do not serialize, so
+	// holding one actor's lock says nothing about the others.
+	drainCtx, drainCancel := context.WithTimeout(ctx, workloadGracePeriod)
+	defer drainCancel()
+	if !s.waitForInFlight(drainCtx) {
+		slog.ErrorContext(ctx, "Timed out waiting for in-flight RPCs during graceful shutdown; draining anyway")
 	}
-	// Snapshot by value rather than ranging over s.running directly: we drop the
-	// lock immediately below, and a suspend landing mid-drain deletes from the live
-	// map and writes through the *runningActor it finds there (teardownActor closes
-	// guestAgent and nils the field). Copying the map alone would not help — its
-	// values are pointers into that same mutable state.
-	targets := make([]drainTarget, 0, len(s.running))
-	for id, ra := range s.running {
-		if ra == nil {
+
+	// Snapshot by value: a suspend landing mid-drain writes through the
+	// *runningActor it finds (teardownActor closes guestAgent and nils the
+	// field), so copying the pointers alone would not help.
+	hosted := s.hostedActors()
+	targets := make([]drainTarget, 0, len(hosted))
+	for _, h := range hosted {
+		vm := s.vmFor(h.attribution.UID)
+		if vm == nil {
 			continue
 		}
-		targets = append(targets, drainTarget{id: id, agent: ra.guestAgent, workloadIDs: ra.workloadIDs})
+		targets = append(targets, drainTarget{id: h.attribution.UID, agent: vm.guestAgent, workloadIDs: vm.workloadIDs})
 	}
-
-	// Release lock so the service can answer new RPCs — notably a suspend arriving
-	// mid-drain — while the stop below waits out the grace period.
-	s.lock.Unlock()
 
 	if len(targets) == 0 {
 		slog.InfoContext(ctx, "No active actor sessions at shutdown; exiting cleanly")
@@ -112,10 +112,10 @@ func (s *AteomService) gracefulShutdown(ctx context.Context) {
 }
 
 // drainTarget is what gracefulShutdown needs from one runningActor, copied out
-// under lock so the drain below never dereferences the shared struct. workloadIDs
-// is set once before the actor is published to s.running and never mutated, so
-// sharing the backing array is safe; guestAgent is the field a concurrent
-// teardownActor writes, and is the reason this snapshot exists.
+// so the drain below never dereferences the shared struct. workloadIDs is set
+// once before the actor's VM is published and never mutated, so sharing the
+// backing array is safe; guestAgent is the field a concurrent teardownActor
+// writes, and is the reason this snapshot exists.
 //
 // The client the snapshot holds can still be closed under us by that teardown,
 // which is not a problem here: every call on a closed AgentClient fails fast with

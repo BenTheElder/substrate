@@ -101,11 +101,15 @@ type AteomClient interface {
 	// "booting" distinguishable from "not here" at all, and it means a workload
 	// that dies during boot is attributable rather than anonymous.
 	GetWorkloadStats(ctx context.Context, in *GetWorkloadStatsRequest, opts ...grpc.CallOption) (*GetWorkloadStatsResponse, error)
-	// GetActiveWorkloadStats samples whatever this ateom is currently
+	// GetActiveWorkloadStats samples everything this ateom is currently
 	// executing, without asserting an identity. It is the discovery read for a
 	// scraper that enumerates ateoms and holds no worker-to-actor mapping;
 	// GetWorkloadStats above is the verified read for a caller that must be
 	// answered about a specific actor.
+	//
+	// An ateom may be executing several actors, so the answer is a sample per
+	// actor rather than one sample. A caller that took the first and stopped
+	// would silently under-report a worker hosting more than one.
 	//
 	// Every state a blind caller can find is a normal answer here, never an
 	// error: the response is either a sample or the NoSampleReason there is
@@ -254,11 +258,15 @@ type AteomServer interface {
 	// "booting" distinguishable from "not here" at all, and it means a workload
 	// that dies during boot is attributable rather than anonymous.
 	GetWorkloadStats(context.Context, *GetWorkloadStatsRequest) (*GetWorkloadStatsResponse, error)
-	// GetActiveWorkloadStats samples whatever this ateom is currently
+	// GetActiveWorkloadStats samples everything this ateom is currently
 	// executing, without asserting an identity. It is the discovery read for a
 	// scraper that enumerates ateoms and holds no worker-to-actor mapping;
 	// GetWorkloadStats above is the verified read for a caller that must be
 	// answered about a specific actor.
+	//
+	// An ateom may be executing several actors, so the answer is a sample per
+	// actor rather than one sample. A caller that took the first and stopped
+	// would silently under-report a worker hosting more than one.
 	//
 	// Every state a blind caller can find is a normal answer here, never an
 	// error: the response is either a sample or the NoSampleReason there is
