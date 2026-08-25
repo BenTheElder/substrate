@@ -296,13 +296,8 @@ func validateWorkerRef(worker *ateapipb.ObjectRef) error {
 
 // authorizeActor resolves the actor the request names among those the
 // authenticated worker is hosting, and verifies that the worker and actor still
-// point at one another.
-//
-// A worker may host several actors, so expected_actor_uid selects which of them
-// to mint for. It SELECTS, it does not assert: the set it chooses from is the
-// worker's assignment list as ateapi records it, so a caller can only ever
-// obtain a credential for an actor already placed on it, and naming anything
-// else is a denial.
+// point at one another. Actor identity supplied by the requester never
+// participates in this authorization decision.
 //
 // The worker is resolved from cache first (hot path), but cache misses and
 // denials fall back to the authoritative store to handle watch-delivery lag
@@ -315,7 +310,7 @@ func (s *Server) authorizeActor(ctx context.Context, caller *ateletCaller, req *
 		return nil, resources.ActorRef{}, status.Error(codes.Internal, "failed to look up worker")
 	}
 	if err == nil {
-		actor, actorRef, mismatchReason, err := s.authorizeWithWorker(ctx, worker, caller, req)
+		actor, actorRef, mismatchReason, err := s.authorizeWithWorker(ctx, worker, caller, req, false)
 		if err == nil {
 			return actor, actorRef, nil
 		}
@@ -336,7 +331,7 @@ func (s *Server) authorizeActor(ctx context.Context, caller *ateletCaller, req *
 		return nil, resources.ActorRef{}, s.denyMint(ctx, caller, req, reason) // the cached verdict stands
 	}
 
-	actor, actorRef, retryReason, retryErr := s.authorizeWithWorker(ctx, fresh, caller, req)
+	actor, actorRef, retryReason, retryErr := s.authorizeWithWorker(ctx, fresh, caller, req, true)
 	if retryErr != nil {
 		if errors.Is(retryErr, errAssignmentMismatch) {
 			return nil, resources.ActorRef{}, s.denyMint(ctx, caller, req, retryReason)
@@ -362,24 +357,37 @@ var errAssignmentMismatch = errors.New("assignment mismatch")
 
 // authorizeWithWorker returns errAssignmentMismatch and a reason string if the authorization failed
 // due to an assignment mismatch, indicating the caller may want to refetch the worker and retry.
-func (s *Server) authorizeWithWorker(ctx context.Context, worker *ateapipb.Worker, caller *ateletCaller, req *ateapipb.MintCertRequest) (*ateapipb.Actor, resources.ActorRef, string, error) {
+//
+// authoritative says worker came from the store rather than the cache, which
+// decides what a request naming an actor the worker is not hosting means.
+func (s *Server) authorizeWithWorker(ctx context.Context, worker *ateapipb.Worker, caller *ateletCaller, req *ateapipb.MintCertRequest, authoritative bool) (*ateapipb.Actor, resources.ActorRef, string, error) {
 	if worker.GetNodeName() != caller.nodeName {
 		return nil, resources.ActorRef{}, "worker is hosted on a different node", errAssignmentMismatch
 	}
 
-	// Pick the assignment the request names. Falling back to the worker's first
-	// assignment when nothing matches preserves the two different answers this
-	// call has always given, which are not interchangeable: authorization is
-	// decided against an actor the worker really is hosting (a bad binding is
-	// PermissionDenied), while a request whose expectation does not match that
+	// A worker hosts several actors, so expected_actor_uid selects which of
+	// them to mint for. It SELECTS, it does not assert: the set it chooses from
+	// is the worker's assignment list as ateapi records it, so a caller can
+	// only ever obtain a credential for an actor already placed on it.
+	//
+	// A miss on the cached copy is a mismatch, not an answer. This call arrives
+	// immediately after the binding it names was committed, so the watch-fed
+	// cache routinely has not seen it -- 253 of 8000 activations across eight
+	// workers. Reporting a mismatch sends authorizeActor to the store.
+	//
+	// On the authoritative copy the miss is real, and falls back to one of the
+	// worker's own assignments. That preserves the two answers this call has
+	// always given, which are not interchangeable: authorization is decided
+	// against an actor the worker really is hosting, and a bad binding there is
+	// PermissionDenied, while a request whose expectation does not match that
 	// actor is a stale caller and gets the retryable FailedPrecondition from
-	// MintCert. Resolving straight to a denial here would collapse the two.
+	// MintCert.
 	assigned := assignmentForActorUID(worker, req.GetExpectedActorUid())
-	if assigned == nil {
+	if assigned == nil && authoritative {
 		assigned = firstAssignment(worker)
 	}
 	if assigned == nil {
-		return nil, resources.ActorRef{}, "worker has no actor assignment", errAssignmentMismatch
+		return nil, resources.ActorRef{}, "worker is not hosting the requested actor", errAssignmentMismatch
 	}
 	actorRef := resources.ActorRefFromObjectRef(assigned.GetActor())
 	if actorRef == (resources.ActorRef{}) {

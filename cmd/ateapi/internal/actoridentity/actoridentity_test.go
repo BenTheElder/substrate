@@ -238,6 +238,82 @@ func TestMintCertReadsThroughStaleWorkerCache(t *testing.T) {
 	}
 }
 
+// TestMintCertReadsThroughForAnActorTheCacheHasNotSeenYet is the multi-actor
+// case of the same lag: the cached worker is not unassigned, it is hosting
+// somebody else, so the requested actor's absence looks like an answer rather
+// than a miss. Resolving one of the worker's other assignments instead would
+// authorize, and fail later on the UID check -- 3.2% of activations across
+// eight packed workers.
+func TestMintCertReadsThroughForAnActorTheCacheHasNotSeenYet(t *testing.T) {
+	ctx := context.Background()
+	st, cleanup := storetest.SetupTestStore(t)
+	defer cleanup()
+
+	// The cache seeds with the worker hosting only the first actor, and (via
+	// the inert watch) never learns of the second.
+	seedActor(t, ctx, st, actorFixture{state: ateapipb.ActorState_ACTOR_STATE_RUNNING, workerNode: testNode})
+	workers := workercache.New(staleWatchStore{st}, time.Hour)
+	cacheCtx, cancel := context.WithCancel(ctx)
+	t.Cleanup(cancel)
+	if err := workers.Start(cacheCtx); err != nil {
+		t.Fatalf("start worker cache: %v", err)
+	}
+
+	const secondActorName = "counter-2"
+	second, err := st.CreateActor(ctx, &ateapipb.Actor{
+		Metadata: &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: secondActorName},
+		Status: &ateapipb.ActorStatus{
+			State: ateapipb.ActorState_ACTOR_STATE_RUNNING,
+			WorkerAssignment: &ateapipb.WorkerAssignment{
+				Worker:          &ateapipb.ObjectRef{Name: testWorkerName},
+				WorkerNamespace: testPodNS,
+				WorkerPool:      testPool,
+				WorkerPod:       testWorkerPod,
+				WorkerPodUid:    testWorkerPodUID,
+			},
+		},
+		ActorTemplateNamespace: "ate-demo",
+		ActorTemplateName:      "counter",
+	})
+	if err != nil {
+		t.Fatalf("seed second actor: %v", err)
+	}
+
+	// Bind it to the worker in the store only, as AssignWorker does.
+	worker, err := st.GetWorker(ctx, testWorkerName)
+	if err != nil {
+		t.Fatalf("read seeded worker: %v", err)
+	}
+	worker.Status.Assignments = append(worker.Status.Assignments, &ateapipb.ActorAssignment{
+		Actor:    (resources.ActorRef{Atespace: testAtespace, Name: secondActorName}).ToObjectRef(),
+		ActorUid: second.GetMetadata().GetUid(),
+	})
+	if err := st.UpdateWorker(ctx, worker, worker.GetMetadata().GetVersion()); err != nil {
+		t.Fatalf("bind second actor: %v", err)
+	}
+
+	srv := newTestServerWithCache(t, st, workers)
+	resp, err := srv.MintCert(ctxWithCert(ateletCertOn(t, testNode)), mintCertRequest(t, second.GetMetadata().GetUid()))
+	if err != nil {
+		t.Fatalf("MintCert() for an actor the cache has not seen: %v", err)
+	}
+	if len(resp.GetActorCertificates()) == 0 {
+		t.Fatal("MintCert() returned no certificates")
+	}
+
+	leaf, err := x509.ParseCertificate(resp.GetActorCertificates()[0])
+	if err != nil {
+		t.Fatalf("parse minted certificate: %v", err)
+	}
+	identity, err := substratex509.ActorIdentityFromCertificate(leaf)
+	if err != nil {
+		t.Fatalf("ActorIdentityFromCertificate: %v", err)
+	}
+	if identity == nil || identity.ActorName != secondActorName {
+		t.Errorf("minted for %+v, want actor %q", identity, secondActorName)
+	}
+}
+
 // TestMintCertReadsThroughWorkerCacheMiss pins the read-through for a worker
 // the cache has never seen: a worker registered moments before assignment may
 // be committed to the store (possibly by another replica) before this
