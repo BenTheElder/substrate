@@ -21,12 +21,10 @@ import (
 	"io"
 	"os"
 	"slices"
-	"strings"
-
-	"github.com/agent-substrate/substrate/internal/resources"
 	"text/tabwriter"
 	"time"
 
+	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -101,6 +99,20 @@ func PrintWorkers(workers []*ateapipb.Worker, format string) error {
 	return PrintWorkersTo(os.Stdout, workers, format)
 }
 
+// WorkerOccupancy is how full a Worker is, as a count against its limit.
+//
+// A count rather than the Actors themselves: a Worker hosts a set, listing
+// them all would be unreadable long before a Worker is full, and a listing
+// does not carry them. Capacity reports zero Actors when it is unknown, in
+// which case there is no limit to show against.
+func WorkerOccupancy(worker *ateapipb.Worker) string {
+	hosted := worker.GetStatus().GetAllocated().GetActors()
+	if hosted == 0 {
+		return "FREE"
+	}
+	return fmt.Sprintf("ASSIGNED(%d/%d)", hosted, resources.WorkerMaxActors(worker.GetCapacity()))
+}
+
 func sortWorkers(workers []*ateapipb.Worker) {
 	slices.SortFunc(workers, func(a, b *ateapipb.Worker) int {
 		if c := cmp.Compare(a.GetWorkerNamespace(), b.GetWorkerNamespace()); c != 0 {
@@ -121,35 +133,11 @@ func PrintWorkersTo(out io.Writer, workers []*ateapipb.Worker, format string) er
 		return printProto(out, &ateapipb.ListWorkersResponse{Workers: workers}, format)
 	case "table":
 		w := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
-		fmt.Fprintln(w, "NAMESPACE\tPOOL\tCLASS\tPOD\tSTATUS\tASSIGNED ACTOR")
+		fmt.Fprintln(w, "NAMESPACE\tPOOL\tCLASS\tPOD\tSTATUS")
 		for _, worker := range workers {
-			ns := worker.GetWorkerNamespace()
-			pool := worker.GetWorkerPool()
-			class := worker.GetSandboxClass()
-			pod := worker.GetWorkerPod()
-
-			// A worker can host several actors, so "assigned" is a count
-			// against its limit rather than a yes/no, and every actor is
-			// listed. Capacity reports zero actors when it is unknown, in
-			// which case there is no limit to show.
-			assignments := worker.GetStatus().GetAssignments()
-			status := "FREE"
-			if len(assignments) > 0 {
-				status = fmt.Sprintf("ASSIGNED(%d/%d)", len(assignments),
-					resources.WorkerMaxActors(worker.GetCapacity()))
-			}
-			assignedActor := "<none>"
-			if len(assignments) > 0 {
-				names := make([]string, 0, len(assignments))
-				for _, wass := range assignments {
-					names = append(names, fmt.Sprintf("%s/%s/%s/%s",
-						wass.GetActorTemplate().GetNamespace(), wass.GetActorTemplate().GetName(),
-						wass.GetActor().GetAtespace(), wass.GetActor().GetName()))
-				}
-				assignedActor = strings.Join(names, ",")
-			}
-
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", ns, pool, class, pod, status, assignedActor)
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+				worker.GetWorkerNamespace(), worker.GetWorkerPool(), worker.GetSandboxClass(),
+				worker.GetWorkerPod(), WorkerOccupancy(worker))
 		}
 		return w.Flush()
 	default:
@@ -159,14 +147,13 @@ func PrintWorkersTo(out io.Writer, workers []*ateapipb.Worker, format string) er
 
 // WorkerTopItem represents real-time hardware resource utilization for a worker pod.
 type WorkerTopItem struct {
-	Pod           string `json:"pod" yaml:"pod"`
-	Pool          string `json:"pool" yaml:"pool"`
-	Class         string `json:"class,omitempty" yaml:"class,omitempty"`
-	Status        string `json:"status" yaml:"status"`
-	AssignedActor string `json:"assignedActor" yaml:"assignedActor"`
-	CPU           string `json:"cpu" yaml:"cpu"`
-	Memory        string `json:"memory" yaml:"memory"`
-	Namespace     string `json:"namespace,omitempty" yaml:"namespace,omitempty"`
+	Pod       string `json:"pod" yaml:"pod"`
+	Pool      string `json:"pool" yaml:"pool"`
+	Class     string `json:"class,omitempty" yaml:"class,omitempty"`
+	Status    string `json:"status" yaml:"status"`
+	CPU       string `json:"cpu" yaml:"cpu"`
+	Memory    string `json:"memory" yaml:"memory"`
+	Namespace string `json:"namespace,omitempty" yaml:"namespace,omitempty"`
 }
 
 // WorkerTopList wraps worker top items for JSON/YAML output.
@@ -209,10 +196,10 @@ func PrintWorkerTopTo(out io.Writer, items []*WorkerTopItem, format string) erro
 // PrintWorkerTopTable prints worker top items as a formatted table.
 func PrintWorkerTopTable(out io.Writer, items []*WorkerTopItem) error {
 	w := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(w, "NAME\tPOOL\tCLASS\tSTATUS\tASSIGNED ACTOR\tCPU(CORES)\tMEMORY(bytes)")
+	fmt.Fprintln(w, "NAME\tPOOL\tCLASS\tSTATUS\tCPU(CORES)\tMEMORY(bytes)")
 	for _, item := range items {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			item.Pod, item.Pool, item.Class, item.Status, item.AssignedActor, item.CPU, item.Memory)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			item.Pod, item.Pool, item.Class, item.Status, item.CPU, item.Memory)
 	}
 	return w.Flush()
 }

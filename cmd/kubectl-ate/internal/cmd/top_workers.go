@@ -19,9 +19,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
-
-	"github.com/agent-substrate/substrate/internal/resources"
 
 	"github.com/agent-substrate/substrate/cmd/kubectl-ate/internal/printer"
 	"github.com/agent-substrate/substrate/internal/ateclient"
@@ -76,6 +73,7 @@ func (l *k8sPodMetricsLister) ListPodMetrics(ctx context.Context, namespace stri
 // TopWorkersRunner executes the top workers resource utilization command logic.
 type TopWorkersRunner struct {
 	workerLister     WorkerLister
+	actorLister      ActorLister
 	podMetricsLister PodMetricsLister
 	namespace        string
 	atespace         string
@@ -90,7 +88,7 @@ func (r *TopWorkersRunner) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	filtered, err := filterWorkers(allWorkers, r.namespace, r.atespace, r.selector, r.sandboxClass)
+	filtered, err := filterWorkers(ctx, r.actorLister, allWorkers, r.namespace, r.atespace, r.selector, r.sandboxClass)
 	if err != nil {
 		return err
 	}
@@ -117,36 +115,6 @@ func (r *TopWorkersRunner) Run(ctx context.Context) error {
 		podName := w.GetWorkerPod()
 		pool := w.GetWorkerPool()
 
-		// A worker can host several actors, so the status is how full it is and
-		// every actor is named. Capacity reports zero actors when unknown, in
-		// which case there is no limit to show against.
-		status := "FREE"
-		assignedActor := "<none>"
-		var names []string
-		for _, wass := range w.GetStatus().GetAssignments() {
-			if wass.GetActor() == nil {
-				continue
-			}
-			if tpl := wass.GetActorTemplate(); tpl != nil && tpl.GetNamespace() != "" {
-				names = append(names, fmt.Sprintf("%s/%s/%s/%s",
-					tpl.GetNamespace(),
-					tpl.GetName(),
-					wass.GetActor().GetAtespace(),
-					wass.GetActor().GetName(),
-				))
-				continue
-			}
-			names = append(names, fmt.Sprintf("%s/%s",
-				wass.GetActor().GetAtespace(),
-				wass.GetActor().GetName(),
-			))
-		}
-		if len(names) > 0 {
-			status = fmt.Sprintf("ASSIGNED(%d/%d)", len(names),
-				resources.WorkerMaxActors(w.GetCapacity()))
-			assignedActor = strings.Join(names, ",")
-		}
-
 		cpuStr := "metrics unavailable"
 		memStr := "metrics unavailable"
 
@@ -158,14 +126,13 @@ func (r *TopWorkersRunner) Run(ctx context.Context) error {
 		}
 
 		items = append(items, &printer.WorkerTopItem{
-			Pod:           podName,
-			Pool:          pool,
-			Class:         w.GetSandboxClass(),
-			Status:        status,
-			AssignedActor: assignedActor,
-			CPU:           cpuStr,
-			Memory:        memStr,
-			Namespace:     ns,
+			Pod:       podName,
+			Pool:      pool,
+			Class:     w.GetSandboxClass(),
+			Status:    printer.WorkerOccupancy(w),
+			CPU:       cpuStr,
+			Memory:    memStr,
+			Namespace: ns,
 		})
 	}
 
@@ -223,6 +190,7 @@ func runTopWorkers(cmd *cobra.Command, args []string) error {
 
 	runner := &TopWorkersRunner{
 		workerLister:     apiClient,
+		actorLister:      apiClient,
 		podMetricsLister: metricsLister,
 		namespace:        topWorkerNamespaceFlag,
 		atespace:         topWorkerAtespaceFlag,
