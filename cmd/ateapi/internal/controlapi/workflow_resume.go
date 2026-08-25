@@ -29,7 +29,6 @@ import (
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/proto"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -392,10 +391,13 @@ func (w *ActorWorkflow) validateAssignedWorker(ctx context.Context, actorRef res
 		return nil, status.Errorf(codes.Aborted, "actor %s crashed", actorRef.String())
 	}
 	// Verify the worker is still hosting this Actor.
-	if workerAssignmentForActor(worker, actor.GetMetadata().GetUid()) == nil {
+	hosted, err := workerHostsActor(ctx, w.store, worker.GetMetadata().GetName(), actor.GetMetadata().GetUid())
+	if err != nil {
+		return nil, err
+	}
+	if !hosted {
 		slog.ErrorContext(ctx, "crashing actor because its assigned worker no longer hosts it",
-			slog.String("worker", worker.GetWorkerPod()),
-			slog.Any("assignments", worker.GetStatus().GetAssignments()))
+			slog.String("worker", worker.GetWorkerPod()))
 		if cerr := crashActor(ctx, w.store, actorRef, ateattr.OperationResume, ateattr.ReasonWorkerReassigned); cerr != nil {
 			return nil, fmt.Errorf("while crashing actor: %w", cerr)
 		}
@@ -411,11 +413,8 @@ func (w *ActorWorkflow) validateAssignedWorker(ctx context.Context, actorRef res
 		// worker_selector was updated after the failed attempt), release it back
 		// to the free pool instead of leaving it claimed forever — nothing else
 		// reclaims a healthy worker whose actor moved on to a different pool.
-		// Only this actor's assignment goes; the worker may host others.
-		if _, err := w.store.UpdateWorker(ctx, worker.GetMetadata().GetName(), store.PreconditionFrom(worker), func(toUpdate *ateapipb.Worker) error {
-			releaseActorFromWorker(toUpdate, actor.GetMetadata().GetUid())
-			return nil
-		}); err != nil {
+		if _, err := w.store.ReleaseActorFromWorker(ctx, worker.GetMetadata().GetName(),
+			worker.GetMetadata().GetVersion(), actor.GetMetadata().GetUid()); err != nil {
 			return nil, fmt.Errorf("while releasing stale worker assignment: %w", err)
 		}
 		if cerr := crashActor(ctx, w.store, actorRef, ateattr.OperationResume, ateattr.ReasonCorruptedAssignment); cerr != nil {
@@ -424,6 +423,49 @@ func (w *ActorWorkflow) validateAssignedWorker(ctx context.Context, actorRef res
 		return nil, status.Errorf(codes.Aborted, "actor %s crashed", actorRef)
 	}
 	return worker, nil
+}
+
+// workerHoldingStaleClaim returns the worker already holding an assignment for
+// the actor, or nil if none does.
+//
+// A claim writes the assignment to the worker before it writes the actor, so
+// ateapi dying in between records a placement the actor knows nothing about.
+// Picking a second worker would then leave the first one holding capacity for
+// an actor it will never host, and nothing else reclaims it.
+//
+// A worker whose pool no longer admits the actor (its worker_selector changed
+// after the failed attempt) is released here instead, leaving this resume to
+// schedule afresh. That release has to finish before the actor can be placed
+// anywhere else: an actor is hosted by at most one worker, so a second
+// placement while the first still holds it is refused.
+func (w *ActorWorkflow) workerHoldingStaleClaim(ctx context.Context, actor *ateapipb.Actor, constraints scheduling.Constraints) (*ateapipb.Worker, error) {
+	actorUID := actor.GetMetadata().GetUid()
+	workerName, err := w.store.FindWorkerHostingActor(ctx, actorUID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("while looking for a worker already hosting actor %q: %w", actorUID, err)
+	}
+	worker, err := w.store.GetWorker(ctx, workerName)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, nil // the worker went away with its claim
+		}
+		return nil, fmt.Errorf("while reading worker %q holding a stale claim: %w", workerName, err)
+	}
+
+	// Only Applies, not HasRoom: this worker is already hosting the actor, so
+	// the actor's own resources are counted against the worker's capacity and a
+	// room check would reject a placement that is already in force.
+	if w.scheduler.Applies(worker, constraints) {
+		return worker, nil
+	}
+
+	if _, err := w.store.ReleaseActorFromWorker(ctx, workerName, worker.GetMetadata().GetVersion(), actorUID); err != nil {
+		return nil, fmt.Errorf("while releasing stale claim on worker %q: %w", workerName, err)
+	}
+	return nil, nil
 }
 
 // schedulerRecordable excludes retried version conflicts: the assignment loop
@@ -454,52 +496,17 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 		}
 	}()
 
-	workers, err := w.workerCache.Workers()
-	if err != nil {
-		return nil, nil, fmt.Errorf("while listing workers: %w", err)
-	}
-
 	constraints, err := schedulingConstraints(actor, actorTemplate)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	var assignedWorker *ateapipb.Worker
-
-	// Check if we already have a worker assigned from a previous failed attempt.
-	// This can happen if ateapi crashed after updating worker with actor assignment,
-	// but has not yet updated the actor.
-	for _, worker := range workers {
-		if workerAssignmentForActor(worker, actor.GetMetadata().GetUid()) == nil {
-			continue
-		}
-		// Only Applies, not HasRoom: this worker is already hosting the actor,
-		// so its own resources are counted against the worker's capacity and a
-		// room check would reject a placement that is already in force.
-		if w.scheduler.Applies(worker, constraints) {
-			assignedWorker = worker
-			break
-		}
-		// Workers() returns pointers directly from the cache, so clone before
-		// handing the worker to the goroutine: the mutation runs against the
-		// store's own copy, but the precondition and the log below read this one.
-		releaseWorker := proto.Clone(worker).(*ateapipb.Worker)
-		// The claimed worker is no longer eligible (e.g. the actor's
-		// worker_selector changed after the failed attempt); release it back
-		// to the free pool — nothing else reclaims a healthy worker whose
-		// actor moved on to a different pool. Best effort in the background.
-		go func(release *ateapipb.Worker) {
-			bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			if _, err := w.store.UpdateWorker(bgCtx, release.GetMetadata().GetName(), store.PreconditionFrom(release), func(toUpdate *ateapipb.Worker) error {
-				releaseActorFromWorker(toUpdate, actor.GetMetadata().GetUid())
-				return nil
-			}); err != nil {
-				slog.ErrorContext(bgCtx, "Failed to release stale worker assignment",
-					slog.String("worker", release.GetWorkerNamespace()+"/"+release.GetWorkerPod()),
-					slog.Any("err", err))
-			}
-		}(releaseWorker)
+	// A claim writes the assignment before the actor, so ateapi dying in
+	// between leaves a placement recorded against a worker that the actor
+	// knows nothing about. Ask the store which worker, if any, holds one.
+	assignedWorker, err := w.workerHoldingStaleClaim(ctx, actor, constraints)
+	if err != nil {
+		return nil, nil, err
 	}
 	if assignedWorker == nil {
 		pickedWorker, err := w.scheduler.Schedule(ctx, constraints)
@@ -530,7 +537,11 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 	// And re-check it still fits: the scheduler judged room from the stale copy,
 	// and serializing the claim means a wrong answer no longer shows up as a
 	// failed compare-and-swap. Retrying re-runs scheduling.
-	if workerAssignmentForActor(fresh, actor.GetMetadata().GetUid()) == nil && !w.scheduler.HasRoom(fresh, constraints) {
+	hosted, err := workerHostsActor(ctx, w.store, fresh.GetMetadata().GetName(), actor.GetMetadata().GetUid())
+	if err != nil {
+		return nil, nil, err
+	}
+	if !hosted && !w.scheduler.HasRoom(fresh, constraints) {
 		return nil, nil, errWorkerFilledUp
 	}
 	assignedWorker = fresh
@@ -557,22 +568,17 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 		}
 	}
 
-	// Workers() returns pointers directly from the cache, so the claim is written
-	// by mutating the store's own copy; the cached one is only read, for the
-	// version this claim is conditioned on.
-	stored, err := w.store.UpdateWorker(ctx, assignedWorker.GetMetadata().GetName(), store.PreconditionFrom(assignedWorker), func(toUpdate *ateapipb.Worker) error {
-		bindActorToWorker(toUpdate, assignment)
-		return nil
-	})
-	if err != nil {
+	if err := w.store.BindActorToWorker(ctx, assignedWorker.GetMetadata().GetName(),
+		assignedWorker.GetMetadata().GetVersion(), assignment); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			w.workerCache.Forget(assignedWorker.GetMetadata().GetName())
 			return nil, nil, fmt.Errorf("selected worker disappeared before claim: %w", store.ErrVersionConflict)
 		}
 		return nil, nil, err
 	}
-	assignedWorker = stored
 
+	// The bind does not change the worker's identity, which is all the actor's
+	// side of the assignment records.
 	newAssignment := workerAssignmentFrom(assignedWorker)
 	storedActor, err := w.store.UpdateActor(ctx, actorRef, store.PreconditionFrom(actor), func(toUpdate *ateapipb.Actor) error {
 		toUpdate.Status.State = ateapipb.ActorState_ACTOR_STATE_RESUMING

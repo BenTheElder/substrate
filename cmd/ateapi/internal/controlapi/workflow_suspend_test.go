@@ -442,16 +442,15 @@ func TestEnsureSuspendedFinalized_ReleasesOnlyOwnWorker(t *testing.T) {
 				WorkerPool:      "pool",
 				WorkerPod:       "pod-1",
 				WorkerPodUid:    testWorkerUID("pod-1"),
-				Status: &ateapipb.WorkerStatus{
-					Assignments: []*ateapipb.ActorAssignment{{
-						Actor:    &ateapipb.ObjectRef{Atespace: tt.assignmentAtespace, Name: "shared"},
-						ActorUid: uid,
-					}},
-				},
+				Status:          &ateapipb.WorkerStatus{},
 			}
 			if _, err := persistence.CreateWorker(ctx, worker); err != nil {
 				t.Fatalf("CreateWorker: %v", err)
 			}
+			seedAssignment(t, persistence, testWorkerUID("pod-1"), &ateapipb.ActorAssignment{
+				Actor:    &ateapipb.ObjectRef{Atespace: tt.assignmentAtespace, Name: "shared"},
+				ActorUid: uid,
+			})
 
 			w := &ActorWorkflow{store: persistence}
 			tmpl := mustTemplateFromCRD(&atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{SnapshotsConfig: atev1alpha1.SnapshotsConfig{Location: "gs://bucket/root"}}})
@@ -459,12 +458,9 @@ func TestEnsureSuspendedFinalized_ReleasesOnlyOwnWorker(t *testing.T) {
 				t.Fatalf("ensureSuspendedFinalized: %v", err)
 			}
 
-			stored, err := persistence.GetWorker(ctx, testWorkerUID("pod-1"))
-			if err != nil {
-				t.Fatalf("GetWorker: %v", err)
-			}
-			if released := firstAssignment(stored) == nil; released != tt.wantReleased {
-				t.Errorf("worker released = %t, want %t (assignment: %v)", released, tt.wantReleased, firstAssignment(stored))
+			stored := firstAssignment(t, persistence, testWorkerUID("pod-1"))
+			if released := stored == nil; released != tt.wantReleased {
+				t.Errorf("worker released = %t, want %t (assignment: %v)", released, tt.wantReleased, stored)
 			}
 		})
 	}

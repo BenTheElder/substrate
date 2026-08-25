@@ -202,23 +202,10 @@ func TestMintCertReadsThroughStaleWorkerCache(t *testing.T) {
 			if assignInStore {
 				// Phase 2: commit the assignment to the store only, as
 				// AssignWorker does (possibly on another replica).
-				worker, err := st.GetWorker(ctx, testWorkerName)
-				if err != nil {
-					t.Fatalf("read seeded worker: %v", err)
-				}
-				_, err = st.UpdateWorker(ctx, testWorkerName, store.PreconditionFrom(worker), func(toUpdate *ateapipb.Worker) error {
-					if toUpdate.Status == nil {
-						toUpdate.Status = &ateapipb.WorkerStatus{}
-					}
-					toUpdate.Status.Assignments = []*ateapipb.ActorAssignment{{
-						Actor:    (resources.ActorRef{Atespace: testAtespace, Name: testActorName}).ToObjectRef(),
-						ActorUid: actor.GetMetadata().GetUid(),
-					}}
-					return nil
+				bindActor(t, ctx, st, testWorkerName, &ateapipb.ActorAssignment{
+					Actor:    (resources.ActorRef{Atespace: testAtespace, Name: testActorName}).ToObjectRef(),
+					ActorUid: actor.GetMetadata().GetUid(),
 				})
-				if err != nil {
-					t.Fatalf("assign worker in store: %v", err)
-				}
 			}
 
 			srv := newTestServerWithCache(t, st, workers)
@@ -280,19 +267,10 @@ func TestMintCertReadsThroughForAnActorTheCacheHasNotSeenYet(t *testing.T) {
 	}
 
 	// Bind it to the worker in the store only, as AssignWorker does.
-	worker, err := st.GetWorker(ctx, testWorkerName)
-	if err != nil {
-		t.Fatalf("read seeded worker: %v", err)
-	}
-	if _, err := st.UpdateWorker(ctx, testWorkerName, store.PreconditionFrom(worker), func(toUpdate *ateapipb.Worker) error {
-		toUpdate.Status.Assignments = append(toUpdate.Status.Assignments, &ateapipb.ActorAssignment{
-			Actor:    (resources.ActorRef{Atespace: testAtespace, Name: secondActorName}).ToObjectRef(),
-			ActorUid: second.GetMetadata().GetUid(),
-		})
-		return nil
-	}); err != nil {
-		t.Fatalf("bind second actor: %v", err)
-	}
+	bindActor(t, ctx, st, testWorkerName, &ateapipb.ActorAssignment{
+		Actor:    (resources.ActorRef{Atespace: testAtespace, Name: secondActorName}).ToObjectRef(),
+		ActorUid: second.GetMetadata().GetUid(),
+	})
 
 	srv := newTestServerWithCache(t, st, workers)
 	resp, err := srv.MintCert(ctxWithCert(ateletCertOn(t, testNode)), mintCertRequest(t, second.GetMetadata().GetUid()))
@@ -355,16 +333,14 @@ func TestMintCertReadsThroughWorkerCacheMiss(t *testing.T) {
 					WorkerPod:       testWorkerPod,
 					WorkerPodUid:    testWorkerPodUID,
 					NodeName:        testNode,
-					Status: &ateapipb.WorkerStatus{
-						State: ateapipb.WorkerState_WORKER_STATE_ACTIVE,
-						Assignments: []*ateapipb.ActorAssignment{{
-							Actor:    (resources.ActorRef{Atespace: testAtespace, Name: testActorName}).ToObjectRef(),
-							ActorUid: actor.GetMetadata().GetUid(),
-						}},
-					},
+					Status:          &ateapipb.WorkerStatus{State: ateapipb.WorkerState_WORKER_STATE_ACTIVE},
 				}); err != nil {
 					t.Fatalf("register worker in store: %v", err)
 				}
+				bindActor(t, ctx, st, testWorkerName, &ateapipb.ActorAssignment{
+					Actor:    (resources.ActorRef{Atespace: testAtespace, Name: testActorName}).ToObjectRef(),
+					ActorUid: actor.GetMetadata().GetUid(),
+				})
 			}
 
 			srv := newTestServerWithCache(t, st, workers)
@@ -518,19 +494,29 @@ func seedActor(t *testing.T, ctx context.Context, st store.Interface, f actorFix
 		WorkerPod:       testWorkerPod,
 		WorkerPodUid:    testWorkerPodUID,
 		NodeName:        f.workerNode,
-		Status: &ateapipb.WorkerStatus{
-			State: ateapipb.WorkerState_WORKER_STATE_ACTIVE,
-			Assignments: []*ateapipb.ActorAssignment{{
-				Actor:    assigned.ToObjectRef(),
-				ActorUid: assignedActorUID,
-			}},
-		},
-	}
-	if f.unassigned {
-		worker.Status.Assignments = nil
+		Status:          &ateapipb.WorkerStatus{State: ateapipb.WorkerState_WORKER_STATE_ACTIVE},
 	}
 	if _, err := st.CreateWorker(ctx, worker); err != nil {
 		t.Fatalf("seed worker: %v", err)
+	}
+	if f.unassigned {
+		return
+	}
+	bindActor(t, ctx, st, testWorkerName, &ateapipb.ActorAssignment{
+		Actor:    assigned.ToObjectRef(),
+		ActorUid: assignedActorUID,
+	})
+}
+
+// bindActor places an actor on a worker at whatever version it is currently at.
+func bindActor(t *testing.T, ctx context.Context, st store.Interface, workerName string, assignment *ateapipb.ActorAssignment) {
+	t.Helper()
+	worker, err := st.GetWorker(ctx, workerName)
+	if err != nil {
+		t.Fatalf("read worker to bind to: %v", err)
+	}
+	if err := st.BindActorToWorker(ctx, workerName, worker.GetMetadata().GetVersion(), assignment); err != nil {
+		t.Fatalf("bind actor %s to worker: %v", assignment.GetActorUid(), err)
 	}
 }
 

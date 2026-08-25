@@ -115,8 +115,8 @@ func TestResumeActor_ConcurrentOntoOneWorker(t *testing.T) {
 	if worker == nil {
 		t.Fatalf("worker %s/worker-1 not in the list of %d", ns, len(listed.GetWorkers()))
 	}
-	if got := len(worker.GetStatus().GetAssignments()); got != actors {
-		t.Errorf("worker holds %d assignments, want %d", got, actors)
+	if got := worker.GetStatus().GetAllocated().GetActors(); got != int32(actors) {
+		t.Errorf("worker holds %d actors, want %d", got, actors)
 	}
 }
 

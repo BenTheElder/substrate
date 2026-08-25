@@ -1373,27 +1373,59 @@ func (p *Persistence) BindActorToWorker(ctx context.Context, workerName string, 
 			worker.Status = &ateapipb.WorkerStatus{}
 		}
 
-		// A replacement subtracts before it adds: the Actor was already counted
-		// and its declared size may have changed. The row it replaces may also
-		// be on a different Worker, whose total then has to give it up.
-		previous, previousWorker, err := getAssignmentRow(ctx, tx, actorUID)
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			return nil, err
-		}
-		if previous != nil && previousWorker != workerName {
-			return nil, fmt.Errorf("actor %s is already hosted by worker %s", actorUID, previousWorker)
-		}
-		if previous != nil {
-			worker.Status.Allocated = resources.AddToAllocated(worker.Status.Allocated, previous, -1)
-		}
-		worker.Status.Allocated = resources.AddToAllocated(worker.Status.Allocated, assignment, +1)
-
-		if _, err := tx.Exec(ctx, `
+		// The ordinary bind is a first bind, and the insert landing is itself
+		// the proof that nothing was there to account for. No read: the total
+		// moves by this assignment's worth and the claim is one statement.
+		//
+		// Asking first would be both slower and weaker. A read cannot see a
+		// claim that commits after it, so two claims for one Actor onto two
+		// Workers would each find nothing, each add one, and each write the
+		// row -- leaving the loser counting an Actor it does not host. The
+		// insert cannot miss it: the second one waits on the first and then
+		// finds it, whichever order they arrive in.
+		tag, err := tx.Exec(ctx, `
 			INSERT INTO worker_assignments (actor_uid, worker_name, proto)
 			VALUES ($1, $2, $3)
-			ON CONFLICT (actor_uid) DO UPDATE SET worker_name = $2, proto = $3`,
-			actorUID, workerName, assignmentBytes); err != nil {
+			ON CONFLICT (actor_uid) DO NOTHING`,
+			actorUID, workerName, assignmentBytes)
+		if err != nil {
 			return nil, fmt.Errorf("binding actor %s to worker %s: %w", actorUID, workerName, err)
+		}
+		if tag.RowsAffected() == 1 {
+			worker.Status.Allocated = resources.AddToAllocated(worker.Status.Allocated, assignment, +1)
+			if err := saveWorkerAfterAssignment(ctx, tx, worker); err != nil {
+				return nil, err
+			}
+			return worker, nil
+		}
+
+		// Something is already bound to this Actor. Reading it costs a second
+		// statement, which is why it is here and not above: this is the
+		// retried claim, not the common one.
+		previous, previousWorker, err := getAssignmentRow(ctx, tx, actorUID)
+		if err != nil {
+			return nil, err
+		}
+		if previousWorker != workerName {
+			return nil, fmt.Errorf("actor %s is already hosted by worker %s", actorUID, previousWorker)
+		}
+
+		// A replacement subtracts before it adds: the Actor was already
+		// counted, and its declared size may have changed since.
+		worker.Status.Allocated = resources.AddToAllocated(worker.Status.Allocated, previous, -1)
+		worker.Status.Allocated = resources.AddToAllocated(worker.Status.Allocated, assignment, +1)
+
+		// Guarded on the worker it was read against, so a claim that moves the
+		// Actor elsewhere in between is refused rather than overwritten.
+		rebind, err := tx.Exec(ctx, `
+			UPDATE worker_assignments SET proto = $3
+			WHERE actor_uid = $1 AND worker_name = $2`,
+			actorUID, workerName, assignmentBytes)
+		if err != nil {
+			return nil, fmt.Errorf("rebinding actor %s on worker %s: %w", actorUID, workerName, err)
+		}
+		if rebind.RowsAffected() != 1 {
+			return nil, fmt.Errorf("%w: actor %s left worker %s while it was being rebound", store.ErrVersionConflict, actorUID, workerName)
 		}
 		if err := saveWorkerAfterAssignment(ctx, tx, worker); err != nil {
 			return nil, err

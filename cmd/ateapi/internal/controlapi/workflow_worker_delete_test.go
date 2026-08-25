@@ -229,12 +229,13 @@ func TestDeleteWorkerWorkflow_AssignedToAbsentActorDeletesAnyway(t *testing.T) {
 	seedAPIWorker(t, ctx, persistence, newAPIWorker(apiWorkerName))
 	assignAPIWorker(t, ctx, persistence, apiWorkerName, "actor-uid-1")
 
-	got, err := wf.DeleteWorker(ctx, apiWorkerName, store.DeletePreconditions{})
-	if err != nil {
+	if _, err := wf.DeleteWorker(ctx, apiWorkerName, store.DeletePreconditions{}); err != nil {
 		t.Fatalf("DeleteWorker() failed: %v", err)
 	}
-	if firstAssignment(got).GetActorUid() != "actor-uid-1" {
-		t.Errorf("deleted worker assignment = %v, want the one it was holding", firstAssignment(got))
+	// An assignment is its own record now, so what proves the delete went
+	// through is that nothing is left pointing at the Worker.
+	if got := firstAssignment(t, persistence, apiWorkerName); got != nil {
+		t.Errorf("assignment after delete = %v, want none", got)
 	}
 }
 

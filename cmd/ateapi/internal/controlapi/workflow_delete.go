@@ -130,7 +130,11 @@ func (w *ActorWorkflow) ensureAteletTerminated(ctx context.Context, actorRef res
 		// Ask whether the worker still HOSTS this actor, not whether its one
 		// assignment happens to be this actor: a worker hosting several is the
 		// ordinary case, and the others are none of this delete's business.
-		if workerAssignmentForActor(worker, actor.GetMetadata().GetUid()) == nil {
+		hosted, err := workerHostsActor(ctx, w.store, worker.GetMetadata().GetName(), actor.GetMetadata().GetUid())
+		if err != nil {
+			return err
+		}
+		if !hosted {
 			slog.InfoContext(ctx, "worker is no longer assigned to this actor, skipping atelet terminate request",
 				slog.String("worker", workerName),
 				slog.Any("actor", actorRef))

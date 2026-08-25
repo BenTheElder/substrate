@@ -100,7 +100,7 @@ func RegisterWorkerCount(meter metric.Meter, workers func() ([]*ateapipb.Worker,
 			// about whether it has room for another; that is the scheduler's
 			// eligible-workers metric.
 			state := ateattr.WorkerStateIdle
-			if len(w.GetStatus().GetAssignments()) > 0 {
+			if w.GetStatus().GetAllocated().GetActors() > 0 {
 				state = ateattr.WorkerStateAssigned
 			}
 			tally[key{w.GetWorkerNamespace(), w.GetWorkerPool(), state, w.GetSandboxClass()}]++

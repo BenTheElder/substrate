@@ -237,17 +237,12 @@ func (w *ActorWorkflow) ensurePausedFinalized(ctx context.Context, actorRef reso
 			nodeName = worker.GetNodeName()
 			// Drop just this actor's assignment; any other actors the worker
 			// hosts keep theirs.
-			if workerAssignmentForActor(worker, latestActor.GetMetadata().GetUid()) != nil {
-				_, err := w.store.UpdateWorker(ctx, worker.GetMetadata().GetName(), store.PreconditionFrom(worker), func(toUpdate *ateapipb.Worker) error {
-					releaseActorFromWorker(toUpdate, latestActor.GetMetadata().GetUid())
-					return nil
-				})
-				if err != nil {
-					if errors.Is(err, store.ErrVersionConflict) {
-						return nil, status.Error(codes.Aborted, "concurrent update conflict, please retry")
-					}
-					return nil, err
+			if _, err := w.store.ReleaseActorFromWorker(ctx, worker.GetMetadata().GetName(),
+				worker.GetMetadata().GetVersion(), latestActor.GetMetadata().GetUid()); err != nil {
+				if errors.Is(err, store.ErrVersionConflict) {
+					return nil, status.Error(codes.Aborted, "concurrent update conflict, please retry")
 				}
+				return nil, err
 			}
 		}
 

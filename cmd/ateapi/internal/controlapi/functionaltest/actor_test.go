@@ -1798,20 +1798,10 @@ func TestResumeActor(t *testing.T) {
 		// many actors the pool allows on one worker.
 		Capacity: &ateapipb.WorkerCapacity{Actors: 1},
 		Status: &ateapipb.WorkerStatus{
-			Assignments: []*ateapipb.ActorAssignment{{
-				ActorTemplate: &ateapipb.KubeNamespacedObjectRef{
-					Namespace: ns,
-					Name:      "tmpl1",
-				},
-				Actor: &ateapipb.ObjectRef{
-					Name:     name,
-					Atespace: testAtespace,
-				},
-				ActorUid: getResp.GetMetadata().GetUid(),
-			}},
-			// The running total of what the assignments took. The actor
-			// declares no compute limits, so it registers as one actor and
-			// nothing else -- the same reading capacity gets above.
+			// The running total of what the worker's assignments took, which is
+			// all a listing reports of them. The actor declares no compute
+			// limits, so it registers as one actor and nothing else -- the same
+			// reading capacity gets above.
 			Allocated: &ateapipb.WorkerCapacity{Actors: 1},
 			State:     ateapipb.WorkerState_WORKER_STATE_ACTIVE,
 		},

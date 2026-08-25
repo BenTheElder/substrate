@@ -93,12 +93,12 @@ func assignAPIWorker(t *testing.T, ctx context.Context, persistence store.Interf
 	if err != nil {
 		t.Fatalf("getting worker %s to assign: %v", name, err)
 	}
-	assigned, err := persistence.UpdateWorker(ctx, name, store.PreconditionFrom(observed), func(toUpdate *ateapipb.Worker) error {
-		toUpdate.Status.Assignments = []*ateapipb.ActorAssignment{newAPIAssignment(actorUID)}
-		return nil
-	})
-	if err != nil {
+	if err := persistence.BindActorToWorker(ctx, name, observed.GetMetadata().GetVersion(), newAPIAssignment(actorUID)); err != nil {
 		t.Fatalf("assigning worker %s: %v", name, err)
+	}
+	assigned, err := persistence.GetWorker(ctx, name)
+	if err != nil {
+		t.Fatalf("re-reading worker %s after assigning: %v", name, err)
 	}
 	return assigned
 }
@@ -522,8 +522,9 @@ func TestDeleteWorker_AssignedWorkerDeletesAnyway(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeleteWorker() failed: %v", err)
 	}
-	if firstAssignment(got).GetActorUid() != "actor-uid-1" {
-		t.Errorf("deleted worker assignment = %v, want the one it was holding", firstAssignment(got))
+	// The record carries the total, not the assignments themselves.
+	if n := got.GetStatus().GetAllocated().GetActors(); n != 1 {
+		t.Errorf("deleted worker hosted %d actors, want the 1 it was holding", n)
 	}
 }
 
@@ -609,8 +610,8 @@ func TestDrainWorker_KeepsAssignment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DrainWorker() failed: %v", err)
 	}
-	if firstAssignment(got).GetActorUid() != "actor-uid-1" {
-		t.Errorf("assignment = %v, want it left in place", firstAssignment(got))
+	if n := got.GetStatus().GetAllocated().GetActors(); n != 1 {
+		t.Errorf("drained worker hosts %d actors, want the 1 left in place", n)
 	}
 }
 

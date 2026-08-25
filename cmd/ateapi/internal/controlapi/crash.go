@@ -109,7 +109,7 @@ type crashActorStore interface {
 	GetActor(ctx context.Context, actorRef resources.ActorRef) (*ateapipb.Actor, error)
 	UpdateActor(ctx context.Context, actorRef resources.ActorRef, precondition store.Precondition, mutate func(toUpdate *ateapipb.Actor) error) (*ateapipb.Actor, error)
 	GetWorker(ctx context.Context, name string) (*ateapipb.Worker, error)
-	UpdateWorker(ctx context.Context, name string, precondition store.Precondition, mutate func(toUpdate *ateapipb.Worker) error) (*ateapipb.Worker, error)
+	ReleaseActorFromWorker(ctx context.Context, workerName string, expectedVersion int64, actorUID string) (bool, error)
 }
 
 // releaseWorker clears the worker's assignment if it still points at the given
@@ -137,16 +137,13 @@ func releaseWorker(ctx context.Context, st crashActorStore, actor *ateapipb.Acto
 	// Release only this actor's assignment; the worker may be hosting others,
 	// and they are unaffected by this one crashing. A worker that is no longer
 	// hosting it has already been released.
-	if workerAssignmentForActor(worker, actor.GetMetadata().GetUid()) == nil {
+	released, err := st.ReleaseActorFromWorker(ctx, workerName, worker.GetMetadata().GetVersion(), actor.GetMetadata().GetUid())
+	if err != nil {
+		return sandboxClass, fmt.Errorf("while releasing worker: %w", err)
+	}
+	if !released {
 		slog.WarnContext(ctx, "Worker is not hosting this Actor, skipping release",
 			slog.String("worker", workerName))
-		return sandboxClass, nil
-	}
-	if _, err := st.UpdateWorker(ctx, workerName, store.PreconditionFrom(worker), func(toUpdate *ateapipb.Worker) error {
-		releaseActorFromWorker(toUpdate, actor.GetMetadata().GetUid())
-		return nil
-	}); err != nil {
-		return sandboxClass, fmt.Errorf("while releasing worker: %w", err)
 	}
 	return sandboxClass, nil
 }

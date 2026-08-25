@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/agent-substrate/substrate/internal/ateattr"
+	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -304,12 +305,15 @@ func withState(state ateapipb.WorkerState) func(*ateapipb.Worker) {
 	}
 }
 
+// assigned makes a worker host one actor. The assignments themselves are their
+// own records; what the scheduler sees of them is the total, so that is what a
+// fixture sets.
 func assigned(atespace, name string) func(*ateapipb.Worker) {
 	return func(w *ateapipb.Worker) {
-		w.Status.Assignments = []*ateapipb.ActorAssignment{{
+		w.Status.Allocated = resources.SumAllocated([]*ateapipb.ActorAssignment{{
 			Actor:    &ateapipb.ObjectRef{Atespace: atespace, Name: name},
 			ActorUid: atespace + "/" + name,
-		}}
+		}})
 	}
 }
 
@@ -631,7 +635,7 @@ func TestHasRoom(t *testing.T) {
 		}
 	}
 	hosting := func(assignments ...*ateapipb.ActorAssignment) func(*ateapipb.Worker) {
-		return func(w *ateapipb.Worker) { w.Status.Assignments = assignments }
+		return func(w *ateapipb.Worker) { w.Status.Allocated = resources.SumAllocated(assignments) }
 	}
 	capacityOf := func(cpu, mem int64, actors int32) func(*ateapipb.Worker) {
 		return func(w *ateapipb.Worker) {
@@ -724,7 +728,7 @@ func TestAppliesIgnoresRoom(t *testing.T) {
 	full := worker("pod", "gvisor", "node", nil,
 		func(w *ateapipb.Worker) {
 			w.Capacity = &ateapipb.WorkerCapacity{Actors: 1}
-			w.Status.Assignments = []*ateapipb.ActorAssignment{{ActorUid: "resident"}}
+			w.Status.Allocated = resources.SumAllocated([]*ateapipb.ActorAssignment{{ActorUid: "resident"}})
 		})
 	constraints := Constraints{SandboxClass: "gvisor"}
 

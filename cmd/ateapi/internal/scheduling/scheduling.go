@@ -195,28 +195,11 @@ func (s *scheduler) HasRoom(worker *ateapipb.Worker, constraints Constraints) bo
 }
 
 // Allocated is what a worker's current assignments took from it: the running
-// total the control plane maintains as it binds and releases them.
+// total the store moves as it binds and releases them.
 //
-// Stored rather than summed per call because Schedule reads it for every worker
-// on every placement, which would otherwise cost the fleet's whole actor count
-// each time.
-//
-// An assignment that records no resources contributes only to the actor count:
-// the actor declared no limits, so nothing is known to have been reserved,
-// matching how a zero constraint is unconstrained at placement.
+// A total rather than a sum over the assignments, because Schedule reads this
+// for every worker on every placement, and summing would cost the fleet's whole
+// actor count each time. The assignments are not on the worker to sum anyway.
 func Allocated(worker *ateapipb.Worker) *ateapipb.WorkerCapacity {
-	status := worker.GetStatus()
-	if allocated := status.GetAllocated(); allocated != nil || len(status.GetAssignments()) == 0 {
-		return allocated
-	}
-	// Assignments with no total should not happen, but trusting one would read a
-	// full worker as empty and keep placing actors on it. Summing is slower and
-	// correct.
-	total := &ateapipb.WorkerCapacity{}
-	for _, assignment := range status.GetAssignments() {
-		total.Actors++
-		total.CpuMilli += assignment.GetResources().GetCpuMilli()
-		total.MemoryBytes += assignment.GetResources().GetMemoryBytes()
-	}
-	return total
+	return worker.GetStatus().GetAllocated()
 }
