@@ -530,8 +530,8 @@ type failingReleaseStore struct {
 	err error
 }
 
-func (f failingReleaseStore) ReleaseActorFromWorker(context.Context, string, int64, string) (bool, error) {
-	return false, f.err
+func (f failingReleaseStore) ReleaseActorFromWorker(context.Context, string, int64, string) (*ateapipb.Worker, error) {
+	return nil, f.err
 }
 
 // A transient failure releasing the worker must not move the actor to the

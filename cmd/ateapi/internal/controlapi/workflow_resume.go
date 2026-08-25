@@ -462,9 +462,13 @@ func (w *ActorWorkflow) workerHoldingStaleClaim(ctx context.Context, actor *atea
 		return worker, nil
 	}
 
-	if _, err := w.store.ReleaseActorFromWorker(ctx, workerName, worker.GetMetadata().GetVersion(), actorUID); err != nil {
+	released, err := w.store.ReleaseActorFromWorker(ctx, workerName, worker.GetMetadata().GetVersion(), actorUID)
+	if err != nil {
 		return nil, fmt.Errorf("while releasing stale claim on worker %q: %w", workerName, err)
 	}
+	// Scheduling runs next and reads the cache, which still counts this actor
+	// against the worker until the change event lands.
+	w.workerCache.Observe(released)
 	return nil, nil
 }
 

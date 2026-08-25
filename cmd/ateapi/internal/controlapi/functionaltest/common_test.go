@@ -560,7 +560,11 @@ func waitForWorkerAvailable(t *testing.T, tc *testContext, workerName string) {
 		if err != nil {
 			return false, nil
 		}
-		return worker.GetStatus().GetState() == ateapipb.WorkerState_WORKER_STATE_ACTIVE && len(worker.GetStatus().GetAssignments()) == 0, nil
+		// Hosting nothing is what "available" means, and the allocation total
+		// is how a Worker reports that: the assignments themselves are their
+		// own records and a cached Worker does not carry them.
+		return worker.GetStatus().GetState() == ateapipb.WorkerState_WORKER_STATE_ACTIVE &&
+			worker.GetStatus().GetAllocated().GetActors() == 0, nil
 	})
 	if err != nil {
 		t.Fatalf("failed to wait for worker %s to become available: %v", workerName, err)

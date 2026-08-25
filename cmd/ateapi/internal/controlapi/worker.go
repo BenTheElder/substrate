@@ -158,7 +158,7 @@ func (s *ServiceImpl) BindActorToWorker(ctx context.Context, workerName string, 
 	return s.store.BindActorToWorker(ctx, workerName, expectedVersion, assignment)
 }
 
-func (s *ServiceImpl) ReleaseActorFromWorker(ctx context.Context, workerName string, expectedVersion int64, actorUID string) (bool, error) {
+func (s *ServiceImpl) ReleaseActorFromWorker(ctx context.Context, workerName string, expectedVersion int64, actorUID string) (*ateapipb.Worker, error) {
 	return s.store.ReleaseActorFromWorker(ctx, workerName, expectedVersion, actorUID)
 }
 

@@ -354,9 +354,14 @@ func (w *ActorWorkflow) ensureSuspendedFinalized(ctx context.Context, actorRef r
 
 	// 1. Free the worker (if it hasn't been freed yet)
 	if latestActor.GetStatus().GetWorkerAssignment() != nil {
-		if _, err := releaseWorker(ctx, w.store, latestActor); err != nil {
+		_, released, err := releaseWorker(ctx, w.store, latestActor)
+		if err != nil {
 			return nil, err
 		}
+		// Hand the freed worker straight to the cache: a resume can follow
+		// immediately, and until the change event lands the cache still counts
+		// this actor against the worker.
+		w.workerCache.Observe(released)
 
 		// Re-fetch the actor now that the worker is freed.
 		latestActor, err = w.store.GetActor(ctx, actorRef)

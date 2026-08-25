@@ -120,6 +120,23 @@ func (c *Cache) Forget(name string) {
 	delete(c.workers, name)
 }
 
+// Observe applies a worker a store write just returned, so a caller that has
+// proof of the new state does not have to wait for the watch to deliver it.
+// The counterpart to Forget, and for the same reason: releasing an actor
+// commits before the event arrives, and until it does the cache still reports
+// the worker as full, so scheduling would refuse a worker that is in fact
+// free.
+//
+// Version-guarded like applyEvent, so an older copy cannot overwrite a newer
+// one that the watch has already delivered.
+// Nil-receiver safe: not every caller of the workflows is wired to a cache.
+func (c *Cache) Observe(worker *ateapipb.Worker) {
+	if c == nil || worker.GetMetadata().GetName() == "" {
+		return
+	}
+	c.applyEvent(store.WorkerEvent{Type: store.WorkerEventUpdated, Worker: worker})
+}
+
 func (c *Cache) sync(ctx context.Context) (*store.WorkerWatch, error) {
 	watch, err := c.store.WatchWorkers(ctx)
 	if err != nil {

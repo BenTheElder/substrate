@@ -1434,10 +1434,10 @@ func (p *Persistence) BindActorToWorker(ctx context.Context, workerName string, 
 	})
 }
 
-func (p *Persistence) ReleaseActorFromWorker(ctx context.Context, workerName string, expectedVersion int64, actorUID string) (bool, error) {
-	released := false
+func (p *Persistence) ReleaseActorFromWorker(ctx context.Context, workerName string, expectedVersion int64, actorUID string) (*ateapipb.Worker, error) {
+	var released *ateapipb.Worker
 	err := p.writeAndAppendEventFor(ctx, store.WorkerEventUpdated, func(ctx context.Context, tx pgx.Tx) (*ateapipb.Worker, error) {
-		released = false
+		released = nil
 		worker, err := lockWorkerForAssignment(ctx, tx, workerName, expectedVersion)
 		if err != nil {
 			return nil, err
@@ -1466,11 +1466,11 @@ func (p *Persistence) ReleaseActorFromWorker(ctx context.Context, workerName str
 		if err := saveWorkerAfterAssignment(ctx, tx, worker); err != nil {
 			return nil, err
 		}
-		released = true
+		released = worker
 		return worker, nil
 	})
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	return released, nil
 }

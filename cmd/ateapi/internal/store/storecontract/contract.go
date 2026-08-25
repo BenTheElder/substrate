@@ -1903,8 +1903,14 @@ func runWorkerAssignmentContractTests(t *testing.T, setup func(t *testing.T) sto
 		if err != nil {
 			t.Fatalf("ReleaseActorFromWorker failed: %v", err)
 		}
-		if !released {
-			t.Error("ReleaseActorFromWorker reported nothing to release")
+		if released == nil {
+			t.Fatal("ReleaseActorFromWorker reported nothing to release")
+		}
+		// The returned Worker is what the caller feeds the cache, so it has to
+		// be the post-release state, not the copy that went in.
+		wantReleased := &ateapipb.WorkerCapacity{Actors: 1, CpuMilli: 250, MemoryBytes: 1 << 21}
+		if diff := cmp.Diff(wantReleased, released.GetStatus().GetAllocated(), protocmp.Transform()); diff != "" {
+			t.Errorf("returned worker's allocated mismatch (-want +got):\n%s", diff)
 		}
 
 		// Only the released Actor goes; the Worker's others are untouched.
@@ -1941,7 +1947,7 @@ func runWorkerAssignmentContractTests(t *testing.T, setup func(t *testing.T) sto
 		if err != nil {
 			t.Fatalf("ReleaseActorFromWorker failed: %v", err)
 		}
-		if released {
+		if released != nil {
 			t.Error("ReleaseActorFromWorker reported releasing an assignment that was never there")
 		}
 		after, err := s.GetWorker(ctx, testWorkerName)

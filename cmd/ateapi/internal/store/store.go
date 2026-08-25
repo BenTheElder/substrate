@@ -242,12 +242,18 @@ type Interface interface {
 	BindActorToWorker(ctx context.Context, workerName string, expectedVersion int64, assignment *ateapipb.ActorAssignment) error
 
 	// ReleaseActorFromWorker drops a Worker's assignment for actorUID and
-	// subtracts it from the Worker's allocation, reporting whether one was
-	// there. A false return leaves the Worker untouched and means the release
-	// is already done, which callers treat as success: release runs on paths
-	// that retry, and each must converge rather than fail the second time
-	// through.
-	ReleaseActorFromWorker(ctx context.Context, workerName string, expectedVersion int64, actorUID string) (bool, error)
+	// subtracts it from the Worker's allocation, returning the Worker as it
+	// now stands.
+	//
+	// A nil Worker leaves it untouched and means the release is already done,
+	// which callers treat as success: release runs on paths that retry, and
+	// each must converge rather than fail the second time through.
+	//
+	// The Worker comes back so the caller can hand it to the watch-fed cache,
+	// which otherwise keeps reporting it full until the change event arrives
+	// -- long enough for a resume right after a suspend to be told there is no
+	// room anywhere.
+	ReleaseActorFromWorker(ctx context.Context, workerName string, expectedVersion int64, actorUID string) (*ateapipb.Worker, error)
 
 	// GetWorkerAssignment returns a Worker's assignment for actorUID, or
 	// ErrNotFound when the Worker is not hosting that Actor.
