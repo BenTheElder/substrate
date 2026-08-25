@@ -151,6 +151,29 @@ func (s *ServiceImpl) UpdateWorker(ctx context.Context, name string, preconditio
 	return s.store.UpdateWorker(ctx, name, precondition, mutate)
 }
 
+// The assignment operations are pass-throughs: an assignment is its own record,
+// so binding and releasing are single store calls rather than a read-modify-write
+// of the Worker.
+func (s *ServiceImpl) BindActorToWorker(ctx context.Context, workerName string, expectedVersion int64, assignment *ateapipb.ActorAssignment) error {
+	return s.store.BindActorToWorker(ctx, workerName, expectedVersion, assignment)
+}
+
+func (s *ServiceImpl) ReleaseActorFromWorker(ctx context.Context, workerName string, expectedVersion int64, actorUID string) (bool, error) {
+	return s.store.ReleaseActorFromWorker(ctx, workerName, expectedVersion, actorUID)
+}
+
+func (s *ServiceImpl) GetWorkerAssignment(ctx context.Context, workerName, actorUID string) (*ateapipb.ActorAssignment, error) {
+	return s.store.GetWorkerAssignment(ctx, workerName, actorUID)
+}
+
+func (s *ServiceImpl) ListWorkerAssignments(ctx context.Context, workerName string) ([]*ateapipb.ActorAssignment, error) {
+	return s.store.ListWorkerAssignments(ctx, workerName)
+}
+
+func (s *ServiceImpl) FindWorkerHostingActor(ctx context.Context, actorUID string) (string, error) {
+	return s.store.FindWorkerHostingActor(ctx, actorUID)
+}
+
 func validateUpdateWorkerRequest(req *ateapipb.UpdateWorkerRequest) field.ErrorList {
 	var fldPath *field.Path
 

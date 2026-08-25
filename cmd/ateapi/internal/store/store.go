@@ -212,10 +212,61 @@ type Interface interface {
 	// exhausted, or the mutate's error verbatim otherwise.
 	UpdateWorker(ctx context.Context, name string, precondition Precondition, mutate func(toUpdate *ateapipb.Worker) error) (*ateapipb.Worker, error)
 
-	// Removes a worker by name and returns the deleted resource. Returns
-	// ErrNotFound if missing, or ErrUIDConflict/ErrVersionConflict if pre does
-	// not describe the worker the caller observed.
+	// Removes a worker by name, along with every assignment it holds, and
+	// returns the deleted resource. Returns ErrNotFound if missing, or
+	// ErrUIDConflict/ErrVersionConflict if pre does not describe the worker the
+	// caller observed.
 	DeleteWorker(ctx context.Context, name string, pre DeletePreconditions) (*ateapipb.Worker, error)
+
+	// A Worker hosts a set of Actors, and each assignment is its own record
+	// rather than a field of the Worker. The Worker is then the same size
+	// whether it hosts one Actor or four thousand, which is what keeps a claim,
+	// its change event, and every watcher's copy of it independent of how full
+	// the Worker is. Only status.allocated, the running total, stays on the
+	// Worker, because placement reads it for every candidate.
+	//
+	// BindActorToWorker and ReleaseActorFromWorker move that total with the
+	// assignment, in one transaction, so the two cannot disagree.
+
+	// BindActorToWorker records an Actor as hosted by a Worker and adds it to
+	// the Worker's allocation, replacing any assignment the Worker already has
+	// for the same Actor UID.
+	//
+	// Replacing rather than adding is what makes a retried claim safe: the
+	// resume workflow can reach this more than once for one Actor, and adding
+	// would book the Actor against its Worker's capacity twice.
+	//
+	// Returns ErrNotFound if the worker is gone, or ErrVersionConflict if it is
+	// no longer at expectedVersion -- which is how a claim loses to a
+	// concurrent one on another replica.
+	BindActorToWorker(ctx context.Context, workerName string, expectedVersion int64, assignment *ateapipb.ActorAssignment) error
+
+	// ReleaseActorFromWorker drops a Worker's assignment for actorUID and
+	// subtracts it from the Worker's allocation, reporting whether one was
+	// there. A false return leaves the Worker untouched and means the release
+	// is already done, which callers treat as success: release runs on paths
+	// that retry, and each must converge rather than fail the second time
+	// through.
+	ReleaseActorFromWorker(ctx context.Context, workerName string, expectedVersion int64, actorUID string) (bool, error)
+
+	// GetWorkerAssignment returns a Worker's assignment for actorUID, or
+	// ErrNotFound when the Worker is not hosting that Actor.
+	GetWorkerAssignment(ctx context.Context, workerName, actorUID string) (*ateapipb.ActorAssignment, error)
+
+	// ListWorkerAssignments returns every Actor a Worker hosts. Costs the
+	// Worker's occupancy, so it belongs on teardown and display paths rather
+	// than on placement.
+	ListWorkerAssignments(ctx context.Context, workerName string) ([]*ateapipb.ActorAssignment, error)
+
+	// FindWorkerHostingActor names the Worker holding an assignment for
+	// actorUID, or returns ErrNotFound if none does.
+	//
+	// This exists for one recovery: a claim writes the assignment before it
+	// writes the Actor, so ateapi dying in between leaves the placement
+	// recorded only against the Worker. The Actor names no Worker, and without
+	// this the placement would be invisible and the Worker would hold capacity
+	// for an Actor that went on to be placed somewhere else.
+	FindWorkerHostingActor(ctx context.Context, actorUID string) (string, error)
 
 	// WatchWorkers returns an active subscription to track worker state changes.
 	// The watch's Events channel is closed when the caller calls Close, the
@@ -445,4 +496,17 @@ type ListResponse[T any] struct {
 // HasNextPage reports whether another page follows this one.
 func (r ListResponse[T]) HasNextPage() bool {
 	return r.NextPageToken != ""
+}
+
+// ClearAssignments drops the assignment list a Worker record does not carry,
+// which is the invariant every backend has to hold on the way in.
+//
+// The list is still part of the Worker message, because the API populates it
+// on a read of one Worker, so it can arrive here on any copy that came back
+// out of ateapi. Storing it would put the same fact in two places, and the one
+// on the Worker would be the one that went stale.
+func ClearAssignments(worker *ateapipb.Worker) {
+	if worker.GetStatus() != nil {
+		worker.Status.Assignments = nil
+	}
 }

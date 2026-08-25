@@ -91,6 +91,21 @@ CREATE TABLE IF NOT EXISTS workers (
     proto    bytea NOT NULL
 );
 
+-- One row per Actor a Worker hosts, keyed by the Actor's UID because an Actor
+-- is hosted by at most one Worker. Kept out of the workers row so that a
+-- Worker's size, and every read, write and change event for it, does not grow
+-- with the number of Actors on it. The worker_name index serves listing a
+-- Worker's Actors; the primary key serves finding an Actor's Worker.
+CREATE TABLE IF NOT EXISTS worker_assignments (
+    actor_uid    text PRIMARY KEY,
+    worker_name  text NOT NULL
+        REFERENCES workers(name) ON DELETE CASCADE,
+    proto        bytea NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS worker_assignments_worker_idx
+    ON worker_assignments (worker_name);
+
 -- Transactional outbox backing WatchWorkers.
 --
 -- 1. Ordering (xid): writeAndAppendEvent guarantees exactly one row per tx,

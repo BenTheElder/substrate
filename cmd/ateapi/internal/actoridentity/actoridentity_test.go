@@ -284,11 +284,13 @@ func TestMintCertReadsThroughForAnActorTheCacheHasNotSeenYet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read seeded worker: %v", err)
 	}
-	worker.Status.Assignments = append(worker.Status.Assignments, &ateapipb.ActorAssignment{
-		Actor:    (resources.ActorRef{Atespace: testAtespace, Name: secondActorName}).ToObjectRef(),
-		ActorUid: second.GetMetadata().GetUid(),
-	})
-	if err := st.UpdateWorker(ctx, worker, worker.GetMetadata().GetVersion()); err != nil {
+	if _, err := st.UpdateWorker(ctx, testWorkerName, store.PreconditionFrom(worker), func(toUpdate *ateapipb.Worker) error {
+		toUpdate.Status.Assignments = append(toUpdate.Status.Assignments, &ateapipb.ActorAssignment{
+			Actor:    (resources.ActorRef{Atespace: testAtespace, Name: secondActorName}).ToObjectRef(),
+			ActorUid: second.GetMetadata().GetUid(),
+		})
+		return nil
+	}); err != nil {
 		t.Fatalf("bind second actor: %v", err)
 	}
 

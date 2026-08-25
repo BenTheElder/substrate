@@ -36,3 +36,29 @@ func WorkerMaxActors(capacity *ateapipb.WorkerCapacity) int32 {
 	}
 	return capacity.GetActors()
 }
+
+// AddToAllocated moves a Worker's running allocation total by one assignment's
+// worth, with sign +1 to bind and -1 to release, and returns it.
+//
+// An assignment that records no resources moves only the Actor count: the Actor
+// declared no limits, so nothing is known to have been reserved, matching how a
+// zero constraint is unconstrained at placement.
+func AddToAllocated(total *ateapipb.WorkerCapacity, assignment *ateapipb.ActorAssignment, sign int64) *ateapipb.WorkerCapacity {
+	if total == nil {
+		total = &ateapipb.WorkerCapacity{}
+	}
+	total.Actors += int32(sign)
+	total.CpuMilli += sign * assignment.GetResources().GetCpuMilli()
+	total.MemoryBytes += sign * assignment.GetResources().GetMemoryBytes()
+	return total
+}
+
+// SumAllocated totals what a set of assignments takes from a Worker, for the
+// paths that rebuild the running total rather than adjust it.
+func SumAllocated(assignments []*ateapipb.ActorAssignment) *ateapipb.WorkerCapacity {
+	total := &ateapipb.WorkerCapacity{}
+	for _, assignment := range assignments {
+		AddToAllocated(total, assignment, +1)
+	}
+	return total
+}
