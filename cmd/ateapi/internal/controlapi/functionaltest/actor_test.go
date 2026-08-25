@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store/storetest"
 	"github.com/agent-substrate/substrate/internal/ateattr"
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
 	"github.com/agent-substrate/substrate/internal/resources"
@@ -251,7 +252,7 @@ func TestCreateActor_RejectsDifferentTemplateForDataSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get source ActorTemplate: %v", err)
 	}
-	snapshot, err := tc.persistence.CreateActorSnapshot(context.Background(), &ateapipb.ActorSnapshot{
+	snapshot := storetest.MustCreateActorSnapshot(t, context.Background(), tc.persistence, &ateapipb.ActorSnapshot{
 		Metadata: &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "data-snapshot"},
 		Status: &ateapipb.ActorSnapshotStatus{
 			SourceActor:      &ateapipb.ObjectRef{Atespace: testAtespace, Name: "source"},
@@ -260,9 +261,6 @@ func TestCreateActor_RejectsDifferentTemplateForDataSnapshot(t *testing.T) {
 			SnapshotUri:      "gs://snapshots/snapshots/" + testAtespace + "/data-snapshot",
 		},
 	})
-	if err != nil {
-		t.Fatalf("CreateActorSnapshot: %v", err)
-	}
 	if _, err := tc.persistence.CreateActorSnapshotTag(context.Background(), testAtespace, snapshot.GetMetadata().GetName(), &ateapipb.ActorSnapshotTag{
 		Metadata: &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "data-snapshot"},
 		Scope:    ateapipb.ActorSnapshotTagScope_ACTOR_SNAPSHOT_TAG_SCOPE_ATESPACE,
@@ -311,16 +309,13 @@ func TestCreateActor_RejectsSnapshotWithExternalVolumes(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("wait for ActorTemplate update: %v", err)
 	}
-	snapshot, err := tc.persistence.CreateActorSnapshot(context.Background(), &ateapipb.ActorSnapshot{
+	snapshot := storetest.MustCreateActorSnapshot(t, context.Background(), tc.persistence, &ateapipb.ActorSnapshot{
 		Metadata: &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "external-volume-snapshot"},
 		Status: &ateapipb.ActorSnapshotStatus{
 			ActorTemplateUid: string(template.GetUID()),
 			SnapshotUri:      "gs://snapshots/snapshots/" + testAtespace + "/external-volume-snapshot",
 		},
 	})
-	if err != nil {
-		t.Fatalf("CreateActorSnapshot: %v", err)
-	}
 	tagRef := &ateapipb.ObjectRef{Atespace: testAtespace, Name: "external-volume-snapshot"}
 	if _, err := tc.persistence.CreateActorSnapshotTag(context.Background(), testAtespace, snapshot.GetMetadata().GetName(), &ateapipb.ActorSnapshotTag{
 		Metadata: &ateapipb.ResourceMetadata{Atespace: tagRef.GetAtespace(), Name: tagRef.GetName()},
@@ -1622,7 +1617,7 @@ func TestResumeActor_VolumeCreationRetrySuccess(t *testing.T) {
 // 1. Creates a mock ActorTemplate.
 // 2. Creates a mock Atelet Pod in 'ate-system' namespace on 'node1'.
 // 3. Creates a mock worker Pod in the test namespace on 'node1'.
-// 4. Waits for the WorkerPoolSyncer to mirror the worker to Redis.
+// 4. Waits for the WorkerPoolSyncer to mirror the worker to the store.
 // 5. Creates an actor (starts as SUSPENDED).
 // 6. Calls ResumeActor RPC.
 // 7. Verifies that the fake Atelet received the Restore call.
@@ -1954,7 +1949,7 @@ func TestResumeActor_Reentrancy(t *testing.T) {
 		t.Fatalf("expected ResumeActor to fail due to atelet error")
 	}
 
-	// Verify actor state is RESUMING in Redis!
+	// Verify actor state is RESUMING in the store.
 	actor, err := tc.persistence.GetActor(context.Background(), resources.ActorRef{Atespace: testAtespace, Name: name})
 	if err != nil {
 		t.Fatalf("failed to get actor from store: %v", err)
@@ -2012,7 +2007,7 @@ func TestResumeActor_ErrorStillStampsRefSpanIdentity(t *testing.T) {
 // 1. Creates a mock ActorTemplate.
 // 2. Creates a mock Atelet Pod on 'node1'.
 // 3. Creates a mock worker Pod on 'node1'.
-// 4. Waits for the WorkerPoolSyncer to mirror the worker to Redis.
+// 4. Waits for the WorkerPoolSyncer to mirror the worker to the store.
 // 5. Creates an actor.
 // 6. Calls ResumeActor to transition it to RUNNING.
 // 7. Calls SuspendActor RPC.
@@ -2024,7 +2019,7 @@ func TestSuspendActor(t *testing.T) {
 
 	createTemplate(t, tc, ns)
 
-	createWorkerPod(t, tc, ns, "worker-1", "node1", "pool1")
+	workerName := createWorkerPod(t, tc, ns, "worker-1", "node1", "pool1")
 	name := "id1"
 
 	_, err := tc.client.CreateActor(context.Background(), &ateapipb.CreateActorRequest{Actor: &ateapipb.Actor{
@@ -2051,6 +2046,7 @@ func TestSuspendActor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SuspendActor failed: %v", err)
 	}
+	waitForWorkerAvailable(t, tc, workerName)
 
 	if !tc.fakeAtelet.CheckpointCalled {
 		t.Errorf("expected atelet Checkpoint to be called")
@@ -2205,7 +2201,7 @@ func TestSuspendActor(t *testing.T) {
 // 1. Creates a mock ActorTemplate.
 // 2. Creates a mock Atelet Pod on 'node1'.
 // 3. Creates a mock worker Pod on 'node1'.
-// 4. Waits for the WorkerPoolSyncer to mirror the worker to Redis.
+// 4. Waits for the WorkerPoolSyncer to mirror the worker to the store.
 // 5. Creates an actor.
 // 6. Calls ResumeActor to transition it to RUNNING.
 // 7. Calls PauseActor RPC.
@@ -2767,7 +2763,7 @@ func TestSuspendActor_DanglingWorker(t *testing.T) {
 		t.Errorf("expected FailedPrecondition error, got %v", err)
 	}
 
-	// 4. Verify it becomes CRASHED in Redis
+	// 4. Verify it becomes CRASHED in the store.
 	getResp, err := tc.client.GetActor(context.Background(), &ateapipb.GetActorRequest{
 		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: name},
 	})
@@ -2954,7 +2950,7 @@ func TestResumeActor_RelocatesAfterSuspendFromPaused(t *testing.T) {
 	defer tc.cleanup()
 
 	createTemplate(t, tc, ns)
-	createWorkerPod(t, tc, ns, "worker-1", "node1", "pool1")
+	workerName := createWorkerPod(t, tc, ns, "worker-1", "node1", "pool1")
 
 	const pinned, relocated = "actor-pinned", "actor-squatter"
 	for _, name := range []string{pinned, relocated} {
@@ -2988,6 +2984,7 @@ func TestResumeActor_RelocatesAfterSuspendFromPaused(t *testing.T) {
 	if got := paused.GetStatus().GetLocalSnapshotInfo().GetNodeVmsWithLocalSnapshots(); len(got) != 1 || got[0] != "node1" {
 		t.Fatalf("paused actor pinned to %v, want [node1]", got)
 	}
+	waitForWorkerAvailable(t, tc, workerName)
 
 	// Another actor takes node1's only worker, so the pinned actor's node is full
 	// while free capacity exists elsewhere.

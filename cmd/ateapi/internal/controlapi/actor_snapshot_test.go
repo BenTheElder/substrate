@@ -202,6 +202,7 @@ func TestValidateUpdateActorSnapshotTagRequest(t *testing.T) {
 func TestCreateActorSnapshotTag_MissingSnapshotIsNotFound(t *testing.T) {
 	persistence, cleanup := storetest.SetupTestStore(t)
 	t.Cleanup(cleanup)
+	storetest.MustCreateAtespace(t, context.Background(), persistence, "team-a")
 	s := &RPCService{persistence: persistence}
 
 	_, err := s.CreateActorSnapshotTag(context.Background(), &ateapipb.CreateActorSnapshotTagRequest{
@@ -338,20 +339,17 @@ func TestCreateActorSnapshotTag_RejectsUnsetScope(t *testing.T) {
 }
 
 // rpcServiceWithActorSnapshotTag seeds an ActorSnapshot and a tag pointing at it
-// in a miniredis-backed store, and returns a RPCService over it.
+// in a PostgreSQL-backed store, and returns an RPCService over it.
 func rpcServiceWithActorSnapshotTag(t *testing.T, tag *ateapipb.ActorSnapshotTag) (*RPCService, *ateapipb.ActorSnapshotTag) {
 	t.Helper()
 	persistence, cleanup := storetest.SetupTestStore(t)
 	t.Cleanup(cleanup)
 
 	atespace, name := tag.GetMetadata().GetAtespace(), tag.GetMetadata().GetName()
-	snapshot, err := persistence.CreateActorSnapshot(context.Background(), &ateapipb.ActorSnapshot{
+	snapshot := storetest.MustCreateActorSnapshot(t, context.Background(), persistence, &ateapipb.ActorSnapshot{
 		Metadata: &ateapipb.ResourceMetadata{Atespace: atespace, Name: "snapshot-" + name},
 		Status:   &ateapipb.ActorSnapshotStatus{SnapshotUri: "gs://my-bucket/snapshots/" + atespace + "/snapshot-" + name},
 	})
-	if err != nil {
-		t.Fatalf("Failed to CreateActorSnapshot: %v", err)
-	}
 	tag.Snapshot = &ateapipb.ObjectRef{Atespace: snapshot.GetMetadata().GetAtespace(), Name: snapshot.GetMetadata().GetName()}
 	created, err := persistence.CreateActorSnapshotTag(context.Background(), atespace, snapshot.GetMetadata().GetName(), tag)
 	if err != nil {
@@ -366,14 +364,11 @@ func TestUpdateActorSnapshotTag_DeleteRecreateRace(t *testing.T) {
 	ctx := context.Background()
 	persistence, cleanup := storetest.SetupTestStore(t)
 	t.Cleanup(cleanup)
-
 	for _, name := range []string{"snapshot-1", "snapshot-2"} {
-		if _, err := persistence.CreateActorSnapshot(ctx, &ateapipb.ActorSnapshot{
+		storetest.MustCreateActorSnapshot(t, ctx, persistence, &ateapipb.ActorSnapshot{
 			Metadata: &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: name},
 			Status:   &ateapipb.ActorSnapshotStatus{SnapshotUri: "gs://bucket/root/snapshots/" + testAtespace + "/" + name},
-		}); err != nil {
-			t.Fatalf("Failed to CreateActorSnapshot(%s): %v", name, err)
-		}
+		})
 	}
 
 	const tagName = "before-upgrade"
@@ -438,13 +433,10 @@ func TestUpdateActorSnapshotTag_ConcurrentUpdate(t *testing.T) {
 	ctx := context.Background()
 	persistence, cleanup := storetest.SetupTestStore(t)
 	t.Cleanup(cleanup)
-
-	if _, err := persistence.CreateActorSnapshot(ctx, &ateapipb.ActorSnapshot{
+	storetest.MustCreateActorSnapshot(t, ctx, persistence, &ateapipb.ActorSnapshot{
 		Metadata: &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "snapshot-1"},
 		Status:   &ateapipb.ActorSnapshotStatus{SnapshotUri: "gs://bucket/root/snapshots/" + testAtespace + "/snapshot-1"},
-	}); err != nil {
-		t.Fatalf("Failed to CreateActorSnapshot: %v", err)
-	}
+	})
 
 	const tagName = "before-upgrade"
 	originalTag, err := persistence.CreateActorSnapshotTag(ctx, testAtespace, "snapshot-1", &ateapipb.ActorSnapshotTag{
