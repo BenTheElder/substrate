@@ -65,15 +65,18 @@ subjects:
 apiVersion: v1
 kind: Pod
 metadata:
-  name: scaledriver
+  name: scaledriver${SHARD_SUFFIX}
   namespace: ${POOL_NS}
+  labels:
+    app: scaledriver
 spec:
   serviceAccountName: scaledriver
   # One shot: the run either finishes or reports what stopped it. A restart
   # would re-activate actors that are already up and hide the ceiling.
   restartPolicy: Never
-  # No toleration for the density taint on purpose -- the driver stays off the
-  # node it is measuring.
+  # Keeps the driver off the nodes it is measuring. Inline JSON is valid YAML,
+  # so an empty map here means "anywhere".
+  nodeSelector: ${DRIVER_NODESELECTOR}
   containers:
   - name: scaledriver
     image: ko://github.com/agent-substrate/substrate/hack/scaledriver
