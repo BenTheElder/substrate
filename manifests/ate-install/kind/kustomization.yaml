@@ -24,6 +24,7 @@ kind: Kustomization
 resources:
   - ../ate-api-server.yaml
   - ../ate-controller.yaml
+  - ../deviceclasses.yaml
   - ./atelet
   - ../atenet-dns.yaml
   - ../atenet-router.yaml

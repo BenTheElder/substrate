@@ -259,6 +259,8 @@ func main() {
 		serverboot.Fatal(ctx, "Failed to create Kubernetes clients", err)
 	}
 
+	startDRADriver(ctx, k8sClient)
+
 	if interval := clampActorStatsPollInterval(ctx, *actorStatsPollInterval); interval > 0 {
 		if statsInst, err := newStatsInstruments(otel.Meter("atelet")); err != nil {
 			// Telemetry must not take the node's lifecycle daemon down with

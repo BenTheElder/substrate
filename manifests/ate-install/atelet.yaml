@@ -37,6 +37,18 @@ rules:
 - apiGroups: ["certificates.k8s.io"]
   resources: ["clustertrustbundles"]
   verbs: ["get", "watch", "list"]
+# The DRA driver (internal/dra) publishes this node's devices as a ResourceSlice
+# owned by the Node, and the kubelet-plugin helper reads the ResourceClaims it is
+# asked to prepare.
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["resource.k8s.io"]
+  resources: ["resourceslices"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["resource.k8s.io"]
+  resources: ["resourceclaims"]
+  verbs: ["get", "list", "watch"]
 ---
 # 3. Bind Identity to Permissions
 apiVersion: rbac.authorization.k8s.io/v1
@@ -195,6 +207,15 @@ spec:
           mountPath: /var/lib/ateom-gvisor
         - name: podidentity
           mountPath: /run/podidentity.podcert.ate.dev
+        - name: kubelet-plugins-registry
+          mountPath: /var/lib/kubelet/plugins_registry
+        - name: kubelet-plugins
+          mountPath: /var/lib/kubelet/plugins
+        - name: cdi
+          mountPath: /var/run/cdi
+        - name: host-dev
+          mountPath: /host/dev
+          readOnly: true
         - name: servicedns-ca
           mountPath: /run/servicedns.podcert.ate.dev
           readOnly: true
@@ -205,6 +226,29 @@ spec:
         hostPath:
           path: /var/lib/ateom-gvisor
           type: DirectoryOrCreate
+      # atelet runs a DRA driver so worker pods can be granted host devices
+      # (e.g. /dev/kvm) instead of running privileged: it registers with kubelet
+      # through plugins_registry, serves its socket under plugins, and writes the
+      # CDI spec the runtime resolves the granted devices against.
+      - name: kubelet-plugins-registry
+        hostPath:
+          path: /var/lib/kubelet/plugins_registry
+          type: DirectoryOrCreate
+      - name: kubelet-plugins
+        hostPath:
+          path: /var/lib/kubelet/plugins
+          type: DirectoryOrCreate
+      - name: cdi
+        hostPath:
+          path: /var/run/cdi
+          type: DirectoryOrCreate
+      # Read-only view of the node's device nodes, used only to detect which
+      # exist: atelet holds no capabilities and its own cgroup filter still
+      # denies opening them.
+      - name: host-dev
+        hostPath:
+          path: /dev
+          type: Directory
       # Mount Kubelet plugins directory to access CSI driver Unix domain sockets.
       - name: kubelet-plugins
         hostPath:

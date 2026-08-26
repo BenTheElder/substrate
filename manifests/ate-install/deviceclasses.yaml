@@ -1,0 +1,46 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The host devices a sandbox runtime can claim, offered by atelet's DRA driver
+# (internal/dra). Claiming a device is what grants it: access is gated by the
+# cgroup v2 device controller, which denies by default, so a worker would
+# otherwise need `privileged: true` and with it every other device on the node.
+#
+# atelet only publishes a device where it exists, so claiming one also places
+# the pod: a node without /dev/kvm never offers ate-kvm and never receives a
+# micro-VM worker.
+
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: ate-kvm
+spec:
+  selectors:
+  - cel:
+      expression: >-
+        device.driver == "devices.ate.dev" &&
+        device.attributes["devices.ate.dev"].type == "kvm"
+
+---
+
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: ate-tun
+spec:
+  selectors:
+  - cel:
+      expression: >-
+        device.driver == "devices.ate.dev" &&
+        device.attributes["devices.ate.dev"].type == "tun"
