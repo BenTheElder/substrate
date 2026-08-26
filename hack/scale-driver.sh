@@ -88,9 +88,11 @@ log "golden snapshot: ${GOLDEN_SNAPSHOT_URI}"
 
 log "via=${VIA} mode=${MODE} count=${COUNT} parallel=${PARALLEL} prefix=${NAME_PREFIX} shards=${SHARDS}"
 
-# Restart policy is Never, so previous runs leave Completed pods behind and
-# those block the apply.
+# Restart policy is Never, so previous runs leave Completed pods behind, and a
+# pod's spec is immutable, so re-applying over one fails rather than replacing
+# it. The bare name covers pods left by a run that predates the label.
 kubectl "${KCTX[@]}" delete pod -n "${POOL_NS}" -l app=scaledriver --ignore-not-found --wait
+kubectl "${KCTX[@]}" delete pod -n "${POOL_NS}" scaledriver --ignore-not-found --wait
 
 # The RBAC objects are shared by every shard, so they are rendered once; only
 # the Pod (the last document) repeats.
