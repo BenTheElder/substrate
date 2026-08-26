@@ -161,9 +161,6 @@ func main() {
 	scInformerFactory := informers.NewSharedInformerFactory(clientset, 0)
 	storageClassLister := scInformerFactory.Storage().V1().StorageClasses().Lister()
 
-	syncer := controlapi.NewWorkerPoolSyncer(persistence, workerPodInformer, workerPoolLister)
-	syncer.Start(ctx)
-
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 	workerPodInformerFactory.Start(stopCh)
