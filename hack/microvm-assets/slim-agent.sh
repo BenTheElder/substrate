@@ -48,7 +48,12 @@ IMAGE="${IMAGE:?IMAGE (path to rootfs.img) is required}"
 OPT_LEVEL="${OPT_LEVEL:-s}"
 # Partition 1 of the kata image; debugfs addresses the filesystem at this offset.
 ROOTFS_OFFSET=3145728
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/microvm-slim-agent.XXXXXX")"
+# Staged beside the image rather than under TMPDIR: the build and the patch both run in
+# a container with this directory bind-mounted, and macOS's default TMPDIR (/var/folders)
+# is not a path Docker Desktop shares, so the mount comes up empty and debugfs fails on a
+# rootfs.img that is present on the host. The image's own directory is necessarily
+# visible to whoever is assembling it.
+WORK="$(mktemp -d "$(dirname "${IMAGE}")/.slim-agent.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
 case "$ARCH" in
