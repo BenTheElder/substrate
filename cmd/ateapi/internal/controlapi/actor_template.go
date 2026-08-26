@@ -49,7 +49,7 @@ func (s *RPCService) CreateActorTemplate(ctx context.Context, req *ateapipb.Crea
 		SnapshotsConfig: in.GetSnapshotsConfig(),
 		SandboxConfig:   in.GetSandboxConfig(),
 		Resources:       in.GetResources(),
-		Status:          &ateapipb.ActorTemplateStatus{Phase: ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_INITIAL},
+		Status:          &ateapipb.ActorTemplateStatus{},
 	}
 	stored, err := s.impl.CreateActorTemplate(ctx, template)
 	if err != nil {

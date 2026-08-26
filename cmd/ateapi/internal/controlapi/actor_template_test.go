@@ -201,9 +201,9 @@ func TestCreateActorTemplate(t *testing.T) {
 }
 
 // TestCreateActorTemplateIgnoresServerOwnedFields pins the create contract:
-// status on the request is dropped and the server initializes the phase. The
-// store persists whatever the handler hands it, so the handler is the only
-// guard.
+// status on the request is dropped and new templates start with an empty
+// status. The store persists whatever the handler hands it, so the handler is
+// the only guard.
 func TestCreateActorTemplateIgnoresServerOwnedFields(t *testing.T) {
 	persistence := newTestPersistence(t)
 	s := &RPCService{impl: persistence}
@@ -222,10 +222,10 @@ func TestCreateActorTemplateIgnoresServerOwnedFields(t *testing.T) {
 		tmpl.Resources = &ateapipb.Resources{Limits: []*ateapipb.Limits{{Name: "memory", Quantity: "1Gi"}}}
 		// Server-owned status a client must not be able to set.
 		tmpl.Status = &ateapipb.ActorTemplateStatus{
-			Phase:          ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_READY,
-			Message:        "forged",
-			GoldenSnapshot: &ateapipb.ObjectRef{Atespace: "ate-golden", Name: "sneaky"},
-			SandboxAssets:  &ateapipb.SandboxAssets{SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR},
+			GoldenSnapshotStatus: &ateapipb.GoldenSnapshotStatus{
+				GoldenSnapshot: &ateapipb.ObjectRef{Atespace: "ate-golden", Name: "sneaky"},
+			},
+			SandboxAssets: &ateapipb.SandboxAssets{SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR},
 		}
 	})
 	created, err := s.CreateActorTemplate(ctx, &ateapipb.CreateActorTemplateRequest{ActorTemplate: in})
@@ -239,7 +239,7 @@ func TestCreateActorTemplateIgnoresServerOwnedFields(t *testing.T) {
 		tmpl.Containers = in.GetContainers()
 		tmpl.SnapshotsConfig = in.GetSnapshotsConfig()
 		tmpl.Resources = in.GetResources()
-		tmpl.Status = &ateapipb.ActorTemplateStatus{Phase: ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_INITIAL}
+		tmpl.Status = &ateapipb.ActorTemplateStatus{}
 	})
 	if diff := cmp.Diff(want, created, protocmp.Transform(), ignoreUID, ignoreTimestamps); diff != "" {
 		t.Errorf("CreateActorTemplate response mismatch (-want +got):\n%s", diff)
