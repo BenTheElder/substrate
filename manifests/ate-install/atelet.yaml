@@ -77,7 +77,23 @@ roleRef:
   name: atelet-endpointslices
   apiGroup: rbac.authorization.k8s.io
 ---
-# 4. Create DaemonSet
+# 4. Create PriorityClass
+# atelet is on the critical path of every activation, so it has to win the
+# admission race against the ateom worker pods that share its nodes -- a node
+# that ends up with workers and no atelet fails every activation placed on it
+# with "no atelet pod found on node". The built-in system-node-critical is
+# reserved for the kube-system namespace, so this is the equivalent for
+# ate-system, at the highest value Kubernetes allows a user-defined class.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: ate-node-critical
+value: 1000000000
+globalDefault: false
+description: "Node-local ate components that every actor activation depends on."
+
+---
+# 5. Create DaemonSet
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -98,6 +114,7 @@ spec:
         prometheus.io/port: "9090"
     spec:
       serviceAccountName: atelet
+      priorityClassName: ate-node-critical
       # Budget for the full shutdown sequence: --drain-delay (0 for atelet) +
       # --drain-timeout (5m). Sized long because Checkpoint/Restore stream
       # multi-GiB snapshots and must not be force-cancelled mid-upload. The sum
@@ -141,6 +158,20 @@ spec:
           capabilities:
             drop:
             - ALL
+        # Requests only, so atelet is Burstable rather than BestEffort: it
+        # shares nodes with ateom worker pods that request whole cores, and as
+        # BestEffort it took the lowest CPU weight and was first out under
+        # memory pressure. Sized for an empty node (measured ~1m CPU / 11-20Mi
+        # on GKE), not for a full one -- memory tracks hosted actors and reached
+        # ~700Mi at a thousand of them, which is a ceiling to burst into rather
+        # than reserve on every node. Kept small deliberately: this is a
+        # DaemonSet, so the request is charged against every node including
+        # CPU-constrained kind clusters in CI. No limits, so a busy node can
+        # still give it what it needs.
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
         env:
         - name: NODE_NAME
           valueFrom:
