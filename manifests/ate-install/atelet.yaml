@@ -82,7 +82,23 @@ roleRef:
   name: atelet-endpointslices
   apiGroup: rbac.authorization.k8s.io
 ---
-# 4. Create DaemonSet
+# 4. Create PriorityClass
+# atelet is on the critical path of every activation, so it has to win the
+# admission race against the ateom worker pods that share its nodes -- a node
+# that ends up with workers and no atelet fails every activation placed on it
+# with "no atelet pod found on node". The built-in system-node-critical is
+# reserved for the kube-system namespace, so this is the equivalent for
+# ate-system, at the highest value Kubernetes allows a user-defined class.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: ate-node-critical
+value: 1000000000
+globalDefault: false
+description: "Node-local ate components that every actor activation depends on."
+
+---
+# 5. Create DaemonSet
 #
 # ${SUBSTRATE_VERSION} and ${SUBSTRATE_VERSION_SUFFIX} are placeholders that
 # hack/install-ate.sh fills in after kustomize/ko.
@@ -113,6 +129,7 @@ spec:
         prometheus.io/port: "9090"
     spec:
       serviceAccountName: atelet
+      priorityClassName: ate-node-critical
       # Pin to nodes labelled with this substrate version. install-ate.sh labels unlabeled
       # nodes at install time; the operator owns the label afterwards.
       nodeSelector:
@@ -123,16 +140,15 @@ spec:
       # must fit within terminationGracePeriodSeconds, plus slack for the force
       # Stop() and the tracer/meter flush on exit.
       terminationGracePeriodSeconds: 330
-      # atelet must run on every node a WorkerPool actor may schedule to.
-      # Microvm pools are tainted ate.dev/sandboxClass=<class>:NoSchedule per
-      # the convention in cmd/atecontroller/internal/controllers/workerpool_apply.go
-      # (which also adds the matching toleration to ateom worker pods).
-      # Tolerating the key with operator: Exists covers any current or future
-      # sandbox class value without needing another manifest edit.
+      # atelet must run on every node a WorkerPool actor may schedule to, so it
+      # tolerates everything. A worker pod carries whatever tolerations its pool
+      # declares, and a node agent that tolerates less than the workloads it
+      # serves gets stranded: the pod lands, atelet cannot follow, and every
+      # activation there fails with no atelet on the node. Enumerating keys is
+      # what caused that -- ate.dev/sandboxClass alone excluded atelet from any
+      # pool that taints for its own reasons.
       tolerations:
-      - key: ate.dev/sandboxClass
-        operator: Exists
-        effect: NoSchedule
+      - operator: Exists
       containers:
       - name: atelet
         image: ko://github.com/agent-substrate/substrate/cmd/atelet
@@ -160,6 +176,20 @@ spec:
           capabilities:
             drop:
             - ALL
+        # Requests only, so atelet is Burstable rather than BestEffort: it
+        # shares nodes with ateom worker pods that request whole cores, and as
+        # BestEffort it took the lowest CPU weight and was first out under
+        # memory pressure. Sized for an empty node (measured ~1m CPU / 11-20Mi
+        # on GKE), not for a full one -- memory tracks hosted actors and reached
+        # ~700Mi at a thousand of them, which is a ceiling to burst into rather
+        # than reserve on every node. Kept small deliberately: this is a
+        # DaemonSet, so the request is charged against every node including
+        # CPU-constrained kind clusters in CI. No limits, so a busy node can
+        # still give it what it needs.
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
         env:
         - name: NODE_NAME
           valueFrom:
