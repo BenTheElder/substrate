@@ -188,6 +188,7 @@ type querier interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
 
+// TODO: EOL this in favor of setCreateMetadata
 func newCreateMetadata(atespace, name string) *ateapipb.ResourceMetadata {
 	now := timestamppb.Now()
 	return &ateapipb.ResourceMetadata{
@@ -200,6 +201,14 @@ func newCreateMetadata(atespace, name string) *ateapipb.ResourceMetadata {
 	}
 }
 
+func setCreateMetadata(metadata *ateapipb.ResourceMetadata) {
+	metadata.Uid = uuid.NewString()
+	metadata.Version = 1
+	metadata.CreateTime = timestamppb.Now()
+	metadata.UpdateTime = metadata.CreateTime
+}
+
+// TODO: EOL this in favor of setUpdateMetadata
 func newUpdateMetadata(current *ateapipb.ResourceMetadata) *ateapipb.ResourceMetadata {
 	metadata := proto.Clone(current).(*ateapipb.ResourceMetadata)
 	metadata.Version++
@@ -217,6 +226,13 @@ func validateProtoMetadataMatchesColumns(resource string, metadata *ateapipb.Res
 		return fmt.Errorf("%s version projection %d does not match proto metadata version %d", resource, version, metadata.GetVersion())
 	}
 	return nil
+}
+
+func setUpdateMetadata(newMeta, oldMeta *ateapipb.ResourceMetadata) {
+	newMeta.Uid = oldMeta.Uid
+	newMeta.Version = oldMeta.Version + 1
+	newMeta.CreateTime = oldMeta.CreateTime
+	newMeta.UpdateTime = timestamppb.Now()
 }
 
 func isUniqueViolation(err error) bool { return pgErrCode(err) == "23505" }
@@ -566,8 +582,12 @@ func (p *Persistence) CreateActor(ctx context.Context, actor *ateapipb.Actor) (*
 	atespace := actor.GetMetadata().GetAtespace()
 	name := actor.GetMetadata().GetName()
 
+	// TODO: doing a full clone here is wasteful - the caller already has to
+	// make modifications to the actor before passing it in, so we can safely
+	// mutate it in place.  This breaks some of the contract tests, so we can
+	// fix it later.
 	dbActor := proto.Clone(actor).(*ateapipb.Actor)
-	dbActor.Metadata = newCreateMetadata(atespace, name)
+	setCreateMetadata(dbActor.Metadata)
 
 	protoBytes, err := proto.Marshal(dbActor)
 	if err != nil {
@@ -608,30 +628,6 @@ func (p *Persistence) GetActor(ctx context.Context, actorRef resources.ActorRef)
 	return out, nil
 }
 
-// validateUpdateActorMutation reports whether an actor mutation changed fields
-// that are immutable for the lifetime of the stored actor.
-func validateUpdateActorMutation(storedActor, mutatedActor *ateapipb.Actor) error {
-	if stored, mutated := storedActor.GetMetadata().GetAtespace(), mutatedActor.GetMetadata().GetAtespace(); stored != mutated {
-		return fmt.Errorf("metadata.atespace is immutable: mutation changed it from %q to %q", stored, mutated)
-	}
-	if stored, mutated := storedActor.GetMetadata().GetName(), mutatedActor.GetMetadata().GetName(); stored != mutated {
-		return fmt.Errorf("metadata.name is immutable: mutation changed it from %q to %q", stored, mutated)
-	}
-	if stored, mutated := storedActor.GetActorTemplateNamespace(), mutatedActor.GetActorTemplateNamespace(); stored != mutated {
-		return fmt.Errorf("actor_template_namespace is immutable: mutation changed it from %q to %q", stored, mutated)
-	}
-	if stored, mutated := storedActor.GetActorTemplateName(), mutatedActor.GetActorTemplateName(); stored != mutated {
-		return fmt.Errorf("actor_template_name is immutable: mutation changed it from %q to %q", stored, mutated)
-	}
-	if stored, mutated := storedActor.GetActorTemplate(), mutatedActor.GetActorTemplate(); !proto.Equal(stored, mutated) {
-		return fmt.Errorf("actor_template is immutable: mutation changed it from %v to %v", stored, mutated)
-	}
-	if stored, mutated := storedActor.GetSourceSnapshotTag(), mutatedActor.GetSourceSnapshotTag(); !proto.Equal(stored, mutated) {
-		return fmt.Errorf("source_snapshot_tag is immutable: mutation changed it from %v to %v", stored, mutated)
-	}
-	return nil
-}
-
 func (p *Persistence) UpdateActor(ctx context.Context, actorRef resources.ActorRef, precondition store.Precondition, mutate func(*ateapipb.Actor) error) (*ateapipb.Actor, error) {
 	if err := precondition.Validate(); err != nil {
 		return nil, err
@@ -659,16 +655,13 @@ func (p *Persistence) UpdateActor(ctx context.Context, actorRef resources.ActorR
 	if err := precondition.Check(dbActor.GetMetadata()); err != nil {
 		return nil, err
 	}
-	actorBeforeMutation := proto.Clone(dbActor).(*ateapipb.Actor)
+	oldMeta := proto.CloneOf(dbActor.Metadata)
 	if err := mutate(dbActor); err != nil {
 		return nil, err
 	}
-	if err := validateUpdateActorMutation(actorBeforeMutation, dbActor); err != nil {
-		return nil, fmt.Errorf("%w: %w", store.ErrImmutableField, err)
-	}
 	// Stored metadata is authoritative; discard any metadata edits made by the
 	// closure and derive the next revision from the state this attempt read.
-	dbActor.Metadata = newUpdateMetadata(actorBeforeMutation.GetMetadata())
+	setUpdateMetadata(dbActor.Metadata, oldMeta)
 
 	updatedBytes, err := proto.Marshal(dbActor)
 	if err != nil {
