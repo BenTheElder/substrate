@@ -16,6 +16,7 @@ package controllers
 
 import (
 	"os"
+	"slices"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -23,7 +24,11 @@ import (
 	corev1ac "k8s.io/client-go/applyconfigurations/core/v1"
 	metav1ac "k8s.io/client-go/applyconfigurations/meta/v1"
 
+	resourceapi "k8s.io/api/resource/v1"
+	resourcev1ac "k8s.io/client-go/applyconfigurations/resource/v1"
+
 	"github.com/agent-substrate/substrate/internal/ateompath"
+	"github.com/agent-substrate/substrate/internal/dra"
 	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 )
 
@@ -172,7 +177,7 @@ func buildDeploymentApplyConfig(wp *atev1alpha1.WorkerPool, otel ateomOTelSettin
 		)
 
 	applyWorkerPoolPodTemplate(podSpecAC, containerAC, wp.Spec.Template)
-	maybeApplyMicroVMPodShape(podSpecAC, containerAC, wp.Spec.SandboxClass)
+	maybeApplyMicroVMPodShape(podSpecAC, containerAC, wp.Spec.SandboxClass, wp.Name)
 	maybeApplyGPUPodShape(podSpecAC, containerAC, wp.Spec.Template, wp.Spec.SandboxClass)
 	podSpecAC.WithContainers(containerAC)
 	podSpecAC.WithTerminationGracePeriodSeconds(workerTerminationGracePeriodSeconds)
@@ -259,16 +264,44 @@ var ateomGvisorCapabilities = []corev1.Capability{
 	"FOWNER", "CHOWN", "MKNOD", "NET_RAW", "SETFCAP",
 }
 
+// ateomMicroVMCapabilities is the capability set an unprivileged micro-VM worker
+// needs: the gVisor set, which covers the same worker-side work, plus FSETID and
+// DAC_READ_SEARCH for virtiofsd. virtiofsd re-applies a fixed set to its
+// sandboxed child, and the kernel refuses to raise a capability the bounding set
+// omits, so without those two it exits with "can't apply the child capabilities"
+// and the VM never gets its virtio-fs device.
+//
+// The hypervisor devices are not capabilities: they are claimed from atelet's
+// DRA driver (see maybeApplyMicroVMPodShape).
+var ateomMicroVMCapabilities = slices.Concat(ateomGvisorCapabilities, []corev1.Capability{
+	"FSETID", "DAC_READ_SEARCH",
+})
+
 // ateomSecurityContext returns the ateom container security context for a sandbox
-// class. The gVisor worker runs unprivileged with an explicit capability set; the
-// micro-VM worker stays privileged because kata + cloud-hypervisor needs broad
-// host access (vhost devices, mounts). An empty class defaults to gVisor.
+// class. Neither class runs privileged; they differ in their capability set and
+// in seccomp. An empty class defaults to gVisor.
 func ateomSecurityContext(class atev1alpha1.SandboxClass) *corev1ac.SecurityContextApplyConfiguration {
 	sc := corev1ac.SecurityContext().
 		WithRunAsUser(0).
 		WithRunAsGroup(0)
 	if class == atev1alpha1.SandboxClassMicroVM {
-		return sc.WithPrivileged(true)
+		// Give up the default seccomp profile so virtiofsd keeps its own sandbox,
+		// which pivot_root()s — a syscall the profile denies whatever capabilities
+		// the worker holds. The trade favors containing the guest: virtiofsd parses
+		// requests from it, so its namespaces are part of the guest-to-host
+		// boundary, while the pod-wide profile mostly confines ateom, which we
+		// trust. Both guest-facing processes confine themselves anyway, virtiofsd
+		// with its own seccomp filter and nine capabilities, cloud-hypervisor with
+		// per-thread filters.
+		return sc.
+			WithPrivileged(false).
+			WithCapabilities(corev1ac.Capabilities().
+				WithDrop("ALL").
+				WithAdd(ateomMicroVMCapabilities...)).
+			WithAppArmorProfile(corev1ac.AppArmorProfile().
+				WithType(corev1.AppArmorProfileTypeUnconfined)).
+			WithSeccompProfile(corev1ac.SeccompProfile().
+				WithType(corev1.SeccompProfileTypeUnconfined))
 	}
 	// runsc mounts and pivots root inside the sandbox, and the worker remounts
 	// /sys/fs/cgroup read-write to nest per-actor cgroups; the default AppArmor
@@ -285,6 +318,55 @@ func ateomSecurityContext(class atev1alpha1.SandboxClass) *corev1ac.SecurityCont
 			WithType(corev1.AppArmorProfileTypeUnconfined))
 }
 
+// microVMDevicesClaim names the pod's claim for the host devices a micro-VM
+// worker needs. Both the pod-level claim and the container reference use it.
+const microVMDevicesClaim = "devices"
+
+// DeviceClass names, defined in manifests/ate-install/deviceclasses.yaml. A
+// class selects atelet's DRA driver plus one device type.
+const (
+	kvmDeviceClass = "ate-kvm"
+	tunDeviceClass = "ate-tun"
+)
+
+// ResourceClaimTemplateName is the template a micro-VM WorkerPool's pods claim
+// their devices from.
+func ResourceClaimTemplateName(poolName string) string {
+	return poolName + "-devices"
+}
+
+// buildResourceClaimTemplateApplyConfig builds the per-pool template whose
+// claims grant a micro-VM worker /dev/kvm and /dev/net/tun. Returns nil for
+// classes that need no devices.
+func buildResourceClaimTemplateApplyConfig(wp *atev1alpha1.WorkerPool) *resourcev1ac.ResourceClaimTemplateApplyConfiguration {
+	if wp.Spec.SandboxClass != atev1alpha1.SandboxClassMicroVM {
+		return nil
+	}
+	request := func(name, class string) *resourcev1ac.DeviceRequestApplyConfiguration {
+		return resourcev1ac.DeviceRequest().
+			WithName(name).
+			WithExactly(resourcev1ac.ExactDeviceRequest().
+				WithDeviceClassName(class).
+				WithAllocationMode(resourceapi.DeviceAllocationModeExactCount).
+				WithCount(1))
+	}
+	return resourcev1ac.ResourceClaimTemplate(ResourceClaimTemplateName(wp.Name), wp.Namespace).
+		WithOwnerReferences(metav1ac.OwnerReference().
+			WithAPIVersion(atev1alpha1.GroupVersion.String()).
+			WithKind("WorkerPool").
+			WithName(wp.Name).
+			WithUID(wp.UID).
+			WithController(true).
+			WithBlockOwnerDeletion(true)).
+		WithSpec(resourcev1ac.ResourceClaimTemplateSpec().
+			WithSpec(resourcev1ac.ResourceClaimSpec().
+				WithDevices(resourcev1ac.DeviceClaim().
+					WithRequests(
+						request(dra.DeviceKVM, kvmDeviceClass),
+						request(dra.DeviceTUN, tunDeviceClass),
+					))))
+}
+
 // maybeApplyMicroVMPodShape adds the /dev/kvm device and node placement a
 // micro-VM (kata + cloud-hypervisor) worker pool needs, on top of any
 // pod-template settings. No-op unless sandboxClass is the micro-VM class.
@@ -298,33 +380,36 @@ func maybeApplyMicroVMPodShape(
 	podSpecAC *corev1ac.PodSpecApplyConfiguration,
 	containerAC *corev1ac.ContainerApplyConfiguration,
 	sandboxClass atev1alpha1.SandboxClass,
+	poolName string,
 ) {
 	if sandboxClass != atev1alpha1.SandboxClassMicroVM {
 		return
 	}
 
-	// The micro-VM runtime needs /dev/kvm. The container is already privileged
-	// (so it can also reach vhost devices), but we mount /dev/kvm explicitly.
-	containerAC.WithVolumeMounts(corev1ac.VolumeMount().
-		WithName("dev-kvm").
-		WithMountPath("/dev/kvm"))
-	podSpecAC.WithVolumes(corev1ac.Volume().
-		WithName("dev-kvm").
-		WithHostPath(corev1ac.HostPathVolumeSource().
-			WithPath("/dev/kvm").
-			WithType(corev1.HostPathCharDev)))
-
-	// Pin placement to KVM-capable, nested-virt nodes via nodeSelector +
-	// toleration on ate.dev/sandboxClass=microvm. This is our own convention
-	// (GKE attaches no label/taint to nested-virt pools): applied to kind nodes
-	// by hack/create-kind-cluster.sh and via --node-labels at GKE pool creation.
-	// Additive on top of the WorkerPool's configurable scheduling fields
-	// (spec.template nodeSelector/tolerations/affinity, added in #247) — merge,
-	// don't overwrite.
-	if podSpecAC.NodeSelector == nil {
-		podSpecAC.NodeSelector = map[string]string{}
+	// The micro-VM runtime needs /dev/kvm to create the VM and /dev/net/tun to
+	// build the guest's tap. Claim them from atelet's DRA driver rather than
+	// hostPath-mounting them: device access is gated by the cgroup device
+	// controller, which denies the node by default, so a mount alone yields
+	// EPERM unless the pod is privileged — which would hand over every other
+	// device too.
+	podSpecAC.WithResourceClaims(corev1ac.PodResourceClaim().
+		WithName(microVMDevicesClaim).
+		WithResourceClaimTemplateName(ResourceClaimTemplateName(poolName)))
+	if containerAC.Resources == nil {
+		containerAC.WithResources(corev1ac.ResourceRequirements())
 	}
-	podSpecAC.NodeSelector["ate.dev/sandboxClass"] = string(atev1alpha1.SandboxClassMicroVM)
+	containerAC.Resources.WithClaims(corev1ac.ResourceClaim().WithName(microVMDevicesClaim))
+
+	// Placement comes from the claim: atelet publishes a device only where it
+	// exists, so the scheduler already keeps this pod off nodes that cannot run
+	// it. That is derived from the node, unlike an ate.dev/sandboxClass label,
+	// which is a hand-applied convention that can disagree with the hardware in
+	// either direction.
+	//
+	// The toleration stays: a claim constrains where this pod fits but repels
+	// nothing, so a cluster reserving nested-virt nodes with a taint still needs
+	// it. Additive on top of the WorkerPool's configurable scheduling fields
+	// (spec.template nodeSelector/tolerations/affinity) — merge, don't overwrite.
 	podSpecAC.WithTolerations(corev1ac.Toleration().
 		WithKey("ate.dev/sandboxClass").
 		WithOperator(corev1.TolerationOpEqual).

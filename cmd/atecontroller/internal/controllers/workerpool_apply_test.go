@@ -15,6 +15,7 @@
 package controllers
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -27,6 +28,7 @@ import (
 	metav1ac "k8s.io/client-go/applyconfigurations/meta/v1"
 
 	"github.com/agent-substrate/substrate/internal/ateompath"
+	"github.com/agent-substrate/substrate/internal/dra"
 	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 )
 
@@ -246,9 +248,10 @@ func TestBuildDeploymentApplyConfigMetadata(t *testing.T) {
 	}
 }
 
-// TestMicroVMPodShape asserts the micro-VM sandbox class adds the /dev/kvm
-// device (volume + container mount) and node placement (nodeSelector +
-// toleration on ate.dev/sandboxClass); other classes get none of it.
+// TestMicroVMPodShape asserts the micro-VM sandbox class claims its host
+// devices from atelet's DRA driver and tolerates the ate.dev/sandboxClass
+// taint; other classes get none of it. Placement comes from the claim, so no
+// nodeSelector is added and no device is hostPath-mounted.
 func TestMicroVMPodShape(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -265,82 +268,148 @@ func TestMicroVMPodShape(t *testing.T) {
 			wp.Spec.SandboxClass = tt.class
 			ps := buildDeploymentApplyConfig(wp, ateomOTelSettings{}).Spec.Template.Spec
 
-			hasVol := false
+			// A hostPath device would not carry the cgroup allow, so it must
+			// never come back.
 			for _, v := range ps.Volumes {
-				if v.Name != nil && *v.Name == "dev-kvm" {
-					hasVol = true
-					if v.HostPath == nil || v.HostPath.Path == nil || *v.HostPath.Path != "/dev/kvm" ||
-						v.HostPath.Type == nil || *v.HostPath.Type != corev1.HostPathCharDev {
-						t.Errorf("dev-kvm volume = %+v, want /dev/kvm CharDevice", v.HostPath)
+				if v.HostPath != nil && v.HostPath.Path != nil && strings.HasPrefix(*v.HostPath.Path, "/dev/") {
+					t.Errorf("device %q must be claimed, not hostPath-mounted", *v.HostPath.Path)
+				}
+			}
+
+			hasPodClaim := false
+			for _, c := range ps.ResourceClaims {
+				if c.Name != nil && *c.Name == microVMDevicesClaim {
+					hasPodClaim = true
+					if c.ResourceClaimTemplateName == nil ||
+						*c.ResourceClaimTemplateName != ResourceClaimTemplateName(wp.Name) {
+						t.Errorf("claim template = %v, want %q", c.ResourceClaimTemplateName,
+							ResourceClaimTemplateName(wp.Name))
 					}
 				}
 			}
-			hasMount := false
-			for _, c := range ps.Containers {
-				for _, m := range c.VolumeMounts {
-					if m.MountPath != nil && *m.MountPath == "/dev/kvm" {
-						hasMount = true
+			hasContainerClaim := false
+			if r := ps.Containers[0].Resources; r != nil {
+				for _, c := range r.Claims {
+					if c.Name != nil && *c.Name == microVMDevicesClaim {
+						hasContainerClaim = true
 					}
 				}
 			}
-			_, hasSelector := ps.NodeSelector["ate.dev/sandboxClass"]
+
+			// The claim handles placement, so the class must not also pin a
+			// nodeSelector.
+			if _, hasSelector := ps.NodeSelector["ate.dev/sandboxClass"]; hasSelector {
+				t.Errorf("nodeSelector on ate.dev/sandboxClass should be gone; placement comes from the claim")
+			}
 			hasTol := false
 			for _, tol := range ps.Tolerations {
 				if tol.Key != nil && *tol.Key == "ate.dev/sandboxClass" {
 					hasTol = true
 				}
 			}
-			if hasVol != tt.wantMicroVM || hasMount != tt.wantMicroVM || hasSelector != tt.wantMicroVM || hasTol != tt.wantMicroVM {
-				t.Errorf("microvm shape: vol=%v mount=%v selector=%v toleration=%v, want all %v",
-					hasVol, hasMount, hasSelector, hasTol, tt.wantMicroVM)
+			if hasPodClaim != tt.wantMicroVM || hasContainerClaim != tt.wantMicroVM || hasTol != tt.wantMicroVM {
+				t.Errorf("microvm shape: podClaim=%v containerClaim=%v toleration=%v, want all %v",
+					hasPodClaim, hasContainerClaim, hasTol, tt.wantMicroVM)
 			}
 		})
 	}
 }
 
-// TestAteomSecurityContextByClass asserts the gVisor worker runs unprivileged
-// with the explicit capability set while the micro-VM worker stays privileged,
-// and that an empty class defaults to gVisor.
+// The template a micro-VM pool's pods claim from must request both devices, by
+// DeviceClass, and be owned by the pool so it is cleaned up with it.
+func TestResourceClaimTemplateRequestsBothDevices(t *testing.T) {
+	wp := testWorkerPoolApplyConfig(nil)
+	wp.Spec.SandboxClass = atev1alpha1.SandboxClassMicroVM
+
+	rct := buildResourceClaimTemplateApplyConfig(wp)
+	if rct == nil {
+		t.Fatal("micro-VM pools need a ResourceClaimTemplate")
+	}
+	if rct.Name == nil || *rct.Name != ResourceClaimTemplateName(wp.Name) {
+		t.Errorf("name = %v, want %q", rct.Name, ResourceClaimTemplateName(wp.Name))
+	}
+	if rct.Namespace == nil || *rct.Namespace != wp.Namespace {
+		t.Errorf("namespace = %v, want %q", rct.Namespace, wp.Namespace)
+	}
+	if len(rct.OwnerReferences) != 1 || rct.OwnerReferences[0].Name == nil ||
+		*rct.OwnerReferences[0].Name != wp.Name {
+		t.Errorf("owner = %+v, want the WorkerPool", rct.OwnerReferences)
+	}
+
+	got := map[string]string{}
+	for _, r := range rct.Spec.Spec.Devices.Requests {
+		if r.Name == nil || r.Exactly == nil || r.Exactly.DeviceClassName == nil {
+			t.Fatalf("incomplete request %+v", r)
+		}
+		got[*r.Name] = *r.Exactly.DeviceClassName
+	}
+	want := map[string]string{dra.DeviceKVM: kvmDeviceClass, dra.DeviceTUN: tunDeviceClass}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("requests mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// Classes that need no host devices must not get a template.
+func TestResourceClaimTemplateOnlyForMicroVM(t *testing.T) {
+	for _, class := range []atev1alpha1.SandboxClass{"", atev1alpha1.SandboxClassGvisor} {
+		wp := testWorkerPoolApplyConfig(nil)
+		wp.Spec.SandboxClass = class
+		if rct := buildResourceClaimTemplateApplyConfig(wp); rct != nil {
+			t.Errorf("class %q got a ResourceClaimTemplate, want none", class)
+		}
+	}
+}
+
+// TestAteomSecurityContextByClass asserts no worker runs privileged: every class
+// drops ALL capabilities and adds back an explicit set. Only the micro-VM class
+// gives up the runtime's default seccomp profile, and only so virtiofsd can keep
+// its own sandbox. An empty class defaults to gVisor.
 func TestAteomSecurityContextByClass(t *testing.T) {
 	tests := []struct {
-		name           string
-		class          atev1alpha1.SandboxClass
-		wantPrivileged bool
-		wantCaps       bool
+		name     string
+		class    atev1alpha1.SandboxClass
+		wantCaps []corev1.Capability
+		// wantSeccompUnconfined is micro-VM only: virtiofsd's sandbox pivot_root()s,
+		// which the default profile denies.
+		wantSeccompUnconfined bool
 	}{
-		{"gvisor default", "", false, true},
-		{"gvisor explicit", atev1alpha1.SandboxClassGvisor, false, true},
-		{"microvm", atev1alpha1.SandboxClassMicroVM, true, false},
+		{"gvisor default", "", ateomGvisorCapabilities, false},
+		{"gvisor explicit", atev1alpha1.SandboxClassGvisor, ateomGvisorCapabilities, false},
+		{"microvm", atev1alpha1.SandboxClassMicroVM, ateomMicroVMCapabilities, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sc := ateomSecurityContext(tt.class)
-			if sc.Privileged == nil || *sc.Privileged != tt.wantPrivileged {
-				t.Errorf("Privileged = %v, want %v", sc.Privileged, tt.wantPrivileged)
+			if sc.Privileged == nil || *sc.Privileged {
+				t.Errorf("Privileged = %v, want false for every class", sc.Privileged)
 			}
 			if sc.RunAsUser == nil || *sc.RunAsUser != 0 || sc.RunAsGroup == nil || *sc.RunAsGroup != 0 {
 				t.Errorf("RunAsUser/Group = %v/%v, want 0/0", sc.RunAsUser, sc.RunAsGroup)
 			}
-			hasCaps := sc.Capabilities != nil && len(sc.Capabilities.Add) > 0
-			if hasCaps != tt.wantCaps {
-				t.Errorf("has capabilities = %v, want %v", hasCaps, tt.wantCaps)
+			if sc.Capabilities == nil {
+				t.Fatalf("capabilities must be set so the default set is dropped")
 			}
-			if tt.wantCaps {
-				if len(sc.Capabilities.Drop) != 1 || sc.Capabilities.Drop[0] != "ALL" {
-					t.Errorf("capabilities drop = %v, want [ALL]", sc.Capabilities.Drop)
-				}
-				if diff := cmp.Diff(ateomGvisorCapabilities, sc.Capabilities.Add); diff != "" {
-					t.Errorf("capabilities add mismatch (-want +got):\n%s", diff)
-				}
+			if len(sc.Capabilities.Drop) != 1 || sc.Capabilities.Drop[0] != "ALL" {
+				t.Errorf("capabilities drop = %v, want [ALL]", sc.Capabilities.Drop)
 			}
-			// The gVisor worker runs AppArmor-unconfined (runsc + cgroup remount
-			// need mount); the privileged micro-VM worker leaves it unset.
-			wantAppArmor := tt.wantCaps
-			hasAppArmor := sc.AppArmorProfile != nil &&
-				sc.AppArmorProfile.Type != nil &&
-				*sc.AppArmorProfile.Type == corev1.AppArmorProfileTypeUnconfined
-			if hasAppArmor != wantAppArmor {
-				t.Errorf("AppArmor Unconfined = %v, want %v", hasAppArmor, wantAppArmor)
+			if diff := cmp.Diff(tt.wantCaps, sc.Capabilities.Add); diff != "" {
+				t.Errorf("capabilities add mismatch (-want +got):\n%s", diff)
+			}
+			// Every class mounts inside the worker, which the default AppArmor
+			// profile denies.
+			if sc.AppArmorProfile == nil || sc.AppArmorProfile.Type == nil ||
+				*sc.AppArmorProfile.Type != corev1.AppArmorProfileTypeUnconfined {
+				t.Errorf("AppArmorProfile = %v, want Unconfined", sc.AppArmorProfile)
+			}
+			// gVisor must keep the runtime default (an unset profile), so the
+			// micro-VM relaxation cannot leak to it.
+			gotSeccompUnconfined := sc.SeccompProfile != nil && sc.SeccompProfile.Type != nil &&
+				*sc.SeccompProfile.Type == corev1.SeccompProfileTypeUnconfined
+			if gotSeccompUnconfined != tt.wantSeccompUnconfined {
+				t.Errorf("seccomp Unconfined = %v, want %v", gotSeccompUnconfined, tt.wantSeccompUnconfined)
+			}
+			if !tt.wantSeccompUnconfined && sc.SeccompProfile != nil {
+				t.Errorf("SeccompProfile = %v, want unset so the runtime default applies", sc.SeccompProfile)
 			}
 		})
 	}

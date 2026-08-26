@@ -61,6 +61,7 @@ type WorkerPoolReconciler struct {
 //+kubebuilder:rbac:groups=ate.dev,resources=workerpools/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=ate.dev,resources=workerpools/finalizers,verbs=update
 //+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=resource.k8s.io,resources=resourceclaimtemplates,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -94,6 +95,12 @@ func (r *WorkerPoolReconciler) reconcileWorkerPool(ctx context.Context, wp *atev
 	log := log.FromContext(ctx)
 	log.Info("Reconciling worker pool")
 
+	// Before the Deployment, so pods never reference a template that is not
+	// there yet: a pod claiming a missing template stays unschedulable.
+	if err := r.applyResourceClaimTemplate(ctx, wp); err != nil {
+		return err
+	}
+
 	if err := r.applyDeployment(ctx, wp); err != nil {
 		return err
 	}
@@ -107,6 +114,19 @@ func (r *WorkerPoolReconciler) reconcileWorkerPool(ctx context.Context, wp *atev
 	}
 
 	return r.syncStatus(ctx, wp, dep)
+}
+
+// applyResourceClaimTemplate creates the template whose claims grant a micro-VM
+// worker its host devices. No-op for classes that need none.
+func (r *WorkerPoolReconciler) applyResourceClaimTemplate(ctx context.Context, wp *atev1alpha1.WorkerPool) error {
+	rctAC := buildResourceClaimTemplateApplyConfig(wp)
+	if rctAC == nil {
+		return nil
+	}
+	if err := r.Apply(ctx, rctAC, client.FieldOwner(workerPoolFieldOwner), client.ForceOwnership); err != nil {
+		return fmt.Errorf("failed to apply ResourceClaimTemplate: %w", err)
+	}
+	return nil
 }
 
 func (r *WorkerPoolReconciler) applyDeployment(ctx context.Context, wp *atev1alpha1.WorkerPool) error {
