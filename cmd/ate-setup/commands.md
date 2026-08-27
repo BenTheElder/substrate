@@ -75,7 +75,7 @@ that already names a manifest is used as written, and is not looked up.
 | `ate-setup` | `hack/install-ate.sh` |
 |---|---|
 | `deploy ate-system` | `--deploy-ate-system` |
-| `deploy ate-system --setup-csi` | `--deploy-ate-system --setup-csi` |
+| `deploy ate-system --setup-csi=nfs` | `--deploy-ate-system --setup-csi=nfs` |
 | `deploy atelet` | `--deploy-atelet` |
 | `deploy apiserver` | `--deploy-ate-apiserver` |
 | `deploy ate-controller` | (no shell equivalent) |
@@ -124,12 +124,11 @@ Individual secrets and config that `deploy ate-system` creates automatically.
 
 | `ate-setup` | `hack/install-ate.sh` |
 |---|---|
-| `setup csi` | `--setup-csi` |
+| `setup csi [driver]` | `--setup-csi[=DRIVER]` |
 
-Kind only. `setup csi` is an error on a non-Kind cluster, where
-`hack/install-ate.sh` warns and continues. Note that `--deploy-ate-system`
-already runs the CSI setup through its own `--setup-csi` flag, so a command line
-passing both does the work once.
+`driver` is one of `nfs`, `hostpath`, `both`, or `none`; `setup csi` with `none` as the default option. The hostpath is for KIND clusters only. NFS has no such
+restriction, but it does need the `nfsd` kernel module loaded on the nodes.
+
 
 ## Benchmarks
 
@@ -157,7 +156,7 @@ See
 | `ate-setup` | `hack/install-ate.sh` | Description |
 |---|---|---|
 | `deploy demo counter` | `--deploy-demo-counter` | A counter actor exercising snapshot, resume, and atenet ingress |
-| `deploy demo counter --with-external-volume` | `--deploy-demo-counter-with-external-volume` | The same, plus an external volume and a pre-seeded file to validate (run `setup csi` first) |
+| `deploy demo counter --with-external-volume [--storage-class NAME]` | `--deploy-demo-counter-with-external-volume` (`STORAGE_CLASS=NAME`) | The same, plus an external volume and a pre-seeded file to validate. Run `setup csi` first and name the class it created, e.g. `csi-nfs-sc`; defaults to `standard` |
 | `deploy demo egress` | `--deploy-demo-egress` | Egress policy enforcement through atenet |
 | `deploy demo sandbox` | `--deploy-demo-sandbox` | An on-demand sandbox actor driven by the sandbox client |
 | `deploy demo multi-template` | `--deploy-demo-multi-template` | Two ActorTemplates sharing one WorkerPool |
