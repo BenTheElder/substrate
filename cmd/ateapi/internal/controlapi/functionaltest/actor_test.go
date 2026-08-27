@@ -1794,9 +1794,9 @@ func TestResumeActor(t *testing.T) {
 		NodeName:        "node1",
 		SandboxClass:    "gvisor",
 		Labels:          map[string]string{poolLabelKey: ns},
-		// The worker pod sets no compute limits, so capacity reports only how
-		// many actors the pool allows on one worker.
-		Capacity: &ateapipb.WorkerCapacity{Actors: 1},
+		// No capacity: the worker pod sets no compute limits, and the actors
+		// ceiling is the ateom's, reported once it is running rather than taken
+		// from the pool.
 		Status: &ateapipb.WorkerStatus{
 			// The running total of what the worker's assignments took, which is
 			// all a listing reports of them. The actor declares no compute

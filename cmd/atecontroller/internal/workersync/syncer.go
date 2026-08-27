@@ -266,7 +266,7 @@ func (s *WorkerPoolSyncer) createOrUpdateWorker(ctx context.Context, key workerK
 			NodeName:        pod.Spec.NodeName,
 			SandboxClass:    string(pool.Spec.SandboxClass),
 			Labels:          pool.GetLabels(),
-			Capacity:        workerCapacity(pod, pool.Spec.MaxActors()),
+			Capacity:        workerCapacity(pod),
 		}
 		// status is output-only: CreateWorker sets STATE_ACTIVE itself.
 		//
@@ -297,9 +297,11 @@ func (s *WorkerPoolSyncer) createOrUpdateWorker(ctx context.Context, key workerK
 		w.Labels = pool.GetLabels()
 		changed = true
 	}
-	// Capacity moves when the pool's maxActorsPerWorker changes, not only when
-	// the pod is resized, so it is compared like the rest.
-	if capacity := workerCapacity(pod, pool.Spec.MaxActors()); !proto.Equal(w.GetCapacity(), capacity) {
+	// Only the dimensions the pod states. The actors ceiling is the ateom's and
+	// arrives by report, so it is carried over rather than recomputed -- without
+	// that this would erase what the worker reported on every pod event, and the
+	// two would fight.
+	if capacity := withReportedActors(workerCapacity(pod), w.GetCapacity()); !proto.Equal(w.GetCapacity(), capacity) {
 		slog.InfoContext(ctx, "Syncer: updating worker in store (capacity changed)", key.logAttrs()...)
 		w.Capacity = capacity
 		changed = true
@@ -353,8 +355,13 @@ const ateomContainerName = "ateom"
 // treats as "unknown" (unconstrained). The actor sandbox runs nested in the
 // ateom container's cgroup, so that container's limits — not the pod total —
 // are the relevant envelope.
-func workerCapacity(pod *corev1.Pod, maxActors int32) *ateapipb.WorkerCapacity {
-	capacity := ateapipb.WorkerCapacity{Actors: maxActors}
+// The actors dimension is deliberately absent: that ceiling belongs to the
+// ateom, which reports it once it is running (see ReportWorkerCapacity). The
+// syncer owns the compute dimensions because only the pod states them, and
+// leaves actors unset -- which the API reads as one, the safe floor, until the
+// worker says otherwise.
+func workerCapacity(pod *corev1.Pod) *ateapipb.WorkerCapacity {
+	var capacity ateapipb.WorkerCapacity
 	for i := range pod.Spec.Containers {
 		c := &pod.Spec.Containers[i]
 		if c.Name != ateomContainerName {
@@ -368,7 +375,7 @@ func workerCapacity(pod *corev1.Pod, maxActors int32) *ateapipb.WorkerCapacity {
 		}
 		break
 	}
-	if capacity.CpuMilli == 0 && capacity.MemoryBytes == 0 && capacity.Actors == 0 {
+	if capacity.CpuMilli == 0 && capacity.MemoryBytes == 0 {
 		return nil
 	}
 	return &capacity
@@ -481,4 +488,23 @@ func (s *WorkerPoolSyncer) listWorkersPageWithRetry(ctx context.Context, pageTok
 		case <-time.After(backoff.Step()):
 		}
 	}
+}
+
+// withReportedActors puts the actors ceiling the worker reported back onto a
+// freshly computed capacity.
+//
+// The two halves have different owners: the pod states cpu and memory, the
+// ateom states how many Actors it can host. The syncer recomputes its half on
+// every pod event, so without carrying the other half across it would clear the
+// report each time and the worker would re-report it, forever.
+func withReportedActors(computed, stored *ateapipb.WorkerCapacity) *ateapipb.WorkerCapacity {
+	if stored.GetActors() == 0 {
+		return computed
+	}
+	if computed == nil {
+		computed = &ateapipb.WorkerCapacity{}
+	}
+	out := proto.Clone(computed).(*ateapipb.WorkerCapacity)
+	out.Actors = stored.GetActors()
+	return out
 }

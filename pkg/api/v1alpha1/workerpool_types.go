@@ -114,42 +114,6 @@ type WorkerPoolSpec struct {
 	// SandboxClass is used.
 	// +optional
 	SandboxConfigName string `json:"sandboxConfigName,omitempty"`
-
-	// MaxActorsPerWorker is how many Actors may be bound to one worker Pod at
-	// once. It bounds the per-Actor costs that CPU and memory limits do not --
-	// network namespaces, mounts, file descriptors, and how much is lost with
-	// the pod -- and is enforced as one dimension of the worker's capacity,
-	// alongside the compute limits taken from the ateom container. An Actor is
-	// placed only where every dimension still has room.
-	//
-	// The ceiling is the worker's pod-side address space: actornet gives each
-	// Actor an address out of a /20, so 4094 is what the addressing supports
-	// and the API refuses to promise more than the implementation can number.
-	// The practical limit is far lower and is set by the pod's memory: a
-	// worker cannot host more Actors than it can hold guests for.
-	//
-	// It defaults to 1, which behaves exactly as single-Actor workers always
-	// have. Raising it is supported on both sandbox classes -- each Actor gets
-	// its own network namespace, sandbox, and atunnel activation -- but has
-	// been exercised end to end at 2, not at hundreds. Treat large values as
-	// unproven rather than unsupported: what is known to hold is the design,
-	// not the constant.
-	//
-	// +optional
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=4094
-	// +kubebuilder:default=1
-	MaxActorsPerWorker int32 `json:"maxActorsPerWorker,omitempty"`
-}
-
-// MaxActors returns how many Actors each worker Pod in this pool may host,
-// treating the zero value as 1 so a pool stored before the field existed, or
-// built by a client that does not set it, keeps single-Actor behavior.
-func (s *WorkerPoolSpec) MaxActors() int32 {
-	if s.MaxActorsPerWorker < 1 {
-		return 1
-	}
-	return s.MaxActorsPerWorker
 }
 
 type WorkerPoolStatus struct {

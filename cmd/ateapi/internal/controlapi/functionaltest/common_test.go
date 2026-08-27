@@ -526,12 +526,11 @@ func createWorkerPod(t *testing.T, tc *testContext, ns string, name string, node
 			NodeName:        nodeName,
 			SandboxClass:    string(pool.Spec.SandboxClass),
 			Labels:          pool.GetLabels(),
-			// The syncer derives this from the pod's limits and the pool's actor
-			// ceiling. These pods declare no compute limits, so what is left is
-			// how many actors the pool admits on one worker — and without it a
-			// Worker registered here would be unschedulable for reasons the test
-			// never mentions.
-			Capacity: &ateapipb.WorkerCapacity{Actors: pool.Spec.MaxActors()},
+			// No capacity: the syncer takes the compute dimensions from the pod's
+			// limits, and these pods declare none. The actors ceiling is the
+			// ateom's and arrives by report, which unset reads as one — enough
+			// for a test that places a single Actor per worker. See
+			// setWorkerActorCapacity for the tests that need more.
 		},
 	}); err != nil {
 		t.Fatalf("failed to register worker: %v", err)

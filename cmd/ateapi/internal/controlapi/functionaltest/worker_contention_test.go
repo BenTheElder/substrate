@@ -21,10 +21,10 @@ import (
 	"testing"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	"google.golang.org/protobuf/proto"
 )
 
 // TestResumeActor_ConcurrentOntoOneWorker is the regression test for a refusal
@@ -52,8 +52,8 @@ func TestResumeActor_ConcurrentOntoOneWorker(t *testing.T) {
 	// of them. The point is that they contend, not that they are turned away for
 	// lack of capacity.
 	createTemplate(t, tc, ns)
-	setPoolMaxActors(t, tc, ns, "pool1", actors)
-	createWorkerPod(t, tc, ns, "worker-1", "node1", "pool1")
+	podUID := createWorkerPod(t, tc, ns, "worker-1", "node1", "pool1")
+	setWorkerActorCapacity(t, tc, podUID, actors)
 
 	for i := range actors {
 		if _, err := tc.client.CreateActor(context.Background(), &ateapipb.CreateActorRequest{Actor: &ateapipb.Actor{
@@ -120,27 +120,35 @@ func TestResumeActor_ConcurrentOntoOneWorker(t *testing.T) {
 	}
 }
 
-// setPoolMaxActors widens an existing pool to host several actors per worker.
-// The CRD default is 1, and a fake client does no defaulting, so this has to be
-// explicit either way.
-func setPoolMaxActors(t *testing.T, tc *testContext, ns, name string, maxActors int32) {
+// setWorkerActorCapacity gives one worker room for several actors, standing in
+// for the report its ateom would make. The ceiling is the worker's own, so this
+// is where a test that wants a crowd on one worker has to say so.
+func setWorkerActorCapacity(t *testing.T, tc *testContext, workerName string, actors int32) {
 	t.Helper()
-	pools := tc.substrateClient.ApiV1alpha1().WorkerPools(ns)
-	wp, err := pools.Get(context.Background(), name, metav1.GetOptions{})
+	observed, err := tc.client.GetWorker(context.Background(), &ateapipb.GetWorkerRequest{
+		Worker: &ateapipb.ObjectRef{Name: workerName},
+	})
 	if err != nil {
-		t.Fatalf("get WorkerPool %s/%s: %v", ns, name, err)
+		t.Fatalf("get worker %s: %v", workerName, err)
 	}
-	wp.Spec.MaxActorsPerWorker = maxActors
-	if _, err := pools.Update(context.Background(), wp, metav1.UpdateOptions{}); err != nil {
-		t.Fatalf("update WorkerPool %s/%s: %v", ns, name, err)
+	updated := proto.Clone(observed).(*ateapipb.Worker)
+	if updated.Capacity == nil {
+		updated.Capacity = &ateapipb.WorkerCapacity{}
 	}
-	// The scheduler reads the pool through an informer, so wait for the widened
-	// value rather than merely for the object to exist.
+	updated.Capacity.Actors = actors
+	if _, err := tc.client.UpdateWorker(context.Background(), &ateapipb.UpdateWorkerRequest{Worker: updated}); err != nil {
+		t.Fatalf("widening worker %s to %d actors: %v", workerName, actors, err)
+	}
+
+	// The scheduler reads workers through a watch-fed cache, so wait for the
+	// widened ceiling rather than merely for the write to return.
 	if err := wait.PollUntilContextTimeout(context.Background(), 50*time.Millisecond, 5*time.Second, true,
 		func(ctx context.Context) (bool, error) {
-			got, err := tc.workerPoolLister.WorkerPools(ns).Get(name)
-			return err == nil && got.Spec.MaxActorsPerWorker == maxActors, nil
+			got, err := tc.client.GetWorker(ctx, &ateapipb.GetWorkerRequest{
+				Worker: &ateapipb.ObjectRef{Name: workerName},
+			})
+			return err == nil && got.GetCapacity().GetActors() == actors, nil
 		}); err != nil {
-		t.Fatalf("WorkerPool %s/%s did not reach maxActorsPerWorker=%d in the informer: %v", ns, name, maxActors, err)
+		t.Fatalf("worker %s did not reach %d actors: %v", workerName, actors, err)
 	}
 }
