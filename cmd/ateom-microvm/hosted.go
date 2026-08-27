@@ -265,12 +265,12 @@ func (s *AteomService) freeSlotLocked() (int, error) {
 		// appeared; twelve at once hit it within ten actors.
 		taken[hosted.slot] = true
 	}
-	for slot := range actornet.MaxActorSlots {
+	for slot := range s.podSidePlan.Slots() {
 		if !taken[slot] {
 			return slot, nil
 		}
 	}
-	return 0, fmt.Errorf("no free actor slot: all %d are in use", actornet.MaxActorSlots)
+	return 0, fmt.Errorf("no free actor slot: all %d are in use", s.podSidePlan.Slots())
 }
 
 // applyNetworkRules rebuilds the worker's nftables ruleset from the actors it is
@@ -295,7 +295,7 @@ func (s *AteomService) applyNetworkRules(act *activation.Activation) error {
 	act.Since(ateattr.ActivationPhaseNftWait, wait)
 
 	return act.Step(ateattr.ActivationPhaseNftWork, func() error {
-		if err := actornet.ApplyActorNetworkRules(networks, s.atunnelEgressPort); err != nil {
+		if err := actornet.ApplyActorNetworkRules(s.podSidePlan, networks, s.atunnelEgressPort); err != nil {
 			return fmt.Errorf("while applying actor network rules: %w", err)
 		}
 		return nil
