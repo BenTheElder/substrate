@@ -1341,8 +1341,9 @@ var Debug_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	ActorIdentity_MintJWT_FullMethodName  = "/ateapi.ActorIdentity/MintJWT"
-	ActorIdentity_MintCert_FullMethodName = "/ateapi.ActorIdentity/MintCert"
+	ActorIdentity_MintJWT_FullMethodName              = "/ateapi.ActorIdentity/MintJWT"
+	ActorIdentity_MintCert_FullMethodName             = "/ateapi.ActorIdentity/MintCert"
+	ActorIdentity_ReportWorkerCapacity_FullMethodName = "/ateapi.ActorIdentity/ReportWorkerCapacity"
 )
 
 // ActorIdentityClient is the client API for ActorIdentity service.
@@ -1373,6 +1374,23 @@ type ActorIdentityClient interface {
 	//
 	// The certificate in the response is the actor's identity, not the atelet's.
 	MintCert(ctx context.Context, in *MintCertRequest, opts ...grpc.CallOption) (*MintCertResponse, error)
+	// ReportWorkerCapacity records what a Worker can hold, as the Worker itself
+	// reports it.
+	//
+	// The ceiling belongs to the ateom -- it owns the slot allocator -- and only
+	// the node the Worker runs on can observe it, so it arrives here rather than
+	// being asserted by the control plane. An ateom that hosts one Actor reports
+	// one, which is why the API can ship before the implementation and why a
+	// fleet may run mixed ateom versions.
+	//
+	// atelet calls this on the Worker's behalf, authenticating with its own
+	// client certificate, exactly as it does for MintCert. Authorization is that
+	// the calling atelet runs on the Worker's node: an atelet may speak for the
+	// Workers it herds and no others.
+	//
+	// Idempotent, and safe to re-send on a timer -- reporting the same capacity
+	// again is not an update.
+	ReportWorkerCapacity(ctx context.Context, in *ReportWorkerCapacityRequest, opts ...grpc.CallOption) (*ReportWorkerCapacityResponse, error)
 }
 
 type actorIdentityClient struct {
@@ -1397,6 +1415,16 @@ func (c *actorIdentityClient) MintCert(ctx context.Context, in *MintCertRequest,
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(MintCertResponse)
 	err := c.cc.Invoke(ctx, ActorIdentity_MintCert_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *actorIdentityClient) ReportWorkerCapacity(ctx context.Context, in *ReportWorkerCapacityRequest, opts ...grpc.CallOption) (*ReportWorkerCapacityResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReportWorkerCapacityResponse)
+	err := c.cc.Invoke(ctx, ActorIdentity_ReportWorkerCapacity_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1431,6 +1459,23 @@ type ActorIdentityServer interface {
 	//
 	// The certificate in the response is the actor's identity, not the atelet's.
 	MintCert(context.Context, *MintCertRequest) (*MintCertResponse, error)
+	// ReportWorkerCapacity records what a Worker can hold, as the Worker itself
+	// reports it.
+	//
+	// The ceiling belongs to the ateom -- it owns the slot allocator -- and only
+	// the node the Worker runs on can observe it, so it arrives here rather than
+	// being asserted by the control plane. An ateom that hosts one Actor reports
+	// one, which is why the API can ship before the implementation and why a
+	// fleet may run mixed ateom versions.
+	//
+	// atelet calls this on the Worker's behalf, authenticating with its own
+	// client certificate, exactly as it does for MintCert. Authorization is that
+	// the calling atelet runs on the Worker's node: an atelet may speak for the
+	// Workers it herds and no others.
+	//
+	// Idempotent, and safe to re-send on a timer -- reporting the same capacity
+	// again is not an update.
+	ReportWorkerCapacity(context.Context, *ReportWorkerCapacityRequest) (*ReportWorkerCapacityResponse, error)
 	mustEmbedUnimplementedActorIdentityServer()
 }
 
@@ -1446,6 +1491,9 @@ func (UnimplementedActorIdentityServer) MintJWT(context.Context, *MintJWTRequest
 }
 func (UnimplementedActorIdentityServer) MintCert(context.Context, *MintCertRequest) (*MintCertResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method MintCert not implemented")
+}
+func (UnimplementedActorIdentityServer) ReportWorkerCapacity(context.Context, *ReportWorkerCapacityRequest) (*ReportWorkerCapacityResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReportWorkerCapacity not implemented")
 }
 func (UnimplementedActorIdentityServer) mustEmbedUnimplementedActorIdentityServer() {}
 func (UnimplementedActorIdentityServer) testEmbeddedByValue()                       {}
@@ -1504,6 +1552,24 @@ func _ActorIdentity_MintCert_Handler(srv interface{}, ctx context.Context, dec f
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ActorIdentity_ReportWorkerCapacity_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReportWorkerCapacityRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ActorIdentityServer).ReportWorkerCapacity(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ActorIdentity_ReportWorkerCapacity_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ActorIdentityServer).ReportWorkerCapacity(ctx, req.(*ReportWorkerCapacityRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ActorIdentity_ServiceDesc is the grpc.ServiceDesc for ActorIdentity service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1518,6 +1584,10 @@ var ActorIdentity_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "MintCert",
 			Handler:    _ActorIdentity_MintCert_Handler,
+		},
+		{
+			MethodName: "ReportWorkerCapacity",
+			Handler:    _ActorIdentity_ReportWorkerCapacity_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

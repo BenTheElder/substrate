@@ -356,6 +356,12 @@ func main() {
 	if err := os.Chmod(ateompath.CredentialBrokerSocket, 0o600); err != nil {
 		serverboot.Fatal(ctx, "Failed to restrict credential broker socket", err)
 	}
+	// The node's workers report what they can hold. Started here rather than
+	// with the other background loops because it needs the ateapi connection
+	// opened above, and it authenticates as this atelet exactly as MintCert
+	// does.
+	startCapacityReporter(ctx, ateapiConn)
+
 	brokerServer := grpc.NewServer(grpc.Creds(credentials.NewTLS(brokerTLS)))
 	ateletpb.RegisterCredentialBrokerServer(brokerServer, &credentialBroker{
 		actorIdentityClient: ateapipb.NewActorIdentityClient(ateapiConn),

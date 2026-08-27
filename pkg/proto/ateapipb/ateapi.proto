@@ -1316,6 +1316,44 @@ service ActorIdentity {
   //
   // The certificate in the response is the actor's identity, not the atelet's.
   rpc MintCert(MintCertRequest) returns (MintCertResponse);
+
+  // ReportWorkerCapacity records what a Worker can hold, as the Worker itself
+  // reports it.
+  //
+  // The ceiling belongs to the ateom -- it owns the slot allocator -- and only
+  // the node the Worker runs on can observe it, so it arrives here rather than
+  // being asserted by the control plane. An ateom that hosts one Actor reports
+  // one, which is why the API can ship before the implementation and why a
+  // fleet may run mixed ateom versions.
+  //
+  // atelet calls this on the Worker's behalf, authenticating with its own
+  // client certificate, exactly as it does for MintCert. Authorization is that
+  // the calling atelet runs on the Worker's node: an atelet may speak for the
+  // Workers it herds and no others.
+  //
+  // Idempotent, and safe to re-send on a timer -- reporting the same capacity
+  // again is not an update.
+  rpc ReportWorkerCapacity(ReportWorkerCapacityRequest) returns (ReportWorkerCapacityResponse);
+}
+
+message ReportWorkerCapacityRequest {
+  // The Worker being reported on. atespace is always empty; Workers are
+  // global-scoped.
+  // +k8s:opaqueType
+  ObjectRef worker = 1;
+
+  // What the Worker can hold. Only the dimensions the reporter can observe are
+  // set; an unset dimension leaves whatever is already recorded alone rather
+  // than clearing it, so a reporter that knows only its actor ceiling does not
+  // erase the compute capacity taken from the pod's limits.
+  // +k8s:opaqueType
+  WorkerCapacity capacity = 2;
+}
+
+message ReportWorkerCapacityResponse {
+  // The Worker as recorded, so a caller can see what its report resolved to
+  // without a second round trip.
+  Worker worker = 1;
 }
 
 message MintJWTRequest {
