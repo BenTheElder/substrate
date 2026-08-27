@@ -91,6 +91,11 @@ apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
 - role: control-plane
 EOF
+# Pin the Kubernetes version when the default kind ships is not the one we want
+# to develop against, e.g. to match the version a feature we rely on graduated in.
+if [ -n "${KIND_NODE_IMAGE:-}" ]; then
+  echo "  image: ${KIND_NODE_IMAGE}" >> "${ROOT}/bin/kind-config.yaml"
+fi
 if [ "${HAS_KVM}" = "1" ]; then
   cat <<EOF >> "${ROOT}/bin/kind-config.yaml"
   # Bind-mount /dev/kvm into the node so micro-VM (kata + cloud-hypervisor)
