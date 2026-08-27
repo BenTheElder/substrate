@@ -1213,7 +1213,13 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 		return nil, ateerrors.CrashIfReason(ctx, err, ateerrors.ReasonTerminalFileSystemError)
 	}
 
+	// Every phase the metrics record, not a subset: a restore that spends its
+	// time in one of the others reads as unattributed otherwise, and the gap
+	// between the logged phases and the total is exactly where a stall hides.
 	slog.InfoContext(ctx, "Restore timing breakdown", slog.Any("actor", actorRef),
+		slog.Duration("volume_mount", dMount),  // mountExternalVolumes
+		slog.Duration("manifest", dManifest),   // snapshot manifest fetch
+		slog.Duration("assets", dAssets),       // ensureSandboxAssets (cached after the first)
 		slog.Duration("download", dDownload),   // rustfs/GCS fetch + decompress (or local copy)
 		slog.Duration("oci_unpack", dBundles),  // prepareOCIBundles: unpack the OCI image to the bundle
 		slog.Duration("ateom_restore", dAteom), // ateom.RestoreWorkload (see its own breakdown)
