@@ -56,6 +56,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 
 	"github.com/agent-substrate/substrate/internal/ateomnet"
 	"github.com/agent-substrate/substrate/internal/ateompath"
@@ -68,23 +69,103 @@ import (
 )
 
 const (
-	// PodSideSubnet is the range actors are known by inside the worker pod. It
-	// is pod-local and never persisted, so unlike the actor's own address it is
-	// free to be allocated per actor. /20 is far more addresses than a worker
-	// will host, and is link-local so it cannot escape the pod.
-	PodSideSubnet = "169.254.32.0/20"
+	// DefaultPodSideSubnet is the range actors are known by inside the worker
+	// pod when nothing overrides it. It is pod-local and never persisted, so
+	// unlike the actor's own frozen address it is free to be chosen per
+	// deployment, and it is link-local so it cannot escape the pod.
+	//
+	// Link-local is unadministered, which is why no allocator has to be asked
+	// for it -- and also why it can collide: anything else on the node is
+	// equally free to squat here. That is what PodSidePlan exists to let a
+	// deployment resolve.
+	DefaultPodSideSubnet = "169.254.32.0/20"
 
-	// MaxActorSlots is how many actors one worker can address, bounded by
-	// PodSideSubnet. The pod's own capacity will run out long before this does;
-	// it exists so slot allocation fails loudly rather than silently wrapping
-	// onto another actor's address.
-	MaxActorSlots = 4094
+	// maxPodSideSlots caps how many slots any prefix yields. A /20 is already
+	// far more actors than a worker will host, and the cap keeps a careless
+	// prefix (or, later, an IPv6 one) from producing a slot count that overflows
+	// the capacity it is reported as.
+	maxPodSideSlots = 65534
 )
 
-// PodSideIP is the address the pod netns knows the actor in slot by. Slots
-// start at zero and map to 169.254.32.1 upward, skipping the network address.
-func PodSideIP(slot int) net.IP {
-	return net.IPv4(169, 254, 32+byte((slot+1)/256), byte((slot+1)%256)).To4()
+// PodSidePlan is how a worker addresses the actors it hosts: a prefix, and the
+// slot-to-address mapping over it.
+//
+// The plan is per worker process and never leaves it, so two workers may use
+// different prefixes and nothing has to agree. What the plan does decide is how
+// many actors the worker can address at all, which is why the ateom reports
+// Slots() as its capacity rather than a constant -- change the prefix and the
+// ceiling the control plane places against follows, with nothing to configure
+// on the other side.
+type PodSidePlan struct {
+	prefix netip.Prefix
+	slots  int
+}
+
+// NewPodSidePlan builds a plan over cidr.
+//
+// IPv6 is rejected rather than mishandled. The addressing here would extend to
+// it, but the ruleset this package builds is an IPv4 nftables table operating on
+// IPv4 header offsets, and the actor's own frozen address is IPv4 and baked into
+// every existing snapshot. So the shape is family-agnostic and the guard is one
+// place to remove, but the work is real and is not done.
+func NewPodSidePlan(cidr string) (*PodSidePlan, error) {
+	prefix, err := netip.ParsePrefix(cidr)
+	if err != nil {
+		return nil, fmt.Errorf("parsing pod-side subnet %q: %w", cidr, err)
+	}
+	prefix = prefix.Masked()
+	if !prefix.Addr().Is4() {
+		return nil, fmt.Errorf("pod-side subnet %q is not IPv4: IPv6 actor addressing is not implemented", cidr)
+	}
+	// Usable hosts, less the network and broadcast addresses.
+	hostBits := prefix.Addr().BitLen() - prefix.Bits()
+	if hostBits < 2 {
+		return nil, fmt.Errorf("pod-side subnet %q is too small to address any actor", cidr)
+	}
+	slots := maxPodSideSlots
+	if hostBits < 32 {
+		if n := (1 << hostBits) - 2; n < slots {
+			slots = n
+		}
+	}
+	return &PodSidePlan{prefix: prefix, slots: slots}, nil
+}
+
+// addrFromIP converts a net.IP for prefix containment checks.
+func addrFromIP(ip net.IP) (netip.Addr, bool) {
+	if v4 := ip.To4(); v4 != nil {
+		return netip.AddrFrom4([4]byte(v4)), true
+	}
+	return netip.Addr{}, false
+}
+
+// MustPodSidePlan is NewPodSidePlan for a prefix known good at compile time.
+func MustPodSidePlan(cidr string) *PodSidePlan {
+	plan, err := NewPodSidePlan(cidr)
+	if err != nil {
+		panic(err)
+	}
+	return plan
+}
+
+// DefaultPodSidePlan is the plan a worker uses when nothing overrides it.
+func DefaultPodSidePlan() *PodSidePlan { return MustPodSidePlan(DefaultPodSideSubnet) }
+
+// Slots is how many actors this plan can address, and so the ceiling the ateom
+// reports as its capacity.
+func (p *PodSidePlan) Slots() int { return p.slots }
+
+// Subnet is the prefix in CIDR form, as the nftables rules match on it.
+func (p *PodSidePlan) Subnet() string { return p.prefix.String() }
+
+// IP is the address the pod netns knows the actor in slot by. Slots start at
+// zero and map to the first usable address upward, skipping the network address.
+func (p *PodSidePlan) IP(slot int) net.IP {
+	addr := p.prefix.Addr()
+	for range slot + 1 {
+		addr = addr.Next()
+	}
+	return net.IP(addr.AsSlice())
 }
 
 // HostVethName is the worker-pod end of the actor in slot's veth pair. Named by
@@ -150,6 +231,10 @@ type ActorNetworkConfig struct {
 	ActorUID string
 	Slot     int
 
+	// Plan is the worker's pod-side addressing. Nil uses the default, so a
+	// caller that has no opinion is not forced to state one.
+	Plan *PodSidePlan
+
 	// HostVethHWAddr fixes the worker-side MAC. The micro-VM runtime needs it:
 	// a snapshot freezes the guest's ARP entry for its gateway, so a restored
 	// guest only reaches the network if the gateway answers with the same MAC on
@@ -179,14 +264,18 @@ func SetupActorNetwork(ctx context.Context, cfg ActorNetworkConfig) (_ *ActorNet
 	if cfg.ActorUID == "" {
 		return nil, fmt.Errorf("actor UID is required")
 	}
-	if cfg.Slot < 0 || cfg.Slot >= MaxActorSlots {
-		return nil, fmt.Errorf("slot %d is outside 0..%d", cfg.Slot, MaxActorSlots-1)
+	plan := cfg.Plan
+	if plan == nil {
+		plan = DefaultPodSidePlan()
+	}
+	if cfg.Slot < 0 || cfg.Slot >= plan.Slots() {
+		return nil, fmt.Errorf("slot %d is outside 0..%d", cfg.Slot, plan.Slots()-1)
 	}
 
 	network := &ActorNetwork{
 		ActorUID:       cfg.ActorUID,
 		Slot:           cfg.Slot,
-		PodSideIP:      PodSideIP(cfg.Slot),
+		PodSideIP:      plan.IP(cfg.Slot),
 		NetNS:          noNetNS,
 		TunneledEgress: cfg.TunneledEgress,
 	}
@@ -353,10 +442,10 @@ func CleanupActorNetwork(ctx context.Context, network *ActorNetwork) error {
 	// unusual cases, but a stale route to a reused pod-side address would send
 	// the next actor's traffic nowhere.
 	if err := netlink.RouteDel(&netlink.Route{
-		Dst: &net.IPNet{IP: PodSideIP(network.Slot), Mask: net.CIDRMask(32, 32)},
+		Dst: &net.IPNet{IP: network.PodSideIP, Mask: net.CIDRMask(32, 32)},
 	}); err != nil && !errors.Is(err, unix.ESRCH) && !errors.Is(err, unix.ENOENT) {
 		slog.WarnContext(ctx, "Failed to delete pod-side route",
-			slog.String("ip", PodSideIP(network.Slot).String()), slog.Any("err", err))
+			slog.String("ip", network.PodSideIP.String()), slog.Any("err", err))
 	}
 
 	// Guarded on holdsNetNS, not on IsOpen: IsOpen only asks whether the handle
@@ -397,7 +486,10 @@ func CleanupActorNetwork(ctx context.Context, network *ActorNetwork) error {
 // difference written, so an activation costs the change rather than the
 // worker's occupancy. See reconcileSetElements for the wire limits a full
 // refill hits.
-func ApplyActorNetworkRules(actors []*ActorNetwork, egressRedirectPort uint16) error {
+func ApplyActorNetworkRules(plan *PodSidePlan, actors []*ActorNetwork, egressRedirectPort uint16) error {
+	if plan == nil {
+		plan = DefaultPodSidePlan()
+	}
 	c := &nftables.Conn{}
 	if len(actors) == 0 {
 		return removeActorTable(c)
@@ -473,7 +565,7 @@ func ApplyActorNetworkRules(actors []*ActorNetwork, egressRedirectPort uint16) e
 		Hooknum: nftables.ChainHookPostrouting, Priority: nftables.ChainPriorityMangle,
 	})
 	c.AddRule(&nftables.Rule{Table: table, Chain: rewriteOut, Exprs: concat(
-		ipPrefixEqual(ipHeaderDst, PodSideSubnet),
+		ipPrefixEqual(ipHeaderDst, plan.Subnet()),
 		setIPField(ipHeaderDst, ActorVethGwAddrFor(ateomnet.ActorVethIP)),
 	)})
 
@@ -504,7 +596,7 @@ func ApplyActorNetworkRules(actors []*ActorNetwork, egressRedirectPort uint16) e
 	// pod-side range, so it sees one address per actor and conntrack can tell
 	// the replies apart even when the actors' own tuples are identical.
 	c.AddRule(&nftables.Rule{Table: table, Chain: postrouting, Exprs: concat(
-		ipPrefixEqual(ipHeaderSrc, PodSideSubnet),
+		ipPrefixEqual(ipHeaderSrc, plan.Subnet()),
 		[]expr.Any{&expr.Masq{}},
 	)})
 

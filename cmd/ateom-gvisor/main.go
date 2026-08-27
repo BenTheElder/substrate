@@ -37,6 +37,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/activation"
 	"github.com/agent-substrate/substrate/internal/actorlock"
 	"github.com/agent-substrate/substrate/internal/actorlog"
+	"github.com/agent-substrate/substrate/internal/actornet"
 	"github.com/agent-substrate/substrate/internal/ateattr"
 	"github.com/agent-substrate/substrate/internal/ateinterceptors"
 	"github.com/agent-substrate/substrate/internal/ateompath"
@@ -64,6 +65,13 @@ import (
 
 var (
 	podUID = pflag.String("pod-uid", "", "The UID of the current pod")
+
+	// Pod-side actor addressing. Link-local is unadministered, so anything else
+	// on the node is equally free to use it; a deployment that collides moves
+	// this rather than substrate. The prefix also decides how many actors this
+	// worker can address, which is what it reports as its capacity.
+	actorPodSubnet = pflag.String("actor-pod-subnet", actornet.DefaultPodSideSubnet,
+		"IPv4 CIDR the worker addresses its actors by, inside the pod. Sets the actor ceiling this worker reports.")
 
 	// TODO(liorlieberman) have a sub package for all atunnel releated things like that
 	atunnelListenAddress        = pflag.String("atunnel-listen-address", "0.0.0.0:443", "Address for actor ingress HTTPS")
@@ -195,12 +203,19 @@ func do(ctx context.Context) error {
 	// own namespace to hold it in. See internal/actornet.
 
 	actorLogger := actorlog.NewActorLogger(syncedWriter, metadata.OnGCE())
+	podSidePlan, err := actornet.NewPodSidePlan(*actorPodSubnet)
+	if err != nil {
+		serverboot.Fatal(ctx, "Invalid --actor-pod-subnet", err)
+	}
+	slog.InfoContext(ctx, "Actor pod-side addressing",
+		slog.String("subnet", podSidePlan.Subnet()), slog.Int("actor_slots", podSidePlan.Slots()))
+
 	atunnelIngress, atunnelEgress, atunnelEgressPort, err := runAtunnel(ctx)
 	if err != nil {
 		return err
 	}
 
-	ateomService := NewService(actorLogger, atunnelIngress, atunnelEgress, atunnelEgressPort, *workerCredentialBundle, *podIdentityTrustBundle, *egressGatewayTrustBundle)
+	ateomService := NewService(actorLogger, podSidePlan, atunnelIngress, atunnelEgress, atunnelEgressPort, *workerCredentialBundle, *podIdentityTrustBundle, *egressGatewayTrustBundle)
 
 	// Assigned rather than passed: NewService's parameter list is already long,
 	// and every test constructs a service that wants the nil no-op anyway.
@@ -352,6 +367,10 @@ type AteomService struct {
 	// atunnelEgressPort is the local atunnel listener used as the target of the
 	// actor network's transparent TCP redirect.
 	atunnelEgressPort uint16
+
+	// podSidePlan is how this worker addresses its actors, and so how many it
+	// can host. Reported as capacity rather than assumed by the control plane.
+	podSidePlan *actornet.PodSidePlan
 	// workerCredentialBundlePath contains the worker Pod certificate and key.
 	// Atunnel uses it for ingress serving and authentication to the atelet broker.
 	workerCredentialBundlePath string
@@ -390,9 +409,10 @@ type AteomService struct {
 var _ ateompb.AteomServer = (*AteomService)(nil)
 
 // NewService creates a new AteomService.
-func NewService(actorLogger *actorlog.ActorLogger, atunnelIngress *atunnel.Server, atunnelEgress *atunnel.Egress, atunnelEgressPort uint16, workerCredentialBundlePath, podIdentityTrustBundlePath, egressGatewayTrustBundlePath string) *AteomService {
+func NewService(actorLogger *actorlog.ActorLogger, podSidePlan *actornet.PodSidePlan, atunnelIngress *atunnel.Server, atunnelEgress *atunnel.Egress, atunnelEgressPort uint16, workerCredentialBundlePath, podIdentityTrustBundlePath, egressGatewayTrustBundlePath string) *AteomService {
 	return &AteomService{
 		actorLocks:                   actorlock.New(),
+		podSidePlan:                  podSidePlan,
 		actors:                       map[string]*hostedActor{},
 		activeRPCs:                   map[string]*activeRPCInfo{},
 		actorLogger:                  actorLogger,
