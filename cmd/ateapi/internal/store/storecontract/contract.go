@@ -1361,9 +1361,9 @@ func runWorkerContractTests(t *testing.T, setup func(t *testing.T) store.Interfa
 			{"worker_pod_uid", "worker_pod_uid", func(w *ateapipb.Worker) { w.WorkerPodUid = otherTestWorkerName }},
 			{"node_name", "node_name", func(w *ateapipb.Worker) { w.NodeName = "other-node" }},
 			{"ip", "ip", func(w *ateapipb.Worker) { w.Ip = "10.0.0.9" }},
-			{"capacity_changed", "capacity", func(w *ateapipb.Worker) { w.Capacity.CpuMilli = 4000 }},
-			// An update replaces the worker, so a caller that leaves capacity
-			// out is asking to clear it. That is a change like any other.
+			// An update replaces the worker, so a caller that leaves capacity out
+			// is asking to clear it. Changing capacity is allowed (see below);
+			// losing it is not.
 			{"capacity_cleared", "capacity", func(w *ateapipb.Worker) { w.Capacity = nil }},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
@@ -1385,6 +1385,51 @@ func runWorkerContractTests(t *testing.T, setup func(t *testing.T) store.Interfa
 					t.Errorf("rejected mutation bumped the version to %d, want 1", got.GetMetadata().GetVersion())
 				}
 			})
+		}
+	})
+
+	// Capacity belongs to the Worker, not to the pool that seeded it, so it has
+	// to be able to move: the pool's maxActorsPerWorker is editable, pods can be
+	// resized, and a Worker may come to report its own. Before this was allowed
+	// the syncer's capacity update was rejected as an immutable field and
+	// dropped, so a pool's actor ceiling only ever reached workers created after
+	// the edit.
+	t.Run("UpdateWorker_CapacityChanges", func(t *testing.T) {
+		s := setup(t)
+		ctx := context.Background()
+
+		created, err := s.CreateWorker(ctx, newTestWorker(testWorkerName, "pod-1"))
+		if err != nil {
+			t.Fatalf("CreateWorker failed: %v", err)
+		}
+
+		want := &ateapipb.WorkerCapacity{
+			CpuMilli:    created.GetCapacity().GetCpuMilli(),
+			MemoryBytes: created.GetCapacity().GetMemoryBytes(),
+			Actors:      created.GetCapacity().GetActors() + 1000,
+		}
+		updated, err := s.UpdateWorker(ctx, testWorkerName, store.PreconditionFrom(created), func(toUpdate *ateapipb.Worker) error {
+			toUpdate.Capacity = want
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("raising the actor ceiling failed: %v", err)
+		}
+		if got := updated.GetCapacity().GetActors(); got != want.GetActors() {
+			t.Errorf("capacity.actors = %d, want %d", got, want.GetActors())
+		}
+
+		// Shrinking is allowed too: it means the scheduler stops placing here,
+		// not that anything already placed is evicted to fit.
+		shrunk, err := s.UpdateWorker(ctx, testWorkerName, store.PreconditionFrom(updated), func(toUpdate *ateapipb.Worker) error {
+			toUpdate.Capacity.Actors = 1
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("lowering the actor ceiling failed: %v", err)
+		}
+		if got := shrunk.GetCapacity().GetActors(); got != 1 {
+			t.Errorf("capacity.actors = %d, want 1", got)
 		}
 	})
 

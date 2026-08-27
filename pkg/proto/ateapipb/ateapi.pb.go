@@ -5192,8 +5192,17 @@ type Worker struct {
 	// Mutable.
 	SandboxClass string            `protobuf:"bytes,8,opt,name=sandbox_class,json=sandboxClass,proto3" json:"sandbox_class,omitempty"`
 	Labels       map[string]string `protobuf:"bytes,9,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	// The compute capacity this worker can give an actor sandbox. Immutable, set
-	// at creation: a worker pod's limits are fixed for its lifetime.
+	// The compute capacity this worker can give an actor sandbox.
+	//
+	// Per Worker, not per WorkerPool: the pool seeds it, but it is the Worker's
+	// own and may change over its lifetime. The actors dimension moves when the
+	// pool's maxActorsPerWorker is edited, a pod may be resized, and a Worker may
+	// come to report what it can really hold rather than what was declared for
+	// it. What an update may NOT do is clear it — an omitted capacity is a
+	// request to lose one, not to report having none.
+	//
+	// Shrinking below what is already allocated is allowed and means only that
+	// the scheduler stops placing here; nothing is evicted to fit.
 	Capacity *WorkerCapacity `protobuf:"bytes,10,opt,name=capacity,proto3" json:"capacity,omitempty"`
 	// Output-only server-managed state. Absent from Create/Update request
 	// payloads; whatever a request carries here is ignored. DrainWorker is the
