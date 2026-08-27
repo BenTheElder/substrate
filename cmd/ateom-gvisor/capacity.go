@@ -19,17 +19,18 @@ package main
 import (
 	"context"
 
-	"github.com/agent-substrate/substrate/internal/actornet"
 	"github.com/agent-substrate/substrate/internal/proto/ateompb"
 )
 
 // GetCapacity reports how many Actors this ateom can host.
 //
 // It answers from the slot allocator this process actually uses, so the number
-// cannot drift from what hostActor will admit: both come from
-// actornet.MaxActorSlots, the pod-side /20 that every actor takes an address
-// out of. An ateom built to host one Actor answers one, which is what lets the
-// control plane learn a worker's ceiling instead of asserting it.
+// cannot drift from what hostActor will admit: both come from the same pod-side
+// plan, the prefix every actor takes an address out of. Move the prefix with
+// --actor-pod-subnet and the reported ceiling follows, with nothing to
+// reconfigure on the control-plane side. An ateom built to host one Actor
+// answers one, which is what lets the control plane learn a worker's ceiling
+// instead of asserting it.
 func (s *AteomService) GetCapacity(context.Context, *ateompb.GetCapacityRequest) (*ateompb.GetCapacityResponse, error) {
-	return &ateompb.GetCapacityResponse{ActorSlots: int32(actornet.MaxActorSlots)}, nil
+	return &ateompb.GetCapacityResponse{ActorSlots: int32(s.podSidePlan.Slots())}, nil
 }

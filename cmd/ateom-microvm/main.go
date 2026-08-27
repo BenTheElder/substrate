@@ -42,6 +42,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/activation"
 	"github.com/agent-substrate/substrate/internal/actorlock"
 	"github.com/agent-substrate/substrate/internal/actorlog"
+	"github.com/agent-substrate/substrate/internal/actornet"
 	"github.com/agent-substrate/substrate/internal/ateinterceptors"
 	"github.com/agent-substrate/substrate/internal/ateomcapacity"
 	"github.com/agent-substrate/substrate/internal/ateomnet"
@@ -61,7 +62,14 @@ import (
 )
 
 var (
-	podUID        = flag.String("pod-uid", "", "The UID of the current pod")
+	podUID = flag.String("pod-uid", "", "The UID of the current pod")
+
+	// Pod-side actor addressing. Link-local is unadministered, so anything else
+	// on the node is equally free to use it; a deployment that collides moves
+	// this rather than substrate. The prefix also decides how many actors this
+	// worker can address, which is what it reports as its capacity.
+	actorPodSubnet = flag.String("actor-pod-subnet", actornet.DefaultPodSideSubnet,
+		"IPv4 CIDR the worker addresses its actors by, inside the pod. Sets the actor ceiling this worker reports.")
 	chBinary      = flag.String("cloud-hypervisor-binary", "cloud-hypervisor", "Path to the cloud-hypervisor binary (used to relaunch on restore).")
 	kataConfig    = flag.String("kata-config", "", "Path to a kata configuration.toml (passed to the shim as KATA_CONF_FILE). Empty uses kata's default. atelet generates one pointing at runtime-fetched assets.")
 	kataDebug     = flag.Bool("kata-debug", false, "Verbose kata-agent debugging: raise the guest agent log level and forward the guest console (incl. agent logs) into the pod logs.")
@@ -245,7 +253,14 @@ func do(ctx context.Context) error {
 	}()
 	slog.InfoContext(ctx, "atunnel egress serving", slog.String("address", *atunnelEgressListenAddress))
 
-	ateomService := NewService(*podUID, *chBinary, *kataConfig, *kataDebug, *vmmMemReserve, actorLogger, atunnelIngress, atunnelEgress, atunnelEgressPort, *workerCredentialBundle, *podIdentityTrustBundle, *egressGatewayTrustBundle)
+	podSidePlan, err := actornet.NewPodSidePlan(*actorPodSubnet)
+	if err != nil {
+		serverboot.Fatal(ctx, "Invalid --actor-pod-subnet", err)
+	}
+	slog.InfoContext(ctx, "Actor pod-side addressing",
+		slog.String("subnet", podSidePlan.Subnet()), slog.Int("actor_slots", podSidePlan.Slots()))
+
+	ateomService := NewService(*podUID, *chBinary, *kataConfig, *kataDebug, *vmmMemReserve, podSidePlan, actorLogger, atunnelIngress, atunnelEgress, atunnelEgressPort, *workerCredentialBundle, *podIdentityTrustBundle, *egressGatewayTrustBundle)
 
 	// Assigned rather than passed: NewService's parameter list is already long,
 	// and every test constructs a service that wants the nil no-op anyway.
@@ -409,6 +424,10 @@ type AteomService struct {
 	// atunnelEgressPort is the local atunnel listener used as the target of the
 	// actor network's transparent TCP redirect.
 	atunnelEgressPort uint16
+
+	// podSidePlan is how this worker addresses its actors, and so how many it
+	// can host. Reported as capacity rather than assumed by the control plane.
+	podSidePlan *actornet.PodSidePlan
 	// workerCredentialBundlePath contains the worker Pod certificate and key.
 	// Atunnel uses it for ingress serving and authentication to the atelet broker.
 	workerCredentialBundlePath string
@@ -442,9 +461,10 @@ type AteomService struct {
 var _ ateompb.AteomServer = (*AteomService)(nil)
 
 // NewService creates a new AteomService.
-func NewService(podUID, chBinary, kataConfig string, kataDebug bool, memReserveMiB int, actorLogger *actorlog.ActorLogger, atunnelIngress *atunnel.Server, atunnelEgress *atunnel.Egress, atunnelEgressPort uint16, workerCredentialBundlePath, podIdentityTrustBundlePath, egressGatewayTrustBundlePath string) *AteomService {
+func NewService(podUID, chBinary, kataConfig string, kataDebug bool, memReserveMiB int, podSidePlan *actornet.PodSidePlan, actorLogger *actorlog.ActorLogger, atunnelIngress *atunnel.Server, atunnelEgress *atunnel.Egress, atunnelEgressPort uint16, workerCredentialBundlePath, podIdentityTrustBundlePath, egressGatewayTrustBundlePath string) *AteomService {
 	return &AteomService{
 		actorLocks:                   actorlock.New(),
+		podSidePlan:                  podSidePlan,
 		podUID:                       podUID,
 		chBinary:                     chBinary,
 		kataConfig:                   kataConfig,

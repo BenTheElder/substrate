@@ -186,16 +186,20 @@ func countRulesInChain(t *testing.T, name string) int {
 // actor with no egress gateway -- and atunnel closes any connection it cannot
 // attribute to an activation, so that actor's TCP would be dropped rather than
 // masqueraded out. Membership of the tunneled set is what makes it per actor.
+// testPlan is the default addressing; these tests assert on concrete
+// addresses, so they need the plan the production default produces.
+var testPlan = DefaultPodSidePlan()
+
 func TestEgressRedirectIsPerActor(t *testing.T) {
 	roottest.Require(t, "installing nftables rules")
 
 	withTestPodNetNS(t, func() {
 		requireNftables(t)
 
-		tunneled := &ActorNetwork{ActorUID: "actor-a", Slot: 0, PodSideIP: PodSideIP(0), NetNS: noNetNS, TunneledEgress: true}
-		direct := &ActorNetwork{ActorUID: "actor-b", Slot: 1, PodSideIP: PodSideIP(1), NetNS: noNetNS}
+		tunneled := &ActorNetwork{ActorUID: "actor-a", Slot: 0, PodSideIP: testPlan.IP(0), NetNS: noNetNS, TunneledEgress: true}
+		direct := &ActorNetwork{ActorUID: "actor-b", Slot: 1, PodSideIP: testPlan.IP(1), NetNS: noNetNS}
 
-		if err := ApplyActorNetworkRules([]*ActorNetwork{tunneled, direct}, 15001); err != nil {
+		if err := ApplyActorNetworkRules(testPlan, []*ActorNetwork{tunneled, direct}, 15001); err != nil {
 			t.Fatalf("apply(tunneled,direct): %v", err)
 		}
 		// Both actors are addressable...
@@ -203,7 +207,7 @@ func TestEgressRedirectIsPerActor(t *testing.T) {
 			t.Errorf("actor address map keyed by %v, want %v", got, want)
 		}
 		// ...but only the one that asked for it is redirected.
-		if got, want := setAddrs(t, "tunneled_egress"), []string{PodSideIP(0).String()}; !slices.Equal(got, want) {
+		if got, want := setAddrs(t, "tunneled_egress"), []string{testPlan.IP(0).String()}; !slices.Equal(got, want) {
 			t.Errorf("tunneled-egress set = %v, want just the tunneled actor (%v)", got, want)
 		}
 		// The redirect itself is one rule regardless, and the masquerade that
@@ -216,7 +220,7 @@ func TestEgressRedirectIsPerActor(t *testing.T) {
 		}
 
 		// An actor that did not ask for it, alone: no set membership at all.
-		if err := ApplyActorNetworkRules([]*ActorNetwork{direct}, 15001); err != nil {
+		if err := ApplyActorNetworkRules(testPlan, []*ActorNetwork{direct}, 15001); err != nil {
 			t.Fatalf("apply(direct): %v", err)
 		}
 		if got := setAddrs(t, "tunneled_egress"); len(got) != 0 {
@@ -236,21 +240,21 @@ func TestRulesAreFixedRegardlessOfActorCount(t *testing.T) {
 	withTestPodNetNS(t, func() {
 		requireNftables(t)
 
-		one := []*ActorNetwork{{ActorUID: "a", Slot: 0, PodSideIP: PodSideIP(0), NetNS: noNetNS}}
+		one := []*ActorNetwork{{ActorUID: "a", Slot: 0, PodSideIP: testPlan.IP(0), NetNS: noNetNS}}
 		many := make([]*ActorNetwork, 0, 50)
 		for i := range 50 {
 			many = append(many, &ActorNetwork{
 				ActorUID: fmt.Sprintf("actor-%d", i), Slot: i,
-				PodSideIP: PodSideIP(i), NetNS: noNetNS, TunneledEgress: true,
+				PodSideIP: testPlan.IP(i), NetNS: noNetNS, TunneledEgress: true,
 			})
 		}
 
-		if err := ApplyActorNetworkRules(one, 15001); err != nil {
+		if err := ApplyActorNetworkRules(testPlan, one, 15001); err != nil {
 			t.Fatalf("apply(one): %v", err)
 		}
 		withOne := countRules(t)
 
-		if err := ApplyActorNetworkRules(many, 15001); err != nil {
+		if err := ApplyActorNetworkRules(testPlan, many, 15001); err != nil {
 			t.Fatalf("apply(many): %v", err)
 		}
 		if got := countRules(t); got != withOne {
@@ -321,14 +325,14 @@ func TestActorAddressMapHoldsEveryAddressableSlot(t *testing.T) {
 	withTestPodNetNS(t, func() {
 		requireNftables(t)
 
-		actors := make([]*ActorNetwork, 0, MaxActorSlots)
-		for i := range MaxActorSlots {
+		actors := make([]*ActorNetwork, 0, testPlan.Slots())
+		for i := range testPlan.Slots() {
 			actors = append(actors, &ActorNetwork{
 				ActorUID: fmt.Sprintf("actor-%d", i), Slot: i,
-				PodSideIP: PodSideIP(i), NetNS: noNetNS, TunneledEgress: true,
+				PodSideIP: testPlan.IP(i), NetNS: noNetNS, TunneledEgress: true,
 			})
 		}
-		if err := ApplyActorNetworkRules(actors, 15001); err != nil {
+		if err := ApplyActorNetworkRules(testPlan, actors, 15001); err != nil {
 			t.Fatalf("apply(%d actors): %v", len(actors), err)
 		}
 		if got := len(mapKeys(t, "actor_podside")); got != len(actors) {
@@ -383,7 +387,7 @@ func TestEveryActorCanResolveItsGateway(t *testing.T) {
 			t.Cleanup(func() { _ = CleanupActorNetwork(ctx, network) })
 			networks = append(networks, network)
 		}
-		if err := ApplyActorNetworkRules(networks, 0); err != nil {
+		if err := ApplyActorNetworkRules(testPlan, networks, 0); err != nil {
 			t.Fatalf("ApplyActorNetworkRules: %v", err)
 		}
 
@@ -665,17 +669,17 @@ func TestApplyActorNetworkRulesRebuild(t *testing.T) {
 	withTestPodNetNS(t, func() {
 		requireNftables(t)
 
-		a := &ActorNetwork{ActorUID: "actor-a", Slot: 0, PodSideIP: PodSideIP(0), NetNS: noNetNS}
-		b := &ActorNetwork{ActorUID: "actor-b", Slot: 1, PodSideIP: PodSideIP(1), NetNS: noNetNS}
+		a := &ActorNetwork{ActorUID: "actor-a", Slot: 0, PodSideIP: testPlan.IP(0), NetNS: noNetNS}
+		b := &ActorNetwork{ActorUID: "actor-b", Slot: 1, PodSideIP: testPlan.IP(1), NetNS: noNetNS}
 
-		if err := ApplyActorNetworkRules([]*ActorNetwork{a}, 15001); err != nil {
+		if err := ApplyActorNetworkRules(testPlan, []*ActorNetwork{a}, 15001); err != nil {
 			t.Fatalf("apply(a): %v", err)
 		}
 		if got, want := mapKeys(t, "actor_podside"), []string{"ate0"}; !slices.Equal(got, want) {
 			t.Errorf("map keys = %v, want %v", got, want)
 		}
 
-		if err := ApplyActorNetworkRules([]*ActorNetwork{a, b}, 15001); err != nil {
+		if err := ApplyActorNetworkRules(testPlan, []*ActorNetwork{a, b}, 15001); err != nil {
 			t.Fatalf("apply(a,b): %v", err)
 		}
 		if got, want := mapKeys(t, "actor_podside"), []string{"ate0", "ate1"}; !slices.Equal(got, want) {
@@ -684,7 +688,7 @@ func TestApplyActorNetworkRulesRebuild(t *testing.T) {
 
 		// Removing an actor takes its entry with it and leaves the rest, rather
 		// than leaving one that would misdirect the next actor into the slot.
-		if err := ApplyActorNetworkRules([]*ActorNetwork{b}, 15001); err != nil {
+		if err := ApplyActorNetworkRules(testPlan, []*ActorNetwork{b}, 15001); err != nil {
 			t.Fatalf("apply(b): %v", err)
 		}
 		if got, want := mapKeys(t, "actor_podside"), []string{"ate1"}; !slices.Equal(got, want) {
@@ -693,7 +697,7 @@ func TestApplyActorNetworkRulesRebuild(t *testing.T) {
 
 		// An empty set removes the table outright: with no actors there is
 		// nothing to rewrite, redirect, or masquerade.
-		if err := ApplyActorNetworkRules(nil, 15001); err != nil {
+		if err := ApplyActorNetworkRules(testPlan, nil, 15001); err != nil {
 			t.Fatalf("apply(none): %v", err)
 		}
 		if table := actorTable(t); table != nil {
