@@ -76,9 +76,34 @@ func (s *RPCService) GetWorker(ctx context.Context, req *ateapipb.GetWorkerReque
 	return worker, nil
 }
 
+// GetWorker returns the Worker along with the Actors it is hosting.
+//
+// The assignments are their own records and are not stored on the Worker, so
+// they are read separately and attached here. This is the one read that pays
+// O(assignments) for them, which is what the field is for: ListWorkers leaves
+// it empty however full its Workers are and reports occupancy through
+// status.allocated instead, so listing a fleet stays flat.
+//
+// A Worker whose assignments cannot be read is an error rather than a Worker
+// reported as hosting nothing: the two are indistinguishable to the caller, and
+// the empty answer is the one that reads as authoritative.
 func (s *ServiceImpl) GetWorker(ctx context.Context, name string) (*ateapipb.Worker, error) {
-	// TODO: implement this
-	return s.store.GetWorker(ctx, name)
+	worker, err := s.store.GetWorker(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	assignments, err := s.store.ListWorkerAssignments(ctx, name)
+	if err != nil {
+		return nil, fmt.Errorf("while listing the assignments of worker %s: %w", name, err)
+	}
+	if len(assignments) == 0 {
+		return worker, nil
+	}
+	if worker.Status == nil {
+		worker.Status = &ateapipb.WorkerStatus{}
+	}
+	worker.Status.Assignments = assignments
+	return worker, nil
 }
 
 func validateGetWorkerRequest(req *ateapipb.GetWorkerRequest) field.ErrorList {

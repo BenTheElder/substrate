@@ -85,7 +85,10 @@ func (w *WorkerWorkflow) ensureBoundActorsReleased(ctx context.Context, worker *
 	ctx, done := stepSpan(ctx, "ReleaseBoundActors")
 	defer func() { err = done(err) }()
 
-	assignments := worker.GetStatus().GetAssignments()
+	assignments, err := w.store.ListWorkerAssignments(ctx, worker.GetMetadata().GetName())
+	if err != nil {
+		return fmt.Errorf("while listing the assignments of worker %s: %w", worker.GetMetadata().GetName(), err)
+	}
 	if len(assignments) == 0 {
 		markSkipped(ctx, "worker has no actors assigned")
 		return nil

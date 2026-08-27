@@ -148,6 +148,10 @@ func NewWorkerWorkflow(store workerWorkflowStore) *WorkerWorkflow {
 // WorkerWorkflow and nothing more.
 type workerWorkflowStore interface {
 	GetWorker(ctx context.Context, name string) (*ateapipb.Worker, error)
+	// Read from the records rather than from the Worker's status: only the
+	// service layer attaches assignments to a Worker on read, and this workflow
+	// holds the store, so status.assignments is always empty here.
+	ListWorkerAssignments(ctx context.Context, workerName string) ([]*ateapipb.ActorAssignment, error)
 	DeleteWorker(ctx context.Context, name string, pre store.DeletePreconditions) (*ateapipb.Worker, error)
 	GetActor(ctx context.Context, actorRef resources.ActorRef) (*ateapipb.Actor, error)
 	UpdateActor(ctx context.Context, actorRef resources.ActorRef, precondition store.Precondition, mutate func(toUpdate *ateapipb.Actor) error) (*ateapipb.Actor, error)
