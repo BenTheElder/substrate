@@ -1840,10 +1840,13 @@ type GetActiveWorkloadStatsResponse struct {
 	// present is itself the statement that its actor is executing.
 	//
 	// Empty means nothing was measured, and no_sample_reason says why. An actor
-	// that is executing but not yet measurable simply contributes no sample, so a
-	// worker hosting two actors where one is still booting answers with one
-	// sample and no reason.
-	Samples []*WorkloadStatsSample `protobuf:"bytes,3,rep,name=samples,proto3" json:"samples,omitempty"`
+	// executing but not yet measurable contributes no sample, so a worker hosting
+	// two actors where one is still booting answers with one sample and no reason.
+	//
+	// Field 1 held the single sample this replaces, and keeps it: the two are
+	// wire-compatible, so an ateom that predates the set answers a set of one.
+	// It left the oneof, which a repeated field cannot join.
+	Samples []*WorkloadStatsSample `protobuf:"bytes,1,rep,name=samples,proto3" json:"samples,omitempty"`
 	// Why there are no samples. Set only when samples is empty; exactly one of
 	// the two carries the answer.
 	NoSampleReason NoSampleReason `protobuf:"varint,2,opt,name=no_sample_reason,json=noSampleReason,proto3,enum=ateom.NoSampleReason" json:"no_sample_reason,omitempty"`
@@ -2035,10 +2038,10 @@ const file_ateom_proto_rawDesc = "" +
 	"\x15observed_at_unix_nano\x18\f \x01(\x03R\x12observedAtUnixNano\"N\n" +
 	"\x18GetWorkloadStatsResponse\x122\n" +
 	"\x06sample\x18\x01 \x01(\v2\x1a.ateom.WorkloadStatsSampleR\x06sample\"\x1f\n" +
-	"\x1dGetActiveWorkloadStatsRequest\"\xa5\x01\n" +
+	"\x1dGetActiveWorkloadStatsRequest\"\x97\x01\n" +
 	"\x1eGetActiveWorkloadStatsResponse\x124\n" +
-	"\asamples\x18\x03 \x03(\v2\x1a.ateom.WorkloadStatsSampleR\asamples\x12?\n" +
-	"\x10no_sample_reason\x18\x02 \x01(\x0e2\x15.ateom.NoSampleReasonR\x0enoSampleReasonJ\x04\b\x01\x10\x02R\x06sample*\x84\x01\n" +
+	"\asamples\x18\x01 \x03(\v2\x1a.ateom.WorkloadStatsSampleR\asamples\x12?\n" +
+	"\x10no_sample_reason\x18\x02 \x01(\x0e2\x15.ateom.NoSampleReasonR\x0enoSampleReason*\x84\x01\n" +
 	"\rSnapshotScope\x12\x1e\n" +
 	"\x1aSNAPSHOT_SCOPE_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13SNAPSHOT_SCOPE_FULL\x10\x01\x12\x17\n" +
