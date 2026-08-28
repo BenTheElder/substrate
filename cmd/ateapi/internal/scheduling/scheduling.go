@@ -44,12 +44,9 @@ type Constraints struct {
 	RequiredNodes []string
 
 	// CPUMilli and MemoryBytes are the actor's declared resource limits, from
-	// the ActorTemplate. A worker has room only if its capacity, less what its
-	// existing assignments already took, is >= these. Zero means "unconstrained"
-	// for that dimension (the actor did not declare a limit), and a worker that
-	// reports zero capacity for a dimension is treated as unconstrained too, so
-	// placement is never blocked by missing data (matching the pre-capacity
-	// behavior).
+	// the ActorTemplate. A worker has room only if its capacity less what it
+	// already allocated is >= these. Zero on either side is unconstrained, so
+	// placement is never blocked by missing data.
 	CPUMilli    int64
 	MemoryBytes int64
 }
@@ -64,18 +61,13 @@ type Scheduler interface {
 	// Returns ErrNoCapacity when no free worker satisfies the requested constraints.
 	Schedule(ctx context.Context, constraints Constraints) (*ateapipb.Worker, error)
 
-	// Applies reports whether worker satisfies the constraints that do not
-	// depend on what it is already hosting: sandbox class, state, selectors,
-	// and node.
+	// Applies reports whether worker satisfies the constraints independent of
+	// what it already hosts: sandbox class, state, selectors, node.
 	//
-	// Deliberately excludes whether there is room, because callers use it for
-	// two different questions. Schedule asks "may this worker take one more",
-	// and pairs it with HasRoom. A caller re-validating a worker that already
-	// holds the actor asks only "is this still a legal placement" -- and for
-	// that one, room is the wrong question: the actor's own resources are
-	// already counted against the worker, so a full worker holding the actor
-	// would report itself ineligible and the actor would be evicted from a
-	// placement that is perfectly valid.
+	// Excludes room on purpose. Schedule pairs it with HasRoom; a caller
+	// re-validating a worker that already holds the actor must not, or the
+	// actor's own resources would make its worker look ineligible and evict it
+	// from a valid placement.
 	Applies(worker *ateapipb.Worker, constraints Constraints) bool
 
 	// HasRoom reports whether worker's remaining capacity admits one more actor
@@ -167,19 +159,15 @@ func (s *scheduler) Applies(worker *ateapipb.Worker, constraints Constraints) bo
 }
 
 // HasRoom reports whether what the worker has left admits one more actor of
-// this size. A zero constraint (the actor declared no limit) or zero worker
-// capacity (capacity unknown) is treated as unconstrained in that dimension, so
-// placement is never blocked by missing data.
+// this size. A zero constraint or zero capacity is unconstrained in that
+// dimension, so placement is never blocked by missing data.
 func (s *scheduler) HasRoom(worker *ateapipb.Worker, constraints Constraints) bool {
 	capacity := worker.GetCapacity()
-	used := Allocated(worker)
+	used := worker.GetStatus().GetAllocated()
 
-	// The actor count is the one dimension with no per-actor size to compare:
-	// every assignment costs exactly one, so a worker at its limit has no room
-	// regardless of how small the next actor is.
-	//
-	// Unset means one here, not unconstrained as it does for cpu and memory;
-	// see resources.WorkerMaxActors.
+	// No per-actor size to compare: every assignment costs one, so a worker at
+	// its limit has no room however small the next actor is. Unset means one
+	// here, not unconstrained; see resources.WorkerMaxActors.
 	if used.GetActors() >= resources.WorkerMaxActors(capacity) {
 		return false
 	}
@@ -192,14 +180,4 @@ func (s *scheduler) HasRoom(worker *ateapipb.Worker, constraints Constraints) bo
 		return false
 	}
 	return true
-}
-
-// Allocated is what a worker's current assignments took from it: the running
-// total the store moves as it binds and releases them.
-//
-// A total rather than a sum over the assignments, because Schedule reads this
-// for every worker on every placement, and summing would cost the fleet's whole
-// actor count each time. The assignments are not on the worker to sum anyway.
-func Allocated(worker *ateapipb.Worker) *ateapipb.WorkerCapacity {
-	return worker.GetStatus().GetAllocated()
 }

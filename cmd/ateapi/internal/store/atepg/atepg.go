@@ -1310,11 +1310,10 @@ func (p *Persistence) DeleteWorker(ctx context.Context, name string, pre store.D
 
 // --- Worker assignments ---
 //
-// An assignment is its own row, so binding one touches a constant amount of
-// the workers table however many Actors the Worker already holds. Every write
-// here runs in a single transaction with the Worker's status.allocated total
-// and its change event, which is what keeps the total and the rows from
-// disagreeing.
+// An assignment is its own row, so binding one costs the same however many
+// Actors the Worker holds. Every write here runs in one transaction with the
+// Worker's status.allocated total and its change event, which is what keeps the
+// total and the rows from disagreeing.
 
 // lockWorkerForAssignment reads a worker for update, so that the read of its
 // allocation total and the write of the adjusted one cannot interleave with
@@ -1373,16 +1372,13 @@ func (p *Persistence) BindActorToWorker(ctx context.Context, workerName string, 
 			worker.Status = &ateapipb.WorkerStatus{}
 		}
 
-		// The ordinary bind is a first bind, and the insert landing is itself
-		// the proof that nothing was there to account for. No read: the total
-		// moves by this assignment's worth and the claim is one statement.
+		// The ordinary bind is a first bind, and the insert landing is proof
+		// nothing was there to account for: one statement, no read.
 		//
-		// Asking first would be both slower and weaker. A read cannot see a
-		// claim that commits after it, so two claims for one Actor onto two
-		// Workers would each find nothing, each add one, and each write the
-		// row -- leaving the loser counting an Actor it does not host. The
-		// insert cannot miss it: the second one waits on the first and then
-		// finds it, whichever order they arrive in.
+		// Deciding it on the write is also what makes it correct. A read cannot
+		// see a claim that commits after it, so two claims for one Actor onto
+		// two Workers would each find nothing and each add one, leaving the
+		// loser counting an Actor it does not host. The insert cannot miss it.
 		tag, err := tx.Exec(ctx, `
 			INSERT INTO worker_assignments (actor_uid, worker_name, proto)
 			VALUES ($1, $2, $3)

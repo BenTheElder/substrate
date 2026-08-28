@@ -220,7 +220,7 @@ func actorStateString(s ateapipb.ActorState) string {
 // The UI's badgeFor() treats "running" as green; "idle" falls through
 // to the neutral badge, which is the right visual treatment.
 func workerPhase(w *ateapipb.Worker) string {
-	if len(w.GetStatus().GetAssignments()) > 0 {
+	if w.GetStatus().GetAllocated().GetActors() > 0 {
 		return "Running"
 	}
 	return "Idle"
@@ -372,25 +372,9 @@ func handlePods(w http.ResponseWriter, r *http.Request) {
 	}
 	pods := make([]podSummary, 0, len(resp.GetWorkers()))
 	for _, wk := range resp.GetWorkers() {
-		// Filter to the demo namespace when set — workers may live
-		// in their own pool namespace (worker_namespace) so we
-		// compare against actor_namespace too.
-		// A worker may host several actors; keep it if any of them is in the
-		// demo namespace, and only filter one out when it is hosting actors
-		// and none of them match.
-		if assignments := wk.GetStatus().GetAssignments(); namespace != "" && len(assignments) > 0 {
-			matched := false
-			for _, wass := range assignments {
-				if wkns := wass.GetActorTemplate().GetNamespace(); wkns == "" || wkns == namespace {
-					matched = true
-					break
-				}
-			}
-			if !matched {
-				continue
-			}
-		}
-		ready := len(wk.GetStatus().GetAssignments()) > 0
+		// No demo-namespace filter: a Worker listing does not name the Actors
+		// it holds, so there is no template namespace to compare against.
+		ready := wk.GetStatus().GetAllocated().GetActors() > 0
 		pods = append(pods, podSummary{
 			Name:      wk.GetWorkerPod(),
 			Node:      wk.GetWorkerPool(), // closest semantic analog

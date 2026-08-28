@@ -68,19 +68,11 @@ func (w *WorkerWorkflow) loadWorkerForDelete(ctx context.Context, name string) (
 	return worker, nil
 }
 
-// ensureBoundActorReleased resets the Actor bound to the Worker. An Actor that
-// already reached ACTOR_STATE_SUSPENDED saved its state cleanly during graceful
-// termination, so it is left untouched and remains resumable. An Actor that was
-// still running when the pod disappeared is moved to ACTOR_STATE_CRASHED and its
-// pod pointers are cleared.
+// ensureBoundActorsReleased resets every Actor bound to the Worker.
 //
-// Nothing to release is the common case and reports success: an unassigned
-// Worker, a superseded assignment, and an Actor that has since moved elsewhere
-// all leave no Actor pointing at this Worker, which is the state this is driving
-// towards.
-//
-// A concurrent SuspendActor or ResumeActor wins the optimistic version check;
-// this attempt fails as ABORTED so the caller retries against the newer state.
+// A single failure stops the sweep, leaving the Worker record in place with the
+// Actors that have not been released still bound to it, so a retry picks up
+// where this left off.
 func (w *WorkerWorkflow) ensureBoundActorsReleased(ctx context.Context, worker *ateapipb.Worker) (err error) {
 	ctx, done := stepSpan(ctx, "ReleaseBoundActors")
 	defer func() { err = done(err) }()
@@ -101,8 +93,18 @@ func (w *WorkerWorkflow) ensureBoundActorsReleased(ctx context.Context, worker *
 	return nil
 }
 
-// releaseBoundActor releases one of the Worker's Actors. The skip reasons are
-// per-Actor, so on a Worker hosting many the step records the last one.
+// releaseBoundActor resets one Actor bound to the Worker. An Actor that already
+// reached ACTOR_STATE_SUSPENDED saved its state cleanly during graceful
+// termination, so it is left untouched and remains resumable. An Actor that was
+// still running when the pod disappeared is moved to ACTOR_STATE_CRASHED and its
+// pod pointers are cleared.
+//
+// Nothing to release is the common case and reports success: a superseded
+// assignment and an Actor that has since moved elsewhere both leave no Actor
+// pointing at this Worker, which is the state this is driving towards.
+//
+// A concurrent SuspendActor or ResumeActor wins the optimistic version check;
+// this attempt fails as ABORTED so the caller retries against the newer state.
 func (w *WorkerWorkflow) releaseBoundActor(ctx context.Context, worker *ateapipb.Worker, assignment *ateapipb.ActorAssignment) error {
 	if assignment.GetActor() == nil {
 		markSkipped(ctx, "assignment names no actor")

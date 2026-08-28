@@ -76,17 +76,10 @@ func (s *RPCService) GetWorker(ctx context.Context, req *ateapipb.GetWorkerReque
 	return worker, nil
 }
 
-// GetWorker returns the Worker along with the Actors it is hosting.
-//
-// The assignments are their own records and are not stored on the Worker, so
-// they are read separately and attached here. This is the one read that pays
-// O(assignments) for them, which is what the field is for: ListWorkers leaves
-// it empty however full its Workers are and reports occupancy through
-// status.allocated instead, so listing a fleet stays flat.
-//
-// A Worker whose assignments cannot be read is an error rather than a Worker
-// reported as hosting nothing: the two are indistinguishable to the caller, and
-// the empty answer is the one that reads as authoritative.
+// GetWorker returns the Worker with the Actors it hosts, read separately since
+// the assignments are their own records. The one read that pays O(assignments).
+// A failed read is an error, not a Worker reported as hosting nothing: the
+// caller cannot tell those apart.
 func (s *ServiceImpl) GetWorker(ctx context.Context, name string) (*ateapipb.Worker, error) {
 	worker, err := s.store.GetWorker(ctx, name)
 	if err != nil {
@@ -273,9 +266,8 @@ func (s *RPCService) DrainWorker(ctx context.Context, req *ateapipb.DrainWorkerR
 			return &workerUnchanged{worker: proto.Clone(toUpdate).(*ateapipb.Worker)}
 		}
 		toUpdate.Status.State = ateapipb.WorkerState_WORKER_STATE_DRAINING
-		// status.assignment is deliberately left alone: a draining Worker keeps
-		// hosting the Actor bound to it until something releases it. Draining
-		// only stops the scheduler routing new Actors here.
+		// The assignments are left alone: a draining Worker keeps its Actors
+		// until something releases them. Draining only stops new placements.
 		return nil
 	})
 }

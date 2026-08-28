@@ -297,10 +297,8 @@ func (s *WorkerPoolSyncer) createOrUpdateWorker(ctx context.Context, key workerK
 		w.Labels = pool.GetLabels()
 		changed = true
 	}
-	// Only the dimensions the pod states. The actors ceiling is the ateom's and
-	// arrives by report, so it is carried over rather than recomputed -- without
-	// that this would erase what the worker reported on every pod event, and the
-	// two would fight.
+	// Only the dimensions the pod states; the reported actors ceiling is carried
+	// across rather than recomputed.
 	if capacity := withReportedActors(workerCapacity(pod), w.GetCapacity()); !proto.Equal(w.GetCapacity(), capacity) {
 		slog.InfoContext(ctx, "Syncer: updating worker in store (capacity changed)", key.logAttrs()...)
 		w.Capacity = capacity
@@ -341,25 +339,14 @@ func isWorkerEligible(pod *corev1.Pod) bool {
 // actor's sandbox; its resource limits bound what an actor placed here can use.
 const ateomContainerName = "ateom"
 
-// workerCapacity returns the worker pod's whole capacity for hosting actors:
-// CPU in millicores and memory in bytes from the ateom container's resource
-// limits, plus how many actors the pool allows on one pod.
+// workerCapacity is the pod's whole capacity for hosting actors: CPU in
+// millicores and memory in bytes from the ateom container's limits, which is
+// the relevant envelope because the sandbox runs nested in that cgroup. An
+// unlimited dimension reports 0, which the scheduler reads as unconstrained.
 //
-// The compute dimensions are the pod's total, not a share of it. What is left
-// is a question the scheduler answers by subtracting the actors already placed
-// (scheduling.Allocated), so an actor smaller than an equal share still leaves
-// the remainder available to its neighbors — which a fixed per-actor slice
-// would strand.
-//
-// A compute dimension the pod does not limit reports 0, which the scheduler
-// treats as "unknown" (unconstrained). The actor sandbox runs nested in the
-// ateom container's cgroup, so that container's limits — not the pod total —
-// are the relevant envelope.
-// The actors dimension is deliberately absent: that ceiling belongs to the
-// ateom, which reports it once it is running (see ReportWorkerCapacity). The
-// syncer owns the compute dimensions because only the pod states them, and
-// leaves actors unset -- which the API reads as one, the safe floor, until the
-// worker says otherwise.
+// The actors ceiling is absent on purpose: it belongs to the ateom, which
+// reports it once running (see ReportWorkerCapacity). Unset reads as one until
+// then.
 func workerCapacity(pod *corev1.Pod) *ateapipb.WorkerCapacity {
 	var capacity ateapipb.WorkerCapacity
 	for i := range pod.Spec.Containers {
@@ -490,13 +477,9 @@ func (s *WorkerPoolSyncer) listWorkersPageWithRetry(ctx context.Context, pageTok
 	}
 }
 
-// withReportedActors puts the actors ceiling the worker reported back onto a
-// freshly computed capacity.
-//
-// The two halves have different owners: the pod states cpu and memory, the
-// ateom states how many Actors it can host. The syncer recomputes its half on
-// every pod event, so without carrying the other half across it would clear the
-// report each time and the worker would re-report it, forever.
+// withReportedActors carries the worker's reported actors ceiling onto a freshly
+// computed capacity. The syncer recomputes cpu and memory on every pod event;
+// without this it would clear the report each time and the two would fight.
 func withReportedActors(computed, stored *ateapipb.WorkerCapacity) *ateapipb.WorkerCapacity {
 	if stored.GetActors() == 0 {
 		return computed

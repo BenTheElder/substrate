@@ -75,9 +75,6 @@ func (s *scheduler) recordEligibleWorkers(ctx context.Context, matching []*ateap
 		if _, ok := eligibleByPool[k]; !ok {
 			eligibleByPool[k] = 0
 		}
-		// "Eligible" counts workers that could take another actor, which for a
-		// worker that hosts several is a question of remaining room rather than
-		// of being empty.
 		if s.HasRoom(w, constraints) {
 			eligibleByPool[k]++
 		}

@@ -96,9 +96,8 @@ func RegisterWorkerCount(meter metric.Meter, workers func() ([]*ateapipb.Worker,
 			}
 		}
 		for _, w := range ws {
-			// A worker hosting any actor counts as assigned. This says nothing
-			// about whether it has room for another; that is the scheduler's
-			// eligible-workers metric.
+			// Occupancy comes from the allocation total rather than the
+			// assignment list, which a listed worker does not carry.
 			state := ateattr.WorkerStateIdle
 			if w.GetStatus().GetAllocated().GetActors() > 0 {
 				state = ateattr.WorkerStateAssigned

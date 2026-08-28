@@ -166,10 +166,9 @@ func (s *Server) MintCert(ctx context.Context, req *ateapipb.MintCertRequest) (*
 	}
 	atespace, actorName := actorRef.Atespace, actorRef.Name
 
-	// Actor identity comes only from ateapi state. expected_actor_uid picked
-	// which of the worker's actors to mint for (see authorizeActor); this
-	// re-checks it against the resolved actor, which is a fail-closed guard
-	// against a request crossing an assignment change.
+	// expected_actor_uid picked which actor to mint for (see authorizeActor);
+	// re-checking it here fails closed if the request crossed an assignment
+	// change.
 	actorUID := actor.GetMetadata().GetUid()
 	if actorUID == "" {
 		slog.ErrorContext(ctx, "MintCert: actor has no UID", slog.Any("actor", actorRef))
@@ -294,10 +293,9 @@ func validateWorkerRef(worker *ateapipb.ObjectRef) error {
 	return resources.ValidateGlobalObjectRef(worker, field.NewPath("worker")).ToAggregate()
 }
 
-// authorizeActor resolves the actor the request names among those the
-// authenticated worker is hosting, and verifies that the worker and actor still
-// point at one another. Actor identity supplied by the requester never
-// participates in this authorization decision.
+// authorizeActor resolves the actor the request names among those the worker is
+// hosting and verifies the two still point at one another. Requester-supplied
+// identity never participates in the decision.
 //
 // The worker is resolved from cache first (hot path), but cache misses and
 // denials fall back to the authoritative store to handle watch-delivery lag
@@ -406,28 +404,13 @@ func (s *Server) authorizeWithWorker(ctx context.Context, worker *ateapipb.Worke
 }
 
 // assignmentToMintFor picks which of the worker's actors to mint for, or
-// returns store.ErrNotFound when it is hosting none.
+// ErrNotFound when it hosts none. expected_actor_uid selects from what ateapi
+// records the worker as hosting; it does not assert.
 //
-// A worker hosts several actors, so expected_actor_uid selects one. It SELECTS,
-// it does not assert: the set it chooses from is what ateapi records the worker
-// as hosting, so a caller can only ever obtain a credential for an actor
-// already placed on it.
-//
-// Falling back to one of the worker's own assignments when the requested actor
-// is not among them preserves the two answers this call has always given, which
-// are not interchangeable: authorization is decided against an actor the worker
-// really is hosting, and a bad binding there is PermissionDenied, while a
-// request whose expectation does not match that actor is a stale caller and
-// gets the retryable FailedPrecondition from MintCert. Resolving straight to a
-// denial would collapse the two and make an ordinary mint/assignment race
-// fatal.
-//
-// Both reads go to the store rather than the worker cache. The cache is fed by
-// a watch and this call arrives immediately after the binding it names was
-// committed, so a cached answer is routinely wrong -- measured at 253 of 8000
-// activations across eight workers, every one of them a failed activation. The
-// listing is O(the worker's occupancy), which is why it is only on the path
-// where the requested actor was already not found.
+// Falling back to another of the worker's assignments keeps a bad binding
+// (PermissionDenied) apart from a stale expectation (retryable). Reads go to
+// the store: the binding was committed moments ago and the watch has not
+// delivered it. The O(occupancy) listing only runs on the miss.
 func (s *Server) assignmentToMintFor(ctx context.Context, workerName, actorUID string) (*ateapipb.ActorAssignment, error) {
 	assigned, err := s.store.GetWorkerAssignment(ctx, workerName, actorUID)
 	if err == nil {

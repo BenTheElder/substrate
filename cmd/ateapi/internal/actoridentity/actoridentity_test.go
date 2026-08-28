@@ -225,12 +225,9 @@ func TestMintCertReadsThroughStaleWorkerCache(t *testing.T) {
 	}
 }
 
-// TestMintCertReadsThroughForAnActorTheCacheHasNotSeenYet is the multi-actor
-// case of the same lag: the cached worker is not unassigned, it is hosting
-// somebody else, so the requested actor's absence looks like an answer rather
-// than a miss. Resolving one of the worker's other assignments instead would
-// authorize, and fail later on the UID check -- 3.2% of activations across
-// eight packed workers.
+// The multi-actor case of the same lag: the cached worker is not unassigned but
+// hosting somebody else, so the requested actor's absence looks like an answer
+// rather than a miss.
 func TestMintCertReadsThroughForAnActorTheCacheHasNotSeenYet(t *testing.T) {
 	ctx := context.Background()
 	st, cleanup := storetest.SetupTestStore(t)

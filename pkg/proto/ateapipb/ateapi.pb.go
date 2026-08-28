@@ -5192,21 +5192,15 @@ type Worker struct {
 	// Mutable.
 	SandboxClass string            `protobuf:"bytes,8,opt,name=sandbox_class,json=sandboxClass,proto3" json:"sandbox_class,omitempty"`
 	Labels       map[string]string `protobuf:"bytes,9,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	// The compute capacity this worker can give an actor sandbox.
-	//
-	// Per Worker, not per WorkerPool: the pool seeds it, but it is the Worker's
-	// own and may change over its lifetime. The actors dimension moves when the
-	// pool's maxActorsPerWorker is edited, a pod may be resized, and a Worker may
-	// come to report what it can really hold rather than what was declared for
-	// it. What an update may NOT do is clear it — an omitted capacity is a
-	// request to lose one, not to report having none.
-	//
-	// Shrinking below what is already allocated is allowed and means only that
-	// the scheduler stops placing here; nothing is evicted to fit.
+	// What this worker has to give the Actors it hosts. Mutable: a pod can be
+	// resized, and a Worker reports its own actor ceiling (ReportWorkerCapacity).
+	// An update may not CLEAR it, since an omitted capacity would ask to lose one.
+	// Shrinking below what is allocated only stops new placements; nothing is
+	// evicted.
 	Capacity *WorkerCapacity `protobuf:"bytes,10,opt,name=capacity,proto3" json:"capacity,omitempty"`
 	// Output-only server-managed state. Absent from Create/Update request
 	// payloads; whatever a request carries here is ignored. DrainWorker is the
-	// only way a client moves state, and assignment is the scheduler's.
+	// only way a client moves state, and the assignments are the scheduler's.
 	Status        *WorkerStatus `protobuf:"bytes,11,opt,name=status,proto3" json:"status,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -5322,32 +5316,18 @@ func (x *Worker) GetStatus() *WorkerStatus {
 type WorkerStatus struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	State WorkerState            `protobuf:"varint,1,opt,name=state,proto3,enum=ateapi.WorkerState" json:"state,omitempty"`
-	// The Actors currently bound to this Worker. Empty when the Worker is idle.
-	// How many may be bound at once is not a fixed number: it is whatever
-	// capacity admits, including capacity.actors as one of its dimensions.
+	// The Actors bound to this Worker, as many as capacity admits.
 	//
-	// Field 2 held the single ActorAssignment this replaces, and keeps it rather
-	// than reserving it: the two are wire-compatible, so a record written before
-	// the Worker could hold a set reads back as a set of one.
+	// Populated only by GetWorker; ListWorkers leaves it empty and reports
+	// occupancy through allocated, so a listing costs the fleet's size and not
+	// its actor count.
 	//
-	// Populated only by GetWorker, and never stored on the Worker: each
-	// assignment is its own record, so that reading, writing, or announcing a
-	// Worker costs the same whether it hosts one Actor or four thousand.
-	// ListWorkers leaves this empty however full its Workers are, and reports
-	// occupancy through allocated instead.
+	// Reuses field 2, which held the single ActorAssignment this replaces: the
+	// two are wire-compatible, so an old record reads back as a set of one.
 	Assignments []*ActorAssignment `protobuf:"bytes,2,rep,name=assignments,proto3" json:"assignments,omitempty"`
-	// What this Worker's assignments have taken from its capacity, moved as they
-	// are bound and released rather than derived on read.
-	//
-	// This, not the list, is what placement consults, because the scheduler
-	// reads it for EVERY worker on EVERY placement: summing would make one
-	// placement decision cost the whole fleet's actor count. Measured: a
-	// placement takes 4us against one worker holding 1000 actors, and 6.26ms
-	// against 1000 workers holding 1000 each -- so filling a fleet would be
-	// quadratic in the actors already in it.
-	//
-	// The store moves this in the same transaction as the assignment it counts,
-	// so the two cannot disagree.
+	// What the assignments have taken from capacity, as a running total moved
+	// with them. Placement reads this for every Worker on every decision, so
+	// summing the list instead would cost the fleet's whole actor count each time.
 	Allocated     *WorkerCapacity `protobuf:"bytes,3,opt,name=allocated,proto3" json:"allocated,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -5404,32 +5384,25 @@ func (x *WorkerStatus) GetAllocated() *WorkerCapacity {
 	return nil
 }
 
-// WorkerCapacity is what a worker pod has to give the Actors it hosts, and is
-// also the shape of what those Actors have taken: the scheduler places an Actor
-// only where capacity minus the sum of the assignments' resources still covers
-// the Actor's declared limits, in every dimension.
+// WorkerCapacity is what a worker pod has to give the Actors it hosts, and also
+// the shape of what they have taken: an Actor is placed only where capacity
+// minus allocated still covers its limits, in every dimension.
 //
-// The compute dimensions come from the ateom container's resource limits. An
-// unset message, or a zero field within it, means "unknown/unset" for that
-// dimension: treated as unconstrained so placement is not blocked (matching the
-// pre-capacity behavior).
+// The compute dimensions come from the ateom container's resource limits, and
+// zero means "unknown" — unconstrained, so placement is never blocked by
+// missing data. The actors dimension is the exception; see below.
 type WorkerCapacity struct {
 	state       protoimpl.MessageState `protogen:"open.v1"`
 	CpuMilli    int64                  `protobuf:"varint,1,opt,name=cpu_milli,json=cpuMilli,proto3" json:"cpu_milli,omitempty"`          // CPU capacity in millicores (1000 = one core).
 	MemoryBytes int64                  `protobuf:"varint,2,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"` // Memory capacity in bytes.
-	// How many Actors may be bound to the Worker at once, from the WorkerPool's
-	// maxActorsPerWorker. It is a capacity dimension rather than a separate limit
-	// because it bounds the same thing the others do -- what one more Actor
-	// costs -- for the per-Actor costs that are not CPU or memory: network
-	// namespaces, mounts, file descriptors, and the blast radius of losing the
-	// pod. Kubernetes bounds a node the same way, with allocatable pods alongside
-	// allocatable cpu and memory.
+	// How many Actors may be bound at once. A capacity dimension rather than a
+	// separate limit because it bounds the same thing — what one more Actor costs
+	// — for the costs that are not CPU or memory: netns, mounts, file
+	// descriptors, blast radius. Kubernetes bounds a node the same way, with
+	// allocatable pods beside allocatable cpu and memory.
 	//
-	// Unset means one, unlike the compute dimensions above, where unset means
-	// unconstrained. A worker that has not said it can host more than one actor
-	// is assumed not to be able to, so that a Worker created without capacity
-	// does not accept actors without limit. The syncer always sets this from the
-	// pool, which itself defaults to 1.
+	// Unset means ONE, not unconstrained: a Worker that has not said it can hold
+	// more is assumed not to be able to.
 	Actors        int32 `protobuf:"varint,3,opt,name=actors,proto3" json:"actors,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -5486,7 +5459,7 @@ func (x *WorkerCapacity) GetActors() int32 {
 	return 0
 }
 
-// ActorAssignment names the Actor currently bound to a Worker — the inverse of
+// ActorAssignment names an Actor bound to a Worker — the inverse of
 // WorkerAssignment.
 type ActorAssignment struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -5500,17 +5473,11 @@ type ActorAssignment struct {
 	ActorUid string     `protobuf:"bytes,3,opt,name=actor_uid,json=actorUid,proto3" json:"actor_uid,omitempty"`
 	// +k8s:opaqueType
 	ActorTemplateRef *ObjectRef `protobuf:"bytes,4,opt,name=actor_template_ref,json=actorTemplateRef,proto3" json:"actor_template_ref,omitempty"`
-	// What the Worker admitted this Actor for, from the Actor's declared limits
-	// at placement time.
-	//
-	// Recorded on the assignment rather than looked up from the Actor, because
-	// releasing has to give back exactly what binding took: an ActorTemplate
-	// edited in between would otherwise return a different amount than it
-	// reserved, and WorkerStatus.allocated would drift by the difference every
-	// time the Actor moved.
-	//
-	// The actors dimension is not meaningful here and is left unset; one
-	// assignment is one Actor.
+	// What the Worker admitted this Actor for, from its declared limits at
+	// placement time. Recorded here rather than re-read from the Actor so that
+	// releasing gives back exactly what binding took, even if the template was
+	// edited in between. The actors dimension is unset; one assignment is one
+	// Actor.
 	Resources     *WorkerCapacity `protobuf:"bytes,5,opt,name=resources,proto3" json:"resources,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -5711,8 +5678,7 @@ type ReportWorkerCapacityRequest struct {
 	// global-scoped.
 	// +k8s:opaqueType
 	Worker *ObjectRef `protobuf:"bytes,1,opt,name=worker,proto3" json:"worker,omitempty"`
-	// What the Worker can hold. Only the dimensions the reporter can observe are
-	// set; an unset dimension leaves whatever is already recorded alone rather
+	// What the Worker can hold. An unset dimension keeps what is recorded rather
 	// than clearing it, so a reporter that knows only its actor ceiling does not
 	// erase the compute capacity taken from the pod's limits.
 	// +k8s:opaqueType
@@ -5767,8 +5733,7 @@ func (x *ReportWorkerCapacityRequest) GetCapacity() *WorkerCapacity {
 
 type ReportWorkerCapacityResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The Worker as recorded, so a caller can see what its report resolved to
-	// without a second round trip.
+	// The Worker as recorded, so a caller sees what its report resolved to.
 	Worker        *Worker `protobuf:"bytes,1,opt,name=worker,proto3" json:"worker,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

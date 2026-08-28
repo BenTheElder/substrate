@@ -1798,10 +1798,8 @@ func TestResumeActor(t *testing.T) {
 		// ceiling is the ateom's, reported once it is running rather than taken
 		// from the pool.
 		Status: &ateapipb.WorkerStatus{
-			// The running total of what the worker's assignments took, which is
-			// all a listing reports of them. The actor declares no compute
-			// limits, so it registers as one actor and nothing else -- the same
-			// reading capacity gets above.
+			// All a listing reports of the assignments. The actor declares no
+			// compute limits, so it registers as one actor and nothing else.
 			Allocated: &ateapipb.WorkerCapacity{Actors: 1},
 			State:     ateapipb.WorkerState_WORKER_STATE_ACTIVE,
 		},

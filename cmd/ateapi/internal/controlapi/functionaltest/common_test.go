@@ -566,8 +566,7 @@ func waitForWorkerAvailable(t *testing.T, tc *testContext, workerName string) {
 			return false, nil
 		}
 		// Hosting nothing is what "available" means, and the allocation total
-		// is how a Worker reports that: the assignments themselves are their
-		// own records and a cached Worker does not carry them.
+		// is how a cached Worker reports it: it does not carry the records.
 		return worker.GetStatus().GetState() == ateapipb.WorkerState_WORKER_STATE_ACTIVE &&
 			worker.GetStatus().GetAllocated().GetActors() == 0, nil
 	})

@@ -714,7 +714,7 @@ func TestHasRoom(t *testing.T) {
 			s := New(nil).(*scheduler)
 			if got := s.HasRoom(w, tc.constraints); got != tc.want {
 				t.Errorf("HasRoom() = %t, want %t (capacity %v, allocated %v)",
-					got, tc.want, w.GetCapacity(), Allocated(w))
+					got, tc.want, w.GetCapacity(), w.GetStatus().GetAllocated())
 			}
 		})
 	}

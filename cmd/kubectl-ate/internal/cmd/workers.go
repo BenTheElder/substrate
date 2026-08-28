@@ -34,11 +34,9 @@ type ActorLister interface {
 	ListActors(ctx context.Context, req *ateapipb.ListActorsRequest, opts ...grpc.CallOption) (*ateapipb.ListActorsResponse, error)
 }
 
-// workersHostingAtespace names the Workers hosting an Actor in atespace.
-//
-// Asked of the Actors rather than the Workers: a Worker listing reports how
-// full each Worker is, not which Actors it holds, while every Actor names its
-// Worker and the listing is already scoped to one atespace.
+// workersHostingAtespace names the Workers hosting an Actor in atespace. Asked
+// of the Actors, because a Worker listing reports how full each Worker is, not
+// which Actors it holds.
 func workersHostingAtespace(ctx context.Context, lister ActorLister, atespace string) (map[string]bool, error) {
 	hosting := map[string]bool{}
 	pageToken := ""

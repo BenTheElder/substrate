@@ -28,11 +28,8 @@ type workerAssignmentReader interface {
 }
 
 // workerHostsActor reports whether a Worker holds an assignment for actorUID.
-//
-// It asks the store rather than the Worker record, which does not carry its
-// assignments, and rather than the worker cache, which is fed by a watch and so
-// cannot see a binding that has just been committed -- and every caller here is
-// asking about one that just was.
+// Asks the store: the Worker record does not carry its assignments, and the
+// watch-fed cache cannot see a binding committed moments ago.
 func workerHostsActor(ctx context.Context, st workerAssignmentReader, workerName, actorUID string) (bool, error) {
 	_, err := st.GetWorkerAssignment(ctx, workerName, actorUID)
 	if errors.Is(err, store.ErrNotFound) {

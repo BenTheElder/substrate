@@ -28,15 +28,9 @@ import (
 )
 
 // ReportWorkerCapacity records what a Worker can hold, as reported by the
-// atelet herding it.
-//
-// The ceiling is the ateom's: it owns the slot allocator, and only the node the
-// Worker runs on can observe it. Authorization is therefore that the calling
-// atelet runs on the Worker's node, the same check MintCert makes -- an atelet
-// speaks for the Workers it herds and no others.
-//
-// Reporting the same capacity again is not an update: the store write is
-// skipped, so a reporter on a timer costs a read.
+// atelet herding it. Authorized like MintCert: the calling atelet must run on
+// the Worker's node. An unchanged report is not an update, so a reporter on a
+// timer costs a read.
 func (s *Server) ReportWorkerCapacity(ctx context.Context, req *ateapipb.ReportWorkerCapacityRequest) (*ateapipb.ReportWorkerCapacityResponse, error) {
 	caller, err := authenticateAtelet(ctx)
 	if err != nil {
@@ -51,9 +45,8 @@ func (s *Server) ReportWorkerCapacity(ctx context.Context, req *ateapipb.ReportW
 	}
 	name := req.GetWorker().GetName()
 
-	// Read authoritatively rather than from the cache: this decides a write, and
-	// a stale read would either reject a legitimate reporter whose Worker has
-	// just been created or write against a version that has moved.
+	// Authoritative, not cached: this decides a write, and a stale read would
+	// reject a reporter whose Worker was just created.
 	worker, err := s.store.GetWorker(ctx, name)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -62,8 +55,8 @@ func (s *Server) ReportWorkerCapacity(ctx context.Context, req *ateapipb.ReportW
 		return nil, fmt.Errorf("while fetching worker %s: %w", name, err)
 	}
 	if worker.GetNodeName() != caller.nodeName {
-		// Deliberately the same answer as an absent Worker: a caller learns
-		// nothing about Workers on other nodes, including whether they exist.
+		// Same answer as an absent Worker: a caller learns nothing about
+		// Workers elsewhere, including whether they exist.
 		slog.WarnContext(ctx, "Refusing a capacity report for a worker on another node",
 			slog.String("worker", name),
 			slog.String("worker_node", worker.GetNodeName()),
@@ -86,8 +79,7 @@ func (s *Server) ReportWorkerCapacity(ctx context.Context, req *ateapipb.ReportW
 	case errors.Is(err, store.ErrNotFound):
 		return nil, status.Errorf(codes.NotFound, "Worker %s not found", name)
 	case errors.Is(err, store.ErrUIDConflict), errors.Is(err, store.ErrVersionConflict):
-		// The reporter re-sends on its own schedule, so a lost race needs no
-		// retry here.
+		// The reporter re-sends on a timer, so a lost race needs no retry.
 		return nil, status.Error(codes.Aborted, "concurrent update conflict, please retry")
 	default:
 		return nil, fmt.Errorf("while recording capacity for worker %s: %w", name, err)
@@ -99,13 +91,9 @@ func (s *Server) ReportWorkerCapacity(ctx context.Context, req *ateapipb.ReportW
 	return &ateapipb.ReportWorkerCapacityResponse{Worker: updated}, nil
 }
 
-// mergeReportedCapacity overlays the dimensions a reporter set onto the ones
-// already recorded.
-//
-// A reporter states only what it can observe: the ateom knows its actor slots
-// and nothing about the pod limits the syncer took the compute dimensions from.
-// An unset dimension therefore means "no opinion" and keeps what is there,
-// rather than clearing capacity the reporter never had a view of.
+// mergeReportedCapacity overlays the dimensions a reporter set onto what is
+// recorded. A reporter states only what it can observe, so an unset dimension
+// means "no opinion" and keeps what is there.
 func mergeReportedCapacity(current, reported *ateapipb.WorkerCapacity) *ateapipb.WorkerCapacity {
 	merged := proto.Clone(current).(*ateapipb.WorkerCapacity)
 	if merged == nil {

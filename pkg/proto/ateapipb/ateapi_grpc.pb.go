@@ -1374,22 +1374,13 @@ type ActorIdentityClient interface {
 	//
 	// The certificate in the response is the actor's identity, not the atelet's.
 	MintCert(ctx context.Context, in *MintCertRequest, opts ...grpc.CallOption) (*MintCertResponse, error)
-	// ReportWorkerCapacity records what a Worker can hold, as the Worker itself
-	// reports it.
+	// ReportWorkerCapacity records what a Worker can hold, as the Worker reports
+	// it. The actor ceiling is the ateom's — it owns the slot allocator, and only
+	// its node can observe the number — so a fleet may run mixed ateom versions.
 	//
-	// The ceiling belongs to the ateom -- it owns the slot allocator -- and only
-	// the node the Worker runs on can observe it, so it arrives here rather than
-	// being asserted by the control plane. An ateom that hosts one Actor reports
-	// one, which is why the API can ship before the implementation and why a
-	// fleet may run mixed ateom versions.
-	//
-	// atelet calls this on the Worker's behalf, authenticating with its own
-	// client certificate, exactly as it does for MintCert. Authorization is that
-	// the calling atelet runs on the Worker's node: an atelet may speak for the
-	// Workers it herds and no others.
-	//
-	// Idempotent, and safe to re-send on a timer -- reporting the same capacity
-	// again is not an update.
+	// atelet calls this for the Worker with its own client certificate, as it
+	// does for MintCert; an atelet may speak only for the Workers on its node.
+	// Idempotent: re-reporting the same capacity is not an update.
 	ReportWorkerCapacity(ctx context.Context, in *ReportWorkerCapacityRequest, opts ...grpc.CallOption) (*ReportWorkerCapacityResponse, error)
 }
 
@@ -1459,22 +1450,13 @@ type ActorIdentityServer interface {
 	//
 	// The certificate in the response is the actor's identity, not the atelet's.
 	MintCert(context.Context, *MintCertRequest) (*MintCertResponse, error)
-	// ReportWorkerCapacity records what a Worker can hold, as the Worker itself
-	// reports it.
+	// ReportWorkerCapacity records what a Worker can hold, as the Worker reports
+	// it. The actor ceiling is the ateom's — it owns the slot allocator, and only
+	// its node can observe the number — so a fleet may run mixed ateom versions.
 	//
-	// The ceiling belongs to the ateom -- it owns the slot allocator -- and only
-	// the node the Worker runs on can observe it, so it arrives here rather than
-	// being asserted by the control plane. An ateom that hosts one Actor reports
-	// one, which is why the API can ship before the implementation and why a
-	// fleet may run mixed ateom versions.
-	//
-	// atelet calls this on the Worker's behalf, authenticating with its own
-	// client certificate, exactly as it does for MintCert. Authorization is that
-	// the calling atelet runs on the Worker's node: an atelet may speak for the
-	// Workers it herds and no others.
-	//
-	// Idempotent, and safe to re-send on a timer -- reporting the same capacity
-	// again is not an update.
+	// atelet calls this for the Worker with its own client certificate, as it
+	// does for MintCert; an atelet may speak only for the Workers on its node.
+	// Idempotent: re-reporting the same capacity is not an update.
 	ReportWorkerCapacity(context.Context, *ReportWorkerCapacityRequest) (*ReportWorkerCapacityResponse, error)
 	mustEmbedUnimplementedActorIdentityServer()
 }

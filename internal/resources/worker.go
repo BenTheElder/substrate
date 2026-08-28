@@ -16,20 +16,10 @@ package resources
 
 import "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 
-// WorkerMaxActors is how many Actors a Worker admits, reading unset capacity as
-// one rather than as unconstrained.
-//
-// It lives here, rather than in the scheduler that enforces it, because the
-// scheduler is not the only reader: the CLI reports occupancy against the same
-// limit, and if the two disagreed about what an unset capacity means, workers
-// would be shown as having room the scheduler would never use, or the reverse.
-//
-// Unset means one because that is the safe reading. Unlike an unknown cpu or
-// memory limit -- where the envelope could not be determined and refusing to
-// place would be worse than allowing it -- a Worker that has not said it can
-// host more than one Actor almost certainly cannot, and treating silence as
-// "no limit" would let any Worker built without capacity accept Actors without
-// bound.
+// WorkerMaxActors is how many Actors a Worker admits. Unset capacity reads as
+// one, not unconstrained: a Worker that has not said it can hold more is
+// assumed not to be able to. Shared by the scheduler and the CLI so they cannot
+// disagree about what silence means.
 func WorkerMaxActors(capacity *ateapipb.WorkerCapacity) int32 {
 	if capacity.GetActors() < 1 {
 		return 1
@@ -37,14 +27,12 @@ func WorkerMaxActors(capacity *ateapipb.WorkerCapacity) int32 {
 	return capacity.GetActors()
 }
 
-// AddToAllocated moves a Worker's running allocation total by one assignment's
-// worth, with sign +1 to bind and -1 to release, and returns it. A Worker back
-// to holding nothing gets nil rather than a zeroed message, so that a Worker
-// that emptied and one that was never filled are the same record.
+// AddToAllocated moves a Worker's running total by one assignment's worth, +1
+// to bind and -1 to release. A Worker back to holding nothing gets nil rather
+// than a zeroed message, so emptied and never-filled are the same record.
 //
-// An assignment that records no resources moves only the Actor count: the Actor
-// declared no limits, so nothing is known to have been reserved, matching how a
-// zero constraint is unconstrained at placement.
+// An assignment recording no resources moves only the Actor count: the Actor
+// declared no limits, so nothing is known to have been reserved.
 func AddToAllocated(total *ateapipb.WorkerCapacity, assignment *ateapipb.ActorAssignment, sign int64) *ateapipb.WorkerCapacity {
 	if total == nil {
 		total = &ateapipb.WorkerCapacity{}
@@ -58,9 +46,9 @@ func AddToAllocated(total *ateapipb.WorkerCapacity, assignment *ateapipb.ActorAs
 	return total
 }
 
-// SumAllocated totals what a set of assignments takes from a Worker, or nil for
+// SumAllocated is what a set of assignments takes from a Worker, or nil for
 // none. Rebuilds the total rather than adjusting it, which is what the checks
-// that hold AddToAllocated to the assignments it counts compare against.
+// holding AddToAllocated to the assignments it counts compare against.
 func SumAllocated(assignments []*ateapipb.ActorAssignment) *ateapipb.WorkerCapacity {
 	if len(assignments) == 0 {
 		return nil

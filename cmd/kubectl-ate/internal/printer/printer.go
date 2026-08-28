@@ -99,12 +99,9 @@ func PrintWorkers(workers []*ateapipb.Worker, format string) error {
 	return PrintWorkersTo(os.Stdout, workers, format)
 }
 
-// WorkerOccupancy is how full a Worker is, as a count against its limit.
-//
-// A count rather than the Actors themselves: a Worker hosts a set, listing
-// them all would be unreadable long before a Worker is full, and a listing
-// does not carry them. Capacity reports zero Actors when it is unknown, in
-// which case there is no limit to show against.
+// WorkerOccupancy is how full a Worker is, as a count against its limit. A
+// count rather than the Actors themselves: a listing does not carry them, and
+// naming them all would be unreadable long before a Worker is full.
 func WorkerOccupancy(worker *ateapipb.Worker) string {
 	hosted := worker.GetStatus().GetAllocated().GetActors()
 	if hosted == 0 {
