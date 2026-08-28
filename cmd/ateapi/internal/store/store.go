@@ -23,7 +23,6 @@ import (
 
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
-	"google.golang.org/protobuf/proto"
 )
 
 var (
@@ -291,10 +290,9 @@ func (p DeletePreconditions) Check(md *ateapipb.ResourceMetadata) error {
 // metadata is not checked: a backend re-stamps it from the object it read, so
 // whatever the mutation made of it is discarded either way.
 //
-// capacity is checked along with the rest because UpdateWorker replaces the
-// worker rather than patching it: a request that omits capacity is asking to
-// clear it, and silently losing a worker's compute capacity is worse than
-// rejecting the write. A future pod resize has to relax this rule first.
+// capacity is not one of them: it MAY change, since a pod can be resized and a
+// worker reports its own actor ceiling. CLEARING it is still rejected, because
+// an update replaces the worker and so an omitted capacity asks to lose it.
 //
 // A rejection wraps ErrImmutableField, so a backend can return it as-is and
 // callers still get the sentinel they map to INVALID_ARGUMENT.
@@ -315,8 +313,8 @@ func CheckWorkerMutation(stored, mutated *ateapipb.Worker) error {
 			return fmt.Errorf("%w: %s changed from %q to %q", ErrImmutableField, f.name, f.stored, f.mutated)
 		}
 	}
-	if !proto.Equal(stored.GetCapacity(), mutated.GetCapacity()) {
-		return fmt.Errorf("%w: capacity changed from %v to %v", ErrImmutableField, stored.GetCapacity(), mutated.GetCapacity())
+	if stored.GetCapacity() != nil && mutated.GetCapacity() == nil {
+		return fmt.Errorf("%w: capacity cleared, was %v", ErrImmutableField, stored.GetCapacity())
 	}
 	return nil
 }

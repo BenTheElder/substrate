@@ -1260,7 +1260,7 @@ func runWorkerContractTests(t *testing.T, setup func(t *testing.T) store.Interfa
 			Actor:         &ateapipb.ObjectRef{Name: "session-1"},
 		}
 		updated, err := s.UpdateWorker(ctx, testWorkerName, store.PreconditionFrom(created), func(toUpdate *ateapipb.Worker) error {
-			toUpdate.Status.Assignment = assignment
+			resources.BindAssignment(toUpdate, assignment)
 			return nil
 		})
 		if err != nil {
@@ -1279,7 +1279,7 @@ func runWorkerContractTests(t *testing.T, setup func(t *testing.T) store.Interfa
 		}
 
 		want := proto.Clone(worker).(*ateapipb.Worker)
-		want.Status.Assignment = assignment
+		resources.BindAssignment(want, assignment)
 		want.Metadata.Version = 2
 		if diff := cmp.Diff(want, got, protocmp.Transform(), ignoreUID, ignoreTimestamps); diff != "" {
 			t.Errorf("UpdateWorker yielded unexpected state in DB (-want +got):\n%s", diff)
@@ -1394,14 +1394,14 @@ func runWorkerContractTests(t *testing.T, setup func(t *testing.T) store.Interfa
 			t.Fatalf("GetWorker failed: %v", err)
 		}
 		if _, err := s.UpdateWorker(ctx, testWorkerName, store.PreconditionFrom(observed), func(toUpdate *ateapipb.Worker) error {
-			toUpdate.Status.Assignment = &ateapipb.ActorAssignment{Actor: &ateapipb.ObjectRef{Name: "session-1"}}
+			toUpdate.Status.Assignments = []*ateapipb.ActorAssignment{{Actor: &ateapipb.ObjectRef{Name: "session-1"}}}
 			return nil
 		}); err != nil {
 			t.Fatalf("UpdateWorker failed: %v", err)
 		}
 
 		_, err = s.UpdateWorker(ctx, testWorkerName, store.PreconditionFrom(observed), func(toUpdate *ateapipb.Worker) error {
-			toUpdate.Status.Assignment = &ateapipb.ActorAssignment{Actor: &ateapipb.ObjectRef{Name: "session-2"}}
+			toUpdate.Status.Assignments = []*ateapipb.ActorAssignment{{Actor: &ateapipb.ObjectRef{Name: "session-2"}}}
 			return nil
 		})
 		if !errors.Is(err, store.ErrVersionConflict) {
@@ -1468,9 +1468,10 @@ func runWorkerContractTests(t *testing.T, setup func(t *testing.T) store.Interfa
 			{"worker_pod_uid", "worker_pod_uid", func(w *ateapipb.Worker) { w.WorkerPodUid = otherTestWorkerName }},
 			{"node_name", "node_name", func(w *ateapipb.Worker) { w.NodeName = "other-node" }},
 			{"ip", "ip", func(w *ateapipb.Worker) { w.Ip = "10.0.0.9" }},
-			{"capacity_changed", "capacity", func(w *ateapipb.Worker) { w.Capacity.CpuMilli = 4000 }},
 			// An update replaces the worker, so a caller that leaves capacity
-			// out is asking to clear it. That is a change like any other.
+			// out is asking to clear it. Capacity itself may change -- a pod is
+			// resized, a worker reports its own ceiling -- but losing it is
+			// still rejected.
 			{"capacity_cleared", "capacity", func(w *ateapipb.Worker) { w.Capacity = nil }},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
@@ -1492,6 +1493,42 @@ func runWorkerContractTests(t *testing.T, setup func(t *testing.T) store.Interfa
 					t.Errorf("rejected mutation bumped the version to %d, want 1", got.GetMetadata().GetVersion())
 				}
 			})
+		}
+	})
+
+	// Capacity moves over a worker's life: a pod can be resized, and a worker
+	// reports the actor ceiling only it can observe. The backend that rejects
+	// clearing it must still let it change.
+	t.Run("UpdateWorker_CapacityChanges", func(t *testing.T) {
+		s := setup(t)
+		ctx := context.Background()
+
+		created, err := s.CreateWorker(ctx, newTestWorker(testWorkerName, "pod-1"))
+		if err != nil {
+			t.Fatalf("CreateWorker failed: %v", err)
+		}
+
+		updated, err := s.UpdateWorker(ctx, testWorkerName, store.PreconditionFrom(created), func(toUpdate *ateapipb.Worker) error {
+			toUpdate.Capacity.CpuMilli = 4000
+			toUpdate.Capacity.Actors = 4094
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("UpdateWorker changing capacity failed: %v", err)
+		}
+		if got, want := updated.GetCapacity().GetCpuMilli(), int64(4000); got != want {
+			t.Errorf("capacity.cpu_milli = %d, want %d", got, want)
+		}
+		if got, want := updated.GetCapacity().GetActors(), int32(4094); got != want {
+			t.Errorf("capacity.actors = %d, want %d", got, want)
+		}
+
+		stored, err := s.GetWorker(ctx, testWorkerName)
+		if err != nil {
+			t.Fatalf("GetWorker failed: %v", err)
+		}
+		if diff := cmp.Diff(updated.GetCapacity(), stored.GetCapacity(), protocmp.Transform()); diff != "" {
+			t.Errorf("stored capacity differs from what UpdateWorker returned (-returned +stored):\n%s", diff)
 		}
 	})
 
@@ -1518,13 +1555,13 @@ func runWorkerContractTests(t *testing.T, setup func(t *testing.T) store.Interfa
 			go func() {
 				defer wg.Done()
 				_, err := s.UpdateWorker(ctx, testWorkerName, store.PreconditionFrom(created), func(toUpdate *ateapipb.Worker) error {
-					if toUpdate.GetStatus().GetAssignment() != nil {
+					if len(toUpdate.GetStatus().GetAssignments()) != 0 {
 						return errTaken
 					}
-					toUpdate.Status.Assignment = &ateapipb.ActorAssignment{
+					toUpdate.Status.Assignments = []*ateapipb.ActorAssignment{{
 						Actor:    &ateapipb.ObjectRef{Atespace: "team-a", Name: fmt.Sprintf("actor-%d", i)},
 						ActorUid: fmt.Sprintf("uid-%d", i),
-					}
+					}}
 					return nil
 				})
 				switch {
@@ -1552,7 +1589,7 @@ func runWorkerContractTests(t *testing.T, setup func(t *testing.T) store.Interfa
 		if err != nil {
 			t.Fatalf("GetWorker failed: %v", err)
 		}
-		if uid := got.GetStatus().GetAssignment().GetActorUid(); !strings.HasPrefix(uid, "uid-") {
+		if uid := got.GetStatus().GetAssignments()[0].GetActorUid(); !strings.HasPrefix(uid, "uid-") {
 			t.Errorf("stored assignment names %q, want one of the claimants", uid)
 		}
 		// One winning write on top of the create, and no partial ones.

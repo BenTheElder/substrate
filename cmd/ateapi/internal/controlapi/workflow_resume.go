@@ -386,11 +386,11 @@ func (w *ActorWorkflow) validateAssignedWorker(ctx context.Context, actorRef res
 		}
 		return nil, status.Errorf(codes.Aborted, "actor %s crashed", actorRef.String())
 	}
-	// Verify the worker is still assigned to the same Actor.
-	if worker.GetStatus().GetAssignment().GetActorUid() != actor.GetMetadata().GetUid() {
-		slog.ErrorContext(ctx, "crashing actor because its assigned worker no longer belongs to it",
+	// Verify the worker is still hosting this Actor.
+	if resources.WorkerAssignmentFor(worker, actor.GetMetadata().GetUid()) == nil {
+		slog.ErrorContext(ctx, "crashing actor because its assigned worker no longer holds it",
 			slog.String("worker", worker.GetWorkerPod()),
-			slog.Any("assignment", worker.GetStatus().GetAssignment()))
+			slog.Any("assignments", worker.GetStatus().GetAssignments()))
 		if cerr := crashActor(ctx, w.store, actorRef, ateattr.OperationResume, ateattr.ReasonWorkerReassigned); cerr != nil {
 			return nil, fmt.Errorf("while crashing actor: %w", cerr)
 		}
@@ -407,7 +407,7 @@ func (w *ActorWorkflow) validateAssignedWorker(ctx context.Context, actorRef res
 		// to the free pool instead of leaving it claimed forever — nothing else
 		// reclaims a healthy worker whose actor moved on to a different pool.
 		if _, err := w.store.UpdateWorker(ctx, worker.GetMetadata().GetName(), store.PreconditionFrom(worker), func(toUpdate *ateapipb.Worker) error {
-			toUpdate.Status.Assignment = nil
+			resources.ReleaseAssignment(toUpdate, actor.GetMetadata().GetUid())
 			return nil
 		}); err != nil {
 			return nil, fmt.Errorf("while releasing stale worker assignment: %w", err)
@@ -418,6 +418,18 @@ func (w *ActorWorkflow) validateAssignedWorker(ctx context.Context, actorRef res
 		return nil, status.Errorf(codes.Aborted, "actor %s crashed", actorRef)
 	}
 	return worker, nil
+}
+
+// admittedResources is what an assignment books against its worker, or nil
+// when the actor declared no limits and so reserves nothing.
+func admittedResources(constraints scheduling.Constraints) *ateapipb.WorkerCapacity {
+	if constraints.CPUMilli == 0 && constraints.MemoryBytes == 0 {
+		return nil
+	}
+	return &ateapipb.WorkerCapacity{
+		CpuMilli:    constraints.CPUMilli,
+		MemoryBytes: constraints.MemoryBytes,
+	}
 }
 
 // schedulerRecordable excludes retried version conflicts: the assignment loop
@@ -464,10 +476,7 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 	// This can happen if ateapi crashed after updating worker with actor assignment,
 	// but has not yet updated the actor.
 	for _, worker := range workers {
-		if worker.GetStatus().GetAssignment() == nil {
-			continue
-		}
-		if worker.GetStatus().GetAssignment().GetActorUid() != actor.GetMetadata().GetUid() {
+		if resources.WorkerAssignmentFor(worker, actor.GetMetadata().GetUid()) == nil {
 			continue
 		}
 		if w.scheduler.Applies(worker, constraints) {
@@ -486,7 +495,7 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 			bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			if _, err := w.store.UpdateWorker(bgCtx, release.GetMetadata().GetName(), store.PreconditionFrom(release), func(toUpdate *ateapipb.Worker) error {
-				toUpdate.Status.Assignment = nil
+				resources.ReleaseAssignment(toUpdate, actor.GetMetadata().GetUid())
 				return nil
 			}); err != nil {
 				slog.ErrorContext(bgCtx, "Failed to release stale worker assignment",
@@ -515,6 +524,8 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 			Name:     actor.GetMetadata().GetName(),
 		},
 		ActorUid: actor.GetMetadata().GetUid(),
+		// Record what this claim reserves so release returns the same amount.
+		Resources: admittedResources(constraints),
 	}
 	if ref := actorTemplateObjectRef(actor); ref != nil {
 		assignment.ActorTemplateRef = ref
@@ -529,7 +540,7 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 	// by mutating the store's own copy; the cached one is only read, for the
 	// version this claim is conditioned on.
 	stored, err := w.store.UpdateWorker(ctx, assignedWorker.GetMetadata().GetName(), store.PreconditionFrom(assignedWorker), func(toUpdate *ateapipb.Worker) error {
-		toUpdate.Status.Assignment = assignment
+		resources.BindAssignment(toUpdate, assignment)
 		return nil
 	})
 	if err != nil {

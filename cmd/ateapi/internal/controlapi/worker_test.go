@@ -21,6 +21,7 @@ import (
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store/storetest"
+	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/grpc/codes"
@@ -94,7 +95,7 @@ func assignAPIWorker(t *testing.T, ctx context.Context, persistence store.Interf
 		t.Fatalf("getting worker %s to assign: %v", name, err)
 	}
 	assigned, err := persistence.UpdateWorker(ctx, name, store.PreconditionFrom(observed), func(toUpdate *ateapipb.Worker) error {
-		toUpdate.Status.Assignment = newAPIAssignment(actorUID)
+		resources.BindAssignment(toUpdate, newAPIAssignment(actorUID))
 		return nil
 	})
 	if err != nil {
@@ -223,8 +224,8 @@ func TestCreateWorker_IgnoresRequestStatus(t *testing.T) {
 
 	in := newAPIWorker(apiWorkerName)
 	in.Status = &ateapipb.WorkerStatus{
-		State:      ateapipb.WorkerState_WORKER_STATE_DRAINING,
-		Assignment: newAPIAssignment("actor-uid-1"),
+		State:       ateapipb.WorkerState_WORKER_STATE_DRAINING,
+		Assignments: []*ateapipb.ActorAssignment{newAPIAssignment("actor-uid-1")},
 	}
 
 	got, err := svc.CreateWorker(ctx, &ateapipb.CreateWorkerRequest{Worker: in})
@@ -435,9 +436,10 @@ func TestUpdateWorker_Errors(t *testing.T) {
 		{"ip changed", func(w *ateapipb.Worker) { w.Ip = "10.9.9.9" }, codes.InvalidArgument},
 		{"worker_pod changed", func(w *ateapipb.Worker) { w.WorkerPod = "worker-pod-2" }, codes.InvalidArgument},
 		{"node_name changed", func(w *ateapipb.Worker) { w.NodeName = "node-2" }, codes.InvalidArgument},
-		{"capacity changed", func(w *ateapipb.Worker) { w.Capacity.CpuMilli = 4000 }, codes.InvalidArgument},
 		// And immutable fields dropped, which a replacement update reads as a
 		// request to clear them. Rejected rather than silently applied.
+		// Capacity is here for the same reason even though it is not immutable:
+		// losing it is still not something an update may ask for.
 		{"ip omitted", func(w *ateapipb.Worker) { w.Ip = "" }, codes.InvalidArgument},
 		{"capacity omitted", func(w *ateapipb.Worker) { w.Capacity = nil }, codes.InvalidArgument},
 	}
@@ -452,6 +454,30 @@ func TestUpdateWorker_Errors(t *testing.T) {
 				t.Errorf("UpdateWorker() code = %v (err %v), want %v", got, err, tc.want)
 			}
 		})
+	}
+}
+
+// Capacity is the one non-identity field an update may change: a pod can be
+// resized, and a worker reports the actor ceiling only it can observe.
+func TestUpdateWorker_CapacityChanges(t *testing.T) {
+	ctx := context.Background()
+	svc, persistence := newWorkerAPIService(t)
+	seeded := seedAPIWorker(t, ctx, persistence, newAPIWorker(apiWorkerName))
+
+	updated, err := svc.UpdateWorker(ctx, &ateapipb.UpdateWorkerRequest{
+		Worker: updateFrom(seeded, func(w *ateapipb.Worker) {
+			w.Capacity.CpuMilli = 4000
+			w.Capacity.Actors = 4094
+		}),
+	})
+	if err != nil {
+		t.Fatalf("UpdateWorker() changing capacity failed: %v", err)
+	}
+	if got, want := updated.GetCapacity().GetCpuMilli(), int64(4000); got != want {
+		t.Errorf("capacity.cpu_milli = %d, want %d", got, want)
+	}
+	if got, want := updated.GetCapacity().GetActors(), int32(4094); got != want {
+		t.Errorf("capacity.actors = %d, want %d", got, want)
 	}
 }
 
@@ -592,8 +618,8 @@ func TestDrainWorker_KeepsAssignment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DrainWorker() failed: %v", err)
 	}
-	if got.GetStatus().GetAssignment().GetActorUid() != "actor-uid-1" {
-		t.Errorf("assignment = %v, want it left in place", got.GetStatus().GetAssignment())
+	if soleAssignment(got).GetActorUid() != "actor-uid-1" {
+		t.Errorf("assignment = %v, want it left in place", soleAssignment(got))
 	}
 }
 
@@ -636,8 +662,8 @@ func TestValidateWorker(t *testing.T) {
 		name: "status is not validated",
 		mutate: func(w *ateapipb.Worker) {
 			w.Status = &ateapipb.WorkerStatus{
-				State:      ateapipb.WorkerState(99),
-				Assignment: &ateapipb.ActorAssignment{Actor: &ateapipb.ObjectRef{Name: "actor"}},
+				State:       ateapipb.WorkerState(99),
+				Assignments: []*ateapipb.ActorAssignment{{Actor: &ateapipb.ObjectRef{Name: "actor"}}},
 			}
 		},
 	}, {

@@ -22,6 +22,7 @@ import (
 	"math/rand"
 	"slices"
 
+	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"go.opentelemetry.io/otel/metric"
 	"k8s.io/apimachinery/pkg/labels"
@@ -42,12 +43,8 @@ type Constraints struct {
 	// to specific node VMs.
 	RequiredNodes []string
 
-	// CPUMilli and MemoryBytes are the actor's declared resource limits, from
-	// the ActorTemplate. A worker is eligible only if its reported capacity is
-	// >= these. Zero means "unconstrained" for that dimension (the actor did not
-	// declare a limit), and a worker that reports zero capacity for a dimension
-	// is treated as unconstrained too, so placement is never blocked by missing
-	// data (matching the pre-capacity behavior).
+	// CPUMilli and MemoryBytes are the actor's declared limits.
+	// Zero capacity or limits are unconstrained.
 	CPUMilli    int64
 	MemoryBytes int64
 }
@@ -62,8 +59,13 @@ type Scheduler interface {
 	// Returns ErrNoCapacity when no free worker satisfies the requested constraints.
 	Schedule(ctx context.Context, constraints Constraints) (*ateapipb.Worker, error)
 
-	// Applies reports whether worker satisfies constraints.
+	// Applies reports whether worker satisfies non-capacity constraints. Capacity
+	// is excluded so an existing assignment does not make its Worker ineligible.
 	Applies(worker *ateapipb.Worker, constraints Constraints) bool
+
+	// HasRoom reports whether worker's remaining capacity admits one more actor
+	// of this size, in every dimension. Independent of Applies.
+	HasRoom(worker *ateapipb.Worker, constraints Constraints) bool
 }
 
 // WorkerSource provides the whole fleet of workers.
@@ -105,7 +107,6 @@ func (s *scheduler) Schedule(ctx context.Context, constraints Constraints) (*ate
 		return nil, fmt.Errorf("while listing workers: %w", err)
 	}
 
-	// Filter for candidate workers that are unassigned and meet all scheduling constraints
 	matching := make([]*ateapipb.Worker, 0, len(workers))
 	var candidates []*ateapipb.Worker
 	for _, worker := range workers {
@@ -113,7 +114,7 @@ func (s *scheduler) Schedule(ctx context.Context, constraints Constraints) (*ate
 			continue
 		}
 		matching = append(matching, worker)
-		if worker.GetStatus().GetAssignment() == nil {
+		if s.HasRoom(worker, constraints) {
 			candidates = append(candidates, worker)
 		}
 	}
@@ -145,17 +146,29 @@ func (s *scheduler) Applies(worker *ateapipb.Worker, constraints Constraints) bo
 		return false
 	}
 
-	// The worker must be able to contain the actor's declared limits. A zero
-	// constraint (actor declared no limit) or zero worker capacity (capacity
-	// unknown) is treated as unconstrained, so placement is never blocked by
-	// missing data.
-	capacity := worker.GetCapacity()
-	if constraints.CPUMilli > 0 && capacity.GetCpuMilli() > 0 && capacity.GetCpuMilli() < constraints.CPUMilli {
-		return false
-	}
-	if constraints.MemoryBytes > 0 && capacity.GetMemoryBytes() > 0 && capacity.GetMemoryBytes() < constraints.MemoryBytes {
-		return false
-	}
-
 	return len(constraints.RequiredNodes) == 0 || slices.Contains(constraints.RequiredNodes, worker.GetNodeName())
+}
+
+// HasRoom reports whether what the worker has left admits one more actor of
+// this size. A zero constraint or zero capacity is unconstrained in that
+// dimension, so placement is never blocked by missing data.
+func (s *scheduler) HasRoom(worker *ateapipb.Worker, constraints Constraints) bool {
+	capacity := worker.GetCapacity()
+	used := worker.GetStatus().GetAllocated()
+
+	// No per-actor size to compare: every assignment costs one, so a worker at
+	// its limit has no room however small the next actor is. Unset means one
+	// here, not unconstrained; see resources.WorkerMaxActors.
+	if used.GetActors() >= resources.WorkerMaxActors(capacity) {
+		return false
+	}
+	if constraints.CPUMilli > 0 && capacity.GetCpuMilli() > 0 &&
+		capacity.GetCpuMilli()-used.GetCpuMilli() < constraints.CPUMilli {
+		return false
+	}
+	if constraints.MemoryBytes > 0 && capacity.GetMemoryBytes() > 0 &&
+		capacity.GetMemoryBytes()-used.GetMemoryBytes() < constraints.MemoryBytes {
+		return false
+	}
+	return true
 }
