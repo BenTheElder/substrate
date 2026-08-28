@@ -104,6 +104,37 @@ func (p *Persistence) writeAndAppendEvent(ctx context.Context, eventType store.W
 	return worker, nil
 }
 
+// writeAndAppendEventFor is writeAndAppendEvent for a write whose event
+// payload is only known once the transaction has read what it is changing.
+// fn returns the worker to announce, or nil for a write that changed nothing.
+func (p *Persistence) writeAndAppendEventFor(ctx context.Context, eventType store.WorkerEventType, fn func(ctx context.Context, tx pgx.Tx) (*ateapipb.Worker, error)) error {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op once committed
+
+	worker, err := fn(ctx, tx)
+	if err != nil {
+		return err
+	}
+
+	if worker != nil {
+		payload, err := marshalWorkerEvent(eventType, worker)
+		if err != nil {
+			return fmt.Errorf("marshaling worker event: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO worker_outbox (payload) VALUES ($1)`, payload); err != nil {
+			return fmt.Errorf("appending worker outbox: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing transaction: %w", err)
+	}
+	return nil
+}
+
 const (
 	// Bound worker-event delivery latency in the absence of an xmin stall.
 	outboxPollInterval = 50 * time.Millisecond

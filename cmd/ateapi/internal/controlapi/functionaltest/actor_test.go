@@ -16,6 +16,7 @@ package functionaltest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -1766,34 +1767,20 @@ func TestResumeActor(t *testing.T) {
 		t.Errorf("GetActor response mismatch (-want +got):\n%s", diff)
 	}
 
-	// A listing reports how full a worker is, not which actors it holds.
+	// Verify that the worker record also has the assigned actor details
 	listWorkersResp, err := tc.client.ListWorkers(context.Background(), &ateapipb.ListWorkersRequest{})
 	if err != nil {
 		t.Fatalf("ListWorkers failed: %v", err)
 	}
-	var listedWorker *ateapipb.Worker
+	var actorWorker *ateapipb.Worker
 	for _, w := range listWorkersResp.GetWorkers() {
 		if w.GetWorkerNamespace() == ns && w.GetWorkerPod() == "worker-1" {
-			listedWorker = w
+			actorWorker = w
 			break
 		}
 	}
-	if listedWorker == nil {
+	if actorWorker == nil {
 		t.Fatalf("expected worker-1 in namespace %s not found in ListWorkers", ns)
-	}
-	if got := listedWorker.GetStatus().GetAssignments(); len(got) != 0 {
-		t.Errorf("ListWorkers carried %d assignments, want none: occupancy is reported through allocated", len(got))
-	}
-	if got, want := listedWorker.GetStatus().GetAllocated().GetActors(), int32(1); got != want {
-		t.Errorf("listed worker allocated.actors = %d, want %d", got, want)
-	}
-
-	// GetWorker is where the assignments are.
-	actorWorker, err := tc.client.GetWorker(context.Background(), &ateapipb.GetWorkerRequest{
-		Worker: &ateapipb.ObjectRef{Name: podUID},
-	})
-	if err != nil {
-		t.Fatalf("GetWorker failed: %v", err)
 	}
 
 	wantWorker := &ateapipb.Worker{
@@ -1806,22 +1793,14 @@ func TestResumeActor(t *testing.T) {
 		NodeName:        "node1",
 		SandboxClass:    "gvisor",
 		Labels:          map[string]string{poolLabelKey: ns},
-		Capacity:        &ateapipb.WorkerCapacity{Actors: 1},
+		// The pod sets no compute limits, so only the ceiling is set, and it is
+		// the one CreateWorker reifies: the ateom has not reported its own.
+		Capacity: &ateapipb.WorkerCapacity{Actors: 1},
 		Status: &ateapipb.WorkerStatus{
-			Assignments: []*ateapipb.ActorAssignment{{
-				ActorTemplateRef: &ateapipb.ObjectRef{
-					Atespace: testAtespace,
-					Name:     "tmpl1",
-				},
-				Actor: &ateapipb.ObjectRef{
-					Name:     name,
-					Atespace: testAtespace,
-				},
-				ActorUid: getResp.GetMetadata().GetUid(),
-			}},
-			State: ateapipb.WorkerState_WORKER_STATE_ACTIVE,
-			// The store keeps the running total in step with the list it counts.
+			// All a listing reports of the assignments. The actor declares no
+			// compute limits, so it registers as one actor and nothing else.
 			Allocated: &ateapipb.WorkerCapacity{Actors: 1},
+			State:     ateapipb.WorkerState_WORKER_STATE_ACTIVE,
 		},
 	}
 
@@ -2480,15 +2459,13 @@ func TestResumeActor_ReleasesStaleWorkerWhenPoolBecomesIneligible(t *testing.T) 
 			continue
 		}
 		switch w.GetWorkerPool() {
-		// A listing reports how full a worker is, not which actors it
-		// holds, so release is observed through the allocation total.
 		case "pool-a":
-			if hosted := w.GetStatus().GetAllocated().GetActors(); hosted != 0 {
-				t.Errorf("expected worker-a (now-ineligible pool-a) to be released, still hosting %d", hosted)
+			if n := w.GetStatus().GetAllocated().GetActors(); n != 0 {
+				t.Errorf("expected worker-a (now-ineligible pool-a) to be released, still holds %d actors", n)
 			}
 		case "pool-b":
-			if hosted := w.GetStatus().GetAllocated().GetActors(); hosted != 0 {
-				t.Errorf("expected worker-b to stay free (actor crashed, not migrated), still hosting %d", hosted)
+			if n := w.GetStatus().GetAllocated().GetActors(); n != 0 {
+				t.Errorf("expected worker-b to stay free (actor crashed, not migrated), holds %d actors", n)
 			}
 		}
 	}
@@ -2599,8 +2576,8 @@ func TestResumeActor_CrashesIfAssignedWorkerIsDraining(t *testing.T) {
 			continue
 		}
 		if w.GetWorkerPod() == assignedPod {
-			if hosted := w.GetStatus().GetAllocated().GetActors(); hosted != 0 {
-				t.Errorf("expected draining worker %q to be released, still hosting %d actors", assignedPod, hosted)
+			if n := w.GetStatus().GetAllocated().GetActors(); n != 0 {
+				t.Errorf("expected draining worker %q to be released, still holds %d actors", assignedPod, n)
 			}
 		}
 	}
@@ -3240,4 +3217,55 @@ func TestCreateActor_RejectsUnknownRequestFields(t *testing.T) {
 
 	_, err := tc.client.CreateActor(context.Background(), req)
 	assertGrpcError(t, err, codes.InvalidArgument, "request: Invalid value: unknown field with protobuf tag 9999")
+}
+
+// The assignment commits before the Actor is updated to point at it, so a
+// crash in between leaves a row no Actor references. Deleting the Actor has to
+// release it anyway: nothing else ever would, and its share of the Worker's
+// capacity would stay booked until the Worker itself went away.
+func TestDeleteActor_ReleasesAnAssignmentTheActorDoesNotReference(t *testing.T) {
+	ns := namespaceForTest("ns-delete-orphan")
+	tc := setupTest(t, ns)
+	defer tc.cleanup()
+
+	createTemplate(t, tc, ns)
+	createWorkerPool(t, tc, ns, "pool-1", nil)
+	podUID := createWorkerPod(t, tc, ns, "worker-1", "node-1", "pool-1")
+
+	ctx := context.Background()
+	actor, err := tc.client.CreateActor(ctx, &ateapipb.CreateActorRequest{Actor: &ateapipb.Actor{
+		Metadata:      &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "orphaned"},
+		ActorTemplate: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "tmpl1"},
+	}})
+	if err != nil {
+		t.Fatalf("CreateActor failed: %v", err)
+	}
+	actorUID := actor.GetMetadata().GetUid()
+
+	// Bind straight through the store, leaving the Actor's backlink unset:
+	// exactly the state a crash between the two writes leaves behind.
+	if err := tc.persistence.BindActorToWorker(ctx, podUID, &ateapipb.ActorAssignment{
+		Actor:            &ateapipb.ObjectRef{Atespace: testAtespace, Name: "orphaned"},
+		ActorUid:         actorUID,
+		ActorTemplateRef: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "tmpl1"},
+	}, nil); err != nil {
+		t.Fatalf("BindActorToWorker failed: %v", err)
+	}
+
+	if _, err := tc.client.DeleteActor(ctx, &ateapipb.DeleteActorRequest{
+		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "orphaned"},
+	}); err != nil {
+		t.Fatalf("DeleteActor failed: %v", err)
+	}
+
+	if _, err := tc.persistence.GetWorkerAssignment(ctx, podUID, actorUID); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("the orphaned assignment survived DeleteActor: %v", err)
+	}
+	worker, err := tc.persistence.GetWorker(ctx, podUID)
+	if err != nil {
+		t.Fatalf("GetWorker failed: %v", err)
+	}
+	if got := worker.GetStatus().GetAllocated().GetActors(); got != 0 {
+		t.Errorf("worker still books %d actors after the Actor was deleted, want 0", got)
+	}
 }

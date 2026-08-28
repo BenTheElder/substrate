@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/agent-substrate/substrate/internal/ateattr"
-	"github.com/agent-substrate/substrate/internal/resources"
 	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"go.opentelemetry.io/otel/attribute"
@@ -75,7 +74,7 @@ func mustMetric(t *testing.T, reader *sdkmetric.ManualReader, name string) metri
 func worker(namespace, pool, class string, assigned bool) *ateapipb.Worker {
 	w := &ateapipb.Worker{WorkerNamespace: namespace, WorkerPool: pool, SandboxClass: class, Status: &ateapipb.WorkerStatus{}}
 	if assigned {
-		resources.BindAssignment(w, &ateapipb.ActorAssignment{})
+		w.Status.Allocated = &ateapipb.WorkerCapacity{Actors: 1}
 	}
 	return w
 }

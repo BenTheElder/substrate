@@ -17,6 +17,7 @@ package controlapi
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 
@@ -88,12 +89,16 @@ func newAPIAssignment(actorUID string) *ateapipb.ActorAssignment {
 // newWorkerAPIService returns a service backed by a real store, which is what
 // makes the compare-and-set assertions below meaningful — a fake would decide
 // the outcome the test is trying to observe.
+// impl is a real ServiceImpl rather than the store itself, as main wires it:
+// the service layer is where a read composes the Worker with records kept
+// outside it, so a test that hands RPCService the bare store silently skips
+// that and reports whatever the store row happens to hold.
 func newWorkerAPIService(t *testing.T) (*RPCService, store.Interface) {
 	t.Helper()
 	persistence, cleanup := storetest.SetupTestStore(t)
 	t.Cleanup(cleanup)
 	impl := newServiceImpl(persistence, nil)
-	return &RPCService{impl: impl, workerWorkflow: NewWorkerWorkflow(impl)}, persistence
+	return &RPCService{impl: impl, workerWorkflow: NewWorkerWorkflow(persistence)}, persistence
 }
 
 // seedAPIWorker registers a worker directly through the store and returns it as
@@ -119,12 +124,12 @@ func assignAPIWorker(t *testing.T, ctx context.Context, persistence store.Interf
 	if err != nil {
 		t.Fatalf("getting worker %s to assign: %v", name, err)
 	}
-	assigned, err := persistence.UpdateWorker(ctx, name, store.PreconditionFrom(observed), func(toUpdate *ateapipb.Worker) error {
-		resources.BindAssignment(toUpdate, newAPIAssignment(actorUID))
-		return nil
-	})
-	if err != nil {
+	if err := persistence.BindActorToWorker(ctx, name, observed.GetMetadata().GetVersion(), newAPIAssignment(actorUID)); err != nil {
 		t.Fatalf("assigning worker %s: %v", name, err)
+	}
+	assigned, err := persistence.GetWorker(ctx, name)
+	if err != nil {
+		t.Fatalf("re-reading worker %s after assigning: %v", name, err)
 	}
 	return assigned
 }
@@ -146,50 +151,67 @@ func updateFrom(observed *ateapipb.Worker, mutate func(*ateapipb.Worker)) *ateap
 	return worker
 }
 
-func TestValidateListWorkersRequest(t *testing.T) {
-	tests := []struct {
-		name string
-		req  *ateapipb.ListWorkersRequest
-		want field.ErrorList
-	}{{
-		"valid, no page_size",
-		&ateapipb.ListWorkersRequest{},
-		nil,
-	}, {
-		"valid, positive page_size",
-		&ateapipb.ListWorkersRequest{PageSize: 10},
-		nil,
-	}, {
-		"negative page_size",
-		&ateapipb.ListWorkersRequest{PageSize: -1},
-		field.ErrorList{field.Invalid(field.NewPath("page_size"), int32(-1), "").WithOrigin("minimum")},
-	}, {
-		"valid page_token",
-		&ateapipb.ListWorkersRequest{PageToken: strings.Repeat("x", 256)},
-		nil,
-	}, {
-		"too-large page_token",
-		&ateapipb.ListWorkersRequest{PageToken: strings.Repeat("x", 257)},
-		field.ErrorList{field.TooLongCharacters(field.NewPath("page_token"), "", 256).WithOrigin("maxLength")},
-	}}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assertValidateErr(t, validateListWorkersRequest(context.Background(), tt.req), tt.want)
-		})
+// The assignments are a subresource, so this RPC is the only way to read them.
+// It also pins the identity the store gives each one.
+func TestListWorkerAssignments(t *testing.T) {
+	ctx := context.Background()
+	svc, persistence := newWorkerAPIService(t)
+	seedAPIWorker(t, ctx, persistence, validWorker(apiWorkerName))
+	assignAPIWorker(t, ctx, persistence, apiWorkerName, "actor-uid-1")
+	assignAPIWorker(t, ctx, persistence, apiWorkerName, "actor-uid-2")
+
+	page, err := svc.ListWorkerAssignments(ctx, &ateapipb.ListWorkerAssignmentsRequest{Worker: workerRef(apiWorkerName)})
+	if err != nil {
+		t.Fatalf("ListWorkerAssignments() failed: %v", err)
+	}
+	var uids []string
+	for _, a := range page.GetWorkerAssignments() {
+		uids = append(uids, a.GetActorUid())
+		if got := a.GetMetadata().GetName(); got != a.GetActorUid() {
+			t.Errorf("assignment name = %q, want the Actor uid %q", got, a.GetActorUid())
+		}
+		if got := a.GetMetadata().GetAtespace(); got != "" {
+			t.Errorf("assignment atespace = %q, want empty: Workers are global-scoped", got)
+		}
+		if a.GetMetadata().GetUid() == "" {
+			t.Error("assignment uid is unset, want the one the store generated")
+		}
+	}
+	sort.Strings(uids)
+	if diff := cmp.Diff([]string{"actor-uid-1", "actor-uid-2"}, uids); diff != "" {
+		t.Errorf("assignments mismatch (-want +got):\n%s", diff)
 	}
 }
 
-func TestGetWorker(t *testing.T) {
+// An absent Worker is NOT_FOUND rather than an empty page, which a caller
+// cannot tell from a Worker hosting nothing.
+func TestListWorkerAssignments_AbsentWorker(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := newWorkerAPIService(t)
+
+	_, err := svc.ListWorkerAssignments(ctx, &ateapipb.ListWorkerAssignmentsRequest{
+		Worker: workerRef("3b9f1e77-2c4d-4a80-91be-6d5c8f0a7e21"),
+	})
+	if got := status.Code(err); got != codes.NotFound {
+		t.Fatalf("code = %v (err %v), want %v", got, err, codes.NotFound)
+	}
+}
+
+// Capacity is the Worker's own and may move over its lifetime; only clearing it
+// is refused (see TestUpdateWorker_Errors/capacity_omitted).
+func TestUpdateWorker_CapacityChanges(t *testing.T) {
 	ctx := context.Background()
 	svc, persistence := newWorkerAPIService(t)
-	want := seedAPIWorker(t, ctx, persistence, validWorker(apiWorkerName))
+	seeded := seedAPIWorker(t, ctx, persistence, validWorker(apiWorkerName))
 
-	got, err := svc.GetWorker(ctx, &ateapipb.GetWorkerRequest{Worker: workerRef(apiWorkerName)})
+	got, err := svc.UpdateWorker(ctx, &ateapipb.UpdateWorkerRequest{
+		Worker: updateFrom(seeded, func(w *ateapipb.Worker) { w.Capacity.Actors = 4094 }),
+	})
 	if err != nil {
-		t.Fatalf("GetWorker() failed: %v", err)
+		t.Fatalf("UpdateWorker() raising the actor ceiling failed: %v", err)
 	}
-	if diff := cmp.Diff(want, got, protocmp.Transform()); diff != "" {
-		t.Errorf("GetWorker() mismatch (-want +got):\n%s", diff)
+	if got.GetCapacity().GetActors() != 4094 {
+		t.Errorf("capacity.actors = %d, want 4094", got.GetCapacity().GetActors())
 	}
 }
 
@@ -257,8 +279,8 @@ func TestCreateWorker_IgnoresRequestStatus(t *testing.T) {
 
 	in := validWorker(apiWorkerName)
 	in.Status = &ateapipb.WorkerStatus{
-		State:       ateapipb.WorkerState_WORKER_STATE_DRAINING,
-		Assignments: []*ateapipb.ActorAssignment{newAPIAssignment("actor-uid-1")},
+		State:     ateapipb.WorkerState_WORKER_STATE_DRAINING,
+		Allocated: &ateapipb.WorkerCapacity{Actors: 9},
 	}
 
 	got, err := svc.CreateWorker(ctx, &ateapipb.CreateWorkerRequest{Worker: in})
@@ -469,10 +491,12 @@ func TestUpdateWorker_Errors(t *testing.T) {
 		{"ip changed", func(w *ateapipb.Worker) { w.Ip = "10.9.9.9" }, codes.InvalidArgument},
 		{"worker_pod changed", func(w *ateapipb.Worker) { w.WorkerPod = "worker-pod-2" }, codes.InvalidArgument},
 		{"node_name changed", func(w *ateapipb.Worker) { w.NodeName = "node-2" }, codes.InvalidArgument},
+		// capacity is deliberately absent here: it may change (the pool's actor
+		// ceiling moves, a pod can be resized, a Worker may report its own).
+		// TestUpdateWorker_CapacityChanges covers that.
+		//
 		// And immutable fields dropped, which a replacement update reads as a
 		// request to clear them. Rejected rather than silently applied.
-		// Capacity is here for the same reason even though it is not immutable:
-		// losing it is still not something an update may ask for.
 		{"ip omitted", func(w *ateapipb.Worker) { w.Ip = "" }, codes.InvalidArgument},
 		{"capacity omitted", func(w *ateapipb.Worker) { w.Capacity = nil }, codes.InvalidArgument},
 	}
@@ -487,30 +511,6 @@ func TestUpdateWorker_Errors(t *testing.T) {
 				t.Errorf("UpdateWorker() code = %v (err %v), want %v", got, err, tc.want)
 			}
 		})
-	}
-}
-
-// Capacity is the one non-identity field an update may change: a pod can be
-// resized, and a worker reports the actor ceiling only it can observe.
-func TestUpdateWorker_CapacityChanges(t *testing.T) {
-	ctx := context.Background()
-	svc, persistence := newWorkerAPIService(t)
-	seeded := seedAPIWorker(t, ctx, persistence, validWorker(apiWorkerName))
-
-	updated, err := svc.UpdateWorker(ctx, &ateapipb.UpdateWorkerRequest{
-		Worker: updateFrom(seeded, func(w *ateapipb.Worker) {
-			w.Capacity.Resources = resources.CPUMemory(4000, 0)
-			w.Capacity.Actors = 4094
-		}),
-	})
-	if err != nil {
-		t.Fatalf("UpdateWorker() changing capacity failed: %v", err)
-	}
-	if want := resources.CPUMemory(4000, 0); !proto.Equal(want, updated.GetCapacity().GetResources()) {
-		t.Errorf("capacity resources = %v, want %v", updated.GetCapacity().GetResources(), want)
-	}
-	if got, want := updated.GetCapacity().GetActors(), int32(4094); got != want {
-		t.Errorf("capacity.actors = %d, want %d", got, want)
 	}
 }
 
@@ -566,6 +566,24 @@ func TestDeleteWorker_Absent(t *testing.T) {
 	_, err := svc.DeleteWorker(ctx, &ateapipb.DeleteWorkerRequest{Worker: workerRef(apiWorkerName)})
 	if got := status.Code(err); got != codes.NotFound {
 		t.Errorf("DeleteWorker() code = %v (err %v), want %v", got, err, codes.NotFound)
+	}
+}
+
+// An assigned worker deletes like any other: the delete does not cascade, and
+// an Actor pointing at a Worker that is gone is an expected steady state.
+func TestDeleteWorker_AssignedWorkerDeletesAnyway(t *testing.T) {
+	ctx := context.Background()
+	svc, persistence := newWorkerAPIService(t)
+	seedAPIWorker(t, ctx, persistence, validWorker(apiWorkerName))
+	assignAPIWorker(t, ctx, persistence, apiWorkerName, "actor-uid-1")
+
+	got, err := svc.DeleteWorker(ctx, &ateapipb.DeleteWorkerRequest{Worker: workerRef(apiWorkerName)})
+	if err != nil {
+		t.Fatalf("DeleteWorker() failed: %v", err)
+	}
+	// The record carries the total, not the assignments themselves.
+	if n := got.GetStatus().GetAllocated().GetActors(); n != 1 {
+		t.Errorf("deleted worker hosted %d actors, want the 1 it was holding", n)
 	}
 }
 
@@ -651,8 +669,8 @@ func TestDrainWorker_KeepsAssignment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DrainWorker() failed: %v", err)
 	}
-	if soleAssignment(got).GetActorUid() != "actor-uid-1" {
-		t.Errorf("assignment = %v, want it left in place", soleAssignment(got))
+	if n := got.GetStatus().GetAllocated().GetActors(); n != 1 {
+		t.Errorf("drained worker hosts %d actors, want the 1 left in place", n)
 	}
 }
 
@@ -840,45 +858,6 @@ func TestValidateCreateWorkerRequest(t *testing.T) {
 		name: "status invalid state (too large)",
 		req:  validReq(validWorker(apiWorkerName, withStatus(func(s *ateapipb.WorkerStatus) { s.State = 99 }))),
 		want: field.ErrorList{field.Invalid(field.NewPath("worker", "status", "state"), nil, "").WithOrigin("maximum")},
-	}, {
-		name: "valid assignment, when carried, passes",
-		req: validReq(validWorker(apiWorkerName, withStatus(func(s *ateapipb.WorkerStatus) {
-			s.Assignments = []*ateapipb.ActorAssignment{newAPIAssignment(apiOtherWorkerName)}
-		}))),
-	}, {
-		name: "assignment actor_uid must be a uuid",
-		req: validReq(validWorker(apiWorkerName, withStatus(func(s *ateapipb.WorkerStatus) {
-			s.Assignments = []*ateapipb.ActorAssignment{newAPIAssignment("not a uuid")}
-		}))),
-		want: field.ErrorList{field.Invalid(field.NewPath("worker", "status", "assignments").Index(0).Child("actor_uid"), nil, "").WithOrigin("format=k8s-uuid")},
-	}, {
-		name: "assignment actor ref needs an atespace",
-		req: validReq(validWorker(apiWorkerName, withStatus(func(s *ateapipb.WorkerStatus) {
-			s.Assignments = []*ateapipb.ActorAssignment{newAPIAssignment(apiOtherWorkerName)}
-			s.Assignments[0].Actor.Atespace = ""
-		}))),
-		want: field.ErrorList{field.Required(field.NewPath("worker", "status", "assignments").Index(0).Child("actor", "atespace"), "")},
-	}, {
-		name: "assignment template ref needs an atespace",
-		req: validReq(validWorker(apiWorkerName, withStatus(func(s *ateapipb.WorkerStatus) {
-			s.Assignments = []*ateapipb.ActorAssignment{newAPIAssignment(apiOtherWorkerName)}
-			s.Assignments[0].ActorTemplateRef = &ateapipb.ObjectRef{Name: "tmpl"}
-		}))),
-		want: field.ErrorList{field.Required(field.NewPath("worker", "status", "assignments").Index(0).Child("actor_template_ref", "atespace"), "")},
-	}, {
-		name: "assignment needs a template ref",
-		req: validReq(validWorker(apiWorkerName, withStatus(func(s *ateapipb.WorkerStatus) {
-			s.Assignments = []*ateapipb.ActorAssignment{newAPIAssignment(apiOtherWorkerName)}
-			s.Assignments[0].ActorTemplateRef = nil
-		}))),
-		want: field.ErrorList{field.Required(field.NewPath("worker", "status", "assignments").Index(0).Child("actor_template_ref"), "")},
-	}, {
-		name: "assignment template name must be a short name",
-		req: validReq(validWorker(apiWorkerName, withStatus(func(s *ateapipb.WorkerStatus) {
-			s.Assignments = []*ateapipb.ActorAssignment{newAPIAssignment(apiOtherWorkerName)}
-			s.Assignments[0].ActorTemplateRef.Name = "TMPL_1"
-		}))),
-		want: field.ErrorList{field.Invalid(field.NewPath("worker", "status", "assignments").Index(0).Child("actor_template_ref", "name"), nil, "").WithOrigin("format=k8s-short-name")},
 	}}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1096,42 +1075,6 @@ func TestCreateWorker_IgnoresRequestMetadataServerFields(t *testing.T) {
 	}
 	if got.GetMetadata().GetVersion() != 1 {
 		t.Errorf("created worker version = %d, want 1", got.GetMetadata().GetVersion())
-	}
-}
-
-// TestServiceImplUpdateWorker_ValidatesAssignment pins that assignment writes
-// — which reach the store through ServiceImpl, the way the resume workflow
-// binds an Actor — are validated like any other worker update.
-func TestServiceImplUpdateWorker_ValidatesAssignment(t *testing.T) {
-	ctx := context.Background()
-	persistence, cleanup := storetest.SetupTestStore(t)
-	t.Cleanup(cleanup)
-	impl := newServiceImpl(persistence, nil)
-	created := seedAPIWorker(t, ctx, persistence, validWorker(apiWorkerName))
-
-	// A malformed assignment must not land.
-	_, err := impl.UpdateWorker(ctx, apiWorkerName, store.PreconditionFrom(created), func(toUpdate *ateapipb.Worker) error {
-		toUpdate.Status.Assignments = []*ateapipb.ActorAssignment{newAPIAssignment("not-a-uuid")}
-		return nil
-	})
-	if got := status.Code(err); got != codes.InvalidArgument {
-		t.Fatalf("assigning a malformed uid returned %v (err %v), want %v", got, err, codes.InvalidArgument)
-	}
-
-	// A well-formed assignment lands, and releasing it lands too: the set is
-	// optional, so emptying it is not otherwise constrained.
-	assigned, err := impl.UpdateWorker(ctx, apiWorkerName, store.PreconditionFrom(created), func(toUpdate *ateapipb.Worker) error {
-		toUpdate.Status.Assignments = []*ateapipb.ActorAssignment{newAPIAssignment(apiOtherWorkerName)}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("assigning a valid assignment failed: %v", err)
-	}
-	if _, err := impl.UpdateWorker(ctx, apiWorkerName, store.PreconditionFrom(assigned), func(toUpdate *ateapipb.Worker) error {
-		toUpdate.Status.Assignments = nil
-		return nil
-	}); err != nil {
-		t.Fatalf("releasing the assignment failed: %v", err)
 	}
 }
 

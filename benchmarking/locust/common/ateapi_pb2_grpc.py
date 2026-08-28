@@ -164,6 +164,11 @@ class ControlStub:
                 request_serializer=ateapi__pb2.DrainWorkerRequest.SerializeToString,
                 response_deserializer=ateapi__pb2.Worker.FromString,
                 _registered_method=True)
+        self.ListWorkerAssignments = channel.unary_unary(
+                '/ateapi.Control/ListWorkerAssignments',
+                request_serializer=ateapi__pb2.ListWorkerAssignmentsRequest.SerializeToString,
+                response_deserializer=ateapi__pb2.ListWorkerAssignmentsResponse.FromString,
+                _registered_method=True)
         self.ListActors = channel.unary_unary(
                 '/ateapi.Control/ListActors',
                 request_serializer=ateapi__pb2.ListActorsRequest.SerializeToString,
@@ -382,6 +387,14 @@ class ControlServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ListWorkerAssignments(self, request, context):
+        """List the Actors a Worker hosts. A subresource of Worker rather than a field
+        on it, so GetWorker and ListWorkers cost the same whatever the occupancy.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def ListActors(self, request, context):
         """List Actors.
         """
@@ -561,6 +574,11 @@ def add_ControlServicer_to_server(servicer, server):
                     servicer.DrainWorker,
                     request_deserializer=ateapi__pb2.DrainWorkerRequest.FromString,
                     response_serializer=ateapi__pb2.Worker.SerializeToString,
+            ),
+            'ListWorkerAssignments': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListWorkerAssignments,
+                    request_deserializer=ateapi__pb2.ListWorkerAssignmentsRequest.FromString,
+                    response_serializer=ateapi__pb2.ListWorkerAssignmentsResponse.SerializeToString,
             ),
             'ListActors': grpc.unary_unary_rpc_method_handler(
                     servicer.ListActors,
@@ -1241,6 +1259,33 @@ class Control:
             _registered_method=True)
 
     @staticmethod
+    def ListWorkerAssignments(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ateapi.Control/ListWorkerAssignments',
+            ateapi__pb2.ListWorkerAssignmentsRequest.SerializeToString,
+            ateapi__pb2.ListWorkerAssignmentsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
     def ListActors(request,
             target,
             options=(),
@@ -1660,10 +1705,10 @@ class WorkerServiceServicer:
     """
 
     def SetWorkerCapacity(self, request, context):
-        """SetWorkerCapacity records what a Worker can hold. Capacity is the
-        Worker's to report rather than the control plane's to infer: it is what
-        the ateom can actually supply, only its node can observe it, and a fleet
-        may run mixed ateom versions.
+        """SetWorkerCapacity records what a Worker can hold. Capacity is the Worker's
+        to report rather than the control plane's to infer: it is what the ateom
+        can actually supply, only its node can observe it, and a fleet may run
+        mixed ateom versions.
 
         atelet calls this with its own client certificate, as it does for
         MintCert. Idempotent: re-sending the same capacity is not a write.

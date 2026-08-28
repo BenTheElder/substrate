@@ -108,30 +108,36 @@ func TestEnsurePausedFinalized_RecordsContentScope(t *testing.T) {
 			ctx := context.Background()
 			actorRef := resources.ActorRef{Atespace: "team-a", Name: "actor-1"}
 
+			workerName := testWorkerUID("worker-pod-1")
 			created := storetest.MustCreateActor(t, ctx, st, &ateapipb.Actor{
 				Metadata: &ateapipb.ResourceMetadata{Atespace: actorRef.Atespace, Name: actorRef.Name},
 				Status: &ateapipb.ActorStatus{
 					State: ateapipb.ActorState_ACTOR_STATE_PAUSING,
 					WorkerAssignment: &ateapipb.WorkerAssignment{
+						Worker:          &ateapipb.ObjectRef{Name: workerName},
 						WorkerNamespace: "default",
 						WorkerPool:      "pool1",
 						WorkerPod:       "worker-pod-1",
+						WorkerPodUid:    workerName,
 					},
 					InProgressLocalSnapshotName: "snap-prefix",
 				},
 			})
 			if _, err := st.CreateWorker(ctx, &ateapipb.Worker{
+				Metadata:        &ateapipb.ResourceMetadata{Name: workerName},
 				WorkerNamespace: "default",
 				WorkerPool:      "pool1",
 				WorkerPod:       "worker-pod-1",
+				WorkerPodUid:    workerName,
 				NodeName:        "node1",
-				Status: hostingStatus(ateapipb.WorkerState_WORKER_STATE_UNSPECIFIED, &ateapipb.ActorAssignment{
-					Actor:    &ateapipb.ObjectRef{Atespace: actorRef.Atespace, Name: actorRef.Name},
-					ActorUid: created.GetMetadata().GetUid(),
-				}),
+				Status:          &ateapipb.WorkerStatus{},
 			}); err != nil {
 				t.Fatalf("CreateWorker: %v", err)
 			}
+			seedAssignment(t, st, workerName, &ateapipb.ActorAssignment{
+				Actor:    &ateapipb.ObjectRef{Atespace: actorRef.Atespace, Name: actorRef.Name},
+				ActorUid: created.GetMetadata().GetUid(),
+			})
 
 			w := &ActorWorkflow{store: st}
 			tmpl := &ateapipb.ActorTemplate{

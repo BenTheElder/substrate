@@ -127,8 +127,15 @@ func (w *ActorWorkflow) ensureAteletTerminated(ctx context.Context, actorRef res
 			}
 			return fmt.Errorf("while checking worker assignment: %w", err)
 		}
-		if resources.WorkerAssignmentFor(worker, actor.GetMetadata().GetUid()) == nil {
-			slog.InfoContext(ctx, "worker is no longer hosting this actor, skipping atelet terminate request",
+		// Ask whether the worker still HOSTS this actor, not whether its one
+		// assignment happens to be this actor: a worker hosting several is the
+		// ordinary case, and the others are none of this delete's business.
+		hosted, err := workerHostsActor(ctx, w.store, worker.GetMetadata().GetName(), actor.GetMetadata().GetUid())
+		if err != nil {
+			return err
+		}
+		if !hosted {
+			slog.InfoContext(ctx, "worker is no longer assigned to this actor, skipping atelet terminate request",
 				slog.String("worker", workerName),
 				slog.Any("actor", actorRef))
 			return nil
@@ -212,13 +219,53 @@ func (w *ActorWorkflow) ensureVolumesDetachedForDelete(ctx context.Context, acto
 }
 
 // ensureWorkerReleased releases the worker assigned to the actor.
+// releaseAssignmentWithoutBacklink releases an assignment the Actor does not
+// reference, found by Actor UID. Absent is the ordinary case and not an error:
+// most Actors reaching here really were released already.
+func (w *ActorWorkflow) releaseAssignmentWithoutBacklink(ctx context.Context, actor *ateapipb.Actor) error {
+	actorUID := actor.GetMetadata().GetUid()
+	workerName, err := w.store.FindWorkerHostingActor(ctx, actorUID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			markSkipped(ctx, "worker already released")
+			return nil
+		}
+		return fmt.Errorf("while looking for a worker still hosting actor %s: %w", actorUID, err)
+	}
+
+	worker, err := w.store.GetWorker(ctx, workerName)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			markSkipped(ctx, "worker already released")
+			return nil
+		}
+		return fmt.Errorf("while getting worker %s to release: %w", workerName, err)
+	}
+
+	slog.InfoContext(ctx, "Releasing an assignment the Actor does not reference",
+		slog.String("worker", workerName), slog.String("actor_uid", actorUID))
+	_, err = w.store.ReleaseActorFromWorker(ctx, workerName, worker.GetMetadata().GetVersion(), actorUID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return fmt.Errorf("while releasing worker %s: %w", workerName, err)
+	}
+	return nil
+}
+
 func (w *ActorWorkflow) ensureWorkerReleased(ctx context.Context, actorRef resources.ActorRef, actor *ateapipb.Actor) (updated *ateapipb.Actor, err error) {
 	ctx, done := stepSpan(ctx, "ReleaseWorker")
 	defer func() { err = done(err) }()
 
 	if actor.GetStatus().GetWorkerAssignment() == nil {
-		markSkipped(ctx, "worker already released")
-		return actor, nil
+		// An Actor with no backlink may still be bound. The assignment commits
+		// before the Actor is updated to point at it, so a crash in between
+		// leaves a row nothing on the Actor names. Releasing by Actor UID is
+		// what recovers it; skipping would leave its share of the Worker's
+		// capacity booked until the Worker itself went away. The resume path
+		// recovers the same window through workerHoldingStaleClaim.
+		return actor, w.releaseAssignmentWithoutBacklink(ctx, actor)
 	}
 
 	latestActor, err := w.store.GetActor(ctx, actorRef)
@@ -227,7 +274,8 @@ func (w *ActorWorkflow) ensureWorkerReleased(ctx context.Context, actorRef resou
 	}
 
 	if latestActor.GetStatus().GetWorkerAssignment() != nil {
-		if _, err := releaseWorker(ctx, w.store, latestActor); err != nil {
+		_, _, err := releaseWorker(ctx, w.store, latestActor)
+		if err != nil {
 			return nil, err
 		}
 

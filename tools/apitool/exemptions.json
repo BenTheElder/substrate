@@ -553,5 +553,10 @@
     "rule": "documented",
     "subject": "ateapi.WorkerStatus.state",
     "message": "field has no doc comment"
+  },
+  {
+    "rule": "list-method-shape",
+    "subject": "ateapi.Control.ListWorkerAssignments",
+    "message": "field \"worker\" is not part of the standard List request shape - only atespace, page_size, and page_token are allowed (sorting/filtering per AIP-132 is not supported)"
   }
 ]

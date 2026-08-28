@@ -419,7 +419,15 @@ func createWorkerPool(t *testing.T, tc *testContext, ns string, name string, lab
 		t.Fatalf("failed to create WorkerPool: %v", err)
 	}
 
-	err = wait.PollUntilContextTimeout(context.Background(), 100*time.Millisecond, 5*time.Second, true, func(ctx context.Context) (bool, error) {
+	waitForWorkerPoolInInformer(t, tc, ns, name)
+}
+
+// waitForWorkerPoolInInformer blocks until the pool the test just created is
+// visible to the scheduler, which reads it through an informer rather than the
+// API.
+func waitForWorkerPoolInInformer(t *testing.T, tc *testContext, ns, name string) {
+	t.Helper()
+	err := wait.PollUntilContextTimeout(context.Background(), 100*time.Millisecond, 5*time.Second, true, func(ctx context.Context) (bool, error) {
 		_, err := tc.workerPoolLister.WorkerPools(ns).Get(name)
 		return err == nil, nil
 	})
@@ -518,6 +526,11 @@ func createWorkerPod(t *testing.T, tc *testContext, ns string, name string, node
 			NodeName:        nodeName,
 			SandboxClass:    string(pool.Spec.SandboxClass),
 			Labels:          pool.GetLabels(),
+			// No capacity: the syncer takes the compute dimensions from the pod's
+			// limits, and these pods declare none. The actors ceiling is the
+			// ateom's and arrives by report, which unset reads as one — enough
+			// for a test that places a single Actor per worker. See
+			// setWorkerActorCapacity for the tests that need more.
 		},
 	}); err != nil {
 		t.Fatalf("failed to register worker: %v", err)
@@ -552,7 +565,10 @@ func waitForWorkerAvailable(t *testing.T, tc *testContext, workerName string) {
 		if err != nil {
 			return false, nil
 		}
-		return worker.GetStatus().GetState() == ateapipb.WorkerState_WORKER_STATE_ACTIVE && len(worker.GetStatus().GetAssignments()) == 0, nil
+		// Hosting nothing is what "available" means, and the allocation total
+		// is how a cached Worker reports it: it does not carry the records.
+		return worker.GetStatus().GetState() == ateapipb.WorkerState_WORKER_STATE_ACTIVE &&
+			worker.GetStatus().GetAllocated().GetActors() == 0, nil
 	})
 	if err != nil {
 		t.Fatalf("failed to wait for worker %s to become available: %v", workerName, err)

@@ -77,14 +77,27 @@ func (w *WorkerWorkflow) ensureBoundActorsReleased(ctx context.Context, worker *
 	ctx, done := stepSpan(ctx, "ReleaseBoundActors")
 	defer func() { err = done(err) }()
 
-	if len(worker.GetStatus().GetAssignments()) == 0 {
-		markSkipped(ctx, "worker has no actors assigned")
-		return nil
-	}
-	for _, assignment := range worker.GetStatus().GetAssignments() {
-		if err := w.releaseBoundActor(ctx, worker, assignment); err != nil {
-			return err
+	// Every page: a Worker can hold thousands of Actors and a page holds at
+	// most a thousand, so stopping at the first would leave the rest bound.
+	var released int
+	for token := ""; ; {
+		page, err := w.store.ListWorkerAssignments(ctx, worker.GetMetadata().GetName(), store.ListOptions{PageToken: token})
+		if err != nil {
+			return fmt.Errorf("while listing the assignments of worker %s: %w", worker.GetMetadata().GetName(), err)
 		}
+		for _, assignment := range page.Items {
+			if err := w.releaseBoundActor(ctx, worker, assignment); err != nil {
+				return err
+			}
+			released++
+		}
+		if !page.HasNextPage() {
+			break
+		}
+		token = page.NextPageToken
+	}
+	if released == 0 {
+		markSkipped(ctx, "worker has no actors assigned")
 	}
 	return nil
 }

@@ -18,7 +18,6 @@ import (
 	"testing"
 
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/testing/protocmp"
 
 	"github.com/google/go-cmp/cmp"
@@ -105,107 +104,5 @@ func TestSumAllocated(t *testing.T) {
 	want := &ateapipb.WorkerCapacity{Actors: 2, Resources: CPUMemory(1500, 1<<30)}
 	if diff := cmp.Diff(want, got, protocmp.Transform()); diff != "" {
 		t.Errorf("SumAllocated() mismatch (-want +got):\n%s", diff)
-	}
-}
-
-// mustBind and mustRelease are the transitional helpers where the fixtures are
-// known to parse.
-func mustBind(t *testing.T, worker *ateapipb.Worker, a *ateapipb.ActorAssignment) {
-	t.Helper()
-	if err := BindAssignment(worker, a); err != nil {
-		t.Fatalf("BindAssignment(%v): %v", a, err)
-	}
-}
-
-func mustRelease(t *testing.T, worker *ateapipb.Worker, actorUID string) bool {
-	t.Helper()
-	held, err := ReleaseAssignment(worker, actorUID)
-	if err != nil {
-		t.Fatalf("ReleaseAssignment(%s): %v", actorUID, err)
-	}
-	return held
-}
-
-func TestBindAssignmentTracksAllocation(t *testing.T) {
-	worker := &ateapipb.Worker{}
-
-	mustBind(t, worker, assignment("a", 1000, 1<<30))
-	mustBind(t, worker, assignment("b", 500, 2<<30))
-
-	if got, want := len(worker.GetStatus().GetAssignments()), 2; got != want {
-		t.Fatalf("assignments = %d, want %d", got, want)
-	}
-	allocated := worker.GetStatus().GetAllocated()
-	if got, want := allocated.GetActors(), int32(2); got != want {
-		t.Errorf("allocated.actors = %d, want %d", got, want)
-	}
-}
-
-// A claim can be retried for one Actor, and appending would book it against the
-// Worker's capacity twice.
-func TestBindAssignmentReplacesTheSameActor(t *testing.T) {
-	worker := &ateapipb.Worker{}
-	mustBind(t, worker, assignment("a", 1000, 1<<30))
-	mustBind(t, worker, assignment("a", 2000, 1<<30))
-
-	if got, want := len(worker.GetStatus().GetAssignments()), 1; got != want {
-		t.Fatalf("assignments = %d, want %d", got, want)
-	}
-	if got, want := worker.GetStatus().GetAllocated().GetActors(), int32(1); got != want {
-		t.Errorf("allocated.actors = %d, want %d", got, want)
-	}
-	if want := CPUMemory(2000, 1<<30); !proto.Equal(want, worker.GetStatus().GetAllocated().GetResources()) {
-		t.Errorf("allocated = %v after replacement, want %v", worker.GetStatus().GetAllocated().GetResources(), want)
-	}
-}
-
-func TestReleaseAssignment(t *testing.T) {
-	worker := &ateapipb.Worker{}
-	mustBind(t, worker, assignment("a", 1000, 1<<30))
-	mustBind(t, worker, assignment("b", 500, 2<<30))
-
-	if !mustRelease(t, worker, "a") {
-		t.Fatal("ReleaseAssignment() = false for an Actor the Worker holds, want true")
-	}
-	if want := CPUMemory(500, 2<<30); !proto.Equal(want, worker.GetStatus().GetAllocated().GetResources()) {
-		t.Errorf("allocated = %v, want %v", worker.GetStatus().GetAllocated().GetResources(), want)
-	}
-	if WorkerAssignmentFor(worker, "a") != nil {
-		t.Error("released Actor is still assigned")
-	}
-	if WorkerAssignmentFor(worker, "b") == nil {
-		t.Error("releasing one Actor dropped another")
-	}
-
-	// Release runs on paths that retry; the second pass converges rather than
-	// failing.
-	if mustRelease(t, worker, "a") {
-		t.Error("ReleaseAssignment() = true for an Actor already released, want false")
-	}
-}
-
-// An idle Worker carries no allocation at all, rather than an all-zero message
-// that says the same thing in more bytes on every record and every event.
-func TestReleasingTheLastAssignmentClearsAllocation(t *testing.T) {
-	worker := &ateapipb.Worker{}
-	mustBind(t, worker, assignment("a", 1000, 1<<30))
-	mustRelease(t, worker, "a")
-
-	if got := worker.GetStatus().GetAllocated(); got != nil {
-		t.Errorf("allocated = %v for an idle Worker, want nil", got)
-	}
-}
-
-// An Actor that declared no limits reserves nothing but still costs a slot.
-func TestAssignmentWithoutResourcesCountsOnlyTheActor(t *testing.T) {
-	worker := &ateapipb.Worker{}
-	mustBind(t, worker, &ateapipb.ActorAssignment{ActorUid: "a"})
-
-	allocated := worker.GetStatus().GetAllocated()
-	if got, want := allocated.GetActors(), int32(1); got != want {
-		t.Errorf("allocated.actors = %d, want %d", got, want)
-	}
-	if got := allocated.GetResources(); got != nil {
-		t.Errorf("allocated resources = %v, want none", got)
 	}
 }

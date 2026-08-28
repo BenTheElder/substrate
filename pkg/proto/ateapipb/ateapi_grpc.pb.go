@@ -56,6 +56,7 @@ const (
 	Control_UpdateWorker_FullMethodName            = "/ateapi.Control/UpdateWorker"
 	Control_DeleteWorker_FullMethodName            = "/ateapi.Control/DeleteWorker"
 	Control_DrainWorker_FullMethodName             = "/ateapi.Control/DrainWorker"
+	Control_ListWorkerAssignments_FullMethodName   = "/ateapi.Control/ListWorkerAssignments"
 	Control_ListActors_FullMethodName              = "/ateapi.Control/ListActors"
 	Control_CreateAtespace_FullMethodName          = "/ateapi.Control/CreateAtespace"
 	Control_GetAtespace_FullMethodName             = "/ateapi.Control/GetAtespace"
@@ -125,6 +126,9 @@ type ControlClient interface {
 	// it. Idempotent; one-way. Deliberately leaves any bound Actor alone.
 	// Returns ABORTED if another write lands on the Worker first; retry.
 	DrainWorker(ctx context.Context, in *DrainWorkerRequest, opts ...grpc.CallOption) (*Worker, error)
+	// List the Actors a Worker hosts. A subresource of Worker rather than a field
+	// on it, so GetWorker and ListWorkers cost the same whatever the occupancy.
+	ListWorkerAssignments(ctx context.Context, in *ListWorkerAssignmentsRequest, opts ...grpc.CallOption) (*ListWorkerAssignmentsResponse, error)
 	// List Actors.
 	ListActors(ctx context.Context, in *ListActorsRequest, opts ...grpc.CallOption) (*ListActorsResponse, error)
 	// Create a new Atespace. Substrate-native, stored in database.
@@ -382,6 +386,16 @@ func (c *controlClient) DrainWorker(ctx context.Context, in *DrainWorkerRequest,
 	return out, nil
 }
 
+func (c *controlClient) ListWorkerAssignments(ctx context.Context, in *ListWorkerAssignmentsRequest, opts ...grpc.CallOption) (*ListWorkerAssignmentsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListWorkerAssignmentsResponse)
+	err := c.cc.Invoke(ctx, Control_ListWorkerAssignments_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *controlClient) ListActors(ctx context.Context, in *ListActorsRequest, opts ...grpc.CallOption) (*ListActorsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListActorsResponse)
@@ -530,6 +544,9 @@ type ControlServer interface {
 	// it. Idempotent; one-way. Deliberately leaves any bound Actor alone.
 	// Returns ABORTED if another write lands on the Worker first; retry.
 	DrainWorker(context.Context, *DrainWorkerRequest) (*Worker, error)
+	// List the Actors a Worker hosts. A subresource of Worker rather than a field
+	// on it, so GetWorker and ListWorkers cost the same whatever the occupancy.
+	ListWorkerAssignments(context.Context, *ListWorkerAssignmentsRequest) (*ListWorkerAssignmentsResponse, error)
 	// List Actors.
 	ListActors(context.Context, *ListActorsRequest) (*ListActorsResponse, error)
 	// Create a new Atespace. Substrate-native, stored in database.
@@ -625,6 +642,9 @@ func (UnimplementedControlServer) DeleteWorker(context.Context, *DeleteWorkerReq
 }
 func (UnimplementedControlServer) DrainWorker(context.Context, *DrainWorkerRequest) (*Worker, error) {
 	return nil, status.Error(codes.Unimplemented, "method DrainWorker not implemented")
+}
+func (UnimplementedControlServer) ListWorkerAssignments(context.Context, *ListWorkerAssignmentsRequest) (*ListWorkerAssignmentsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListWorkerAssignments not implemented")
 }
 func (UnimplementedControlServer) ListActors(context.Context, *ListActorsRequest) (*ListActorsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListActors not implemented")
@@ -1088,6 +1108,24 @@ func _Control_DrainWorker_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Control_ListWorkerAssignments_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListWorkerAssignmentsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlServer).ListWorkerAssignments(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Control_ListWorkerAssignments_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlServer).ListWorkerAssignments(ctx, req.(*ListWorkerAssignmentsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Control_ListActors_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ListActorsRequest)
 	if err := dec(in); err != nil {
@@ -1350,6 +1388,10 @@ var Control_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Control_DrainWorker_Handler,
 		},
 		{
+			MethodName: "ListWorkerAssignments",
+			Handler:    _Control_ListWorkerAssignments_Handler,
+		},
+		{
 			MethodName: "ListActors",
 			Handler:    _Control_ListActors_Handler,
 		},
@@ -1587,10 +1629,10 @@ const (
 // authorization: Control is the client-facing API, while these RPCs are served
 // only to an atelet, and only for the Workers on its own node.
 type WorkerServiceClient interface {
-	// SetWorkerCapacity records what a Worker can hold. Capacity is the
-	// Worker's to report rather than the control plane's to infer: it is what
-	// the ateom can actually supply, only its node can observe it, and a fleet
-	// may run mixed ateom versions.
+	// SetWorkerCapacity records what a Worker can hold. Capacity is the Worker's
+	// to report rather than the control plane's to infer: it is what the ateom
+	// can actually supply, only its node can observe it, and a fleet may run
+	// mixed ateom versions.
 	//
 	// atelet calls this with its own client certificate, as it does for
 	// MintCert. Idempotent: re-sending the same capacity is not a write.
@@ -1624,10 +1666,10 @@ func (c *workerServiceClient) SetWorkerCapacity(ctx context.Context, in *SetWork
 // authorization: Control is the client-facing API, while these RPCs are served
 // only to an atelet, and only for the Workers on its own node.
 type WorkerServiceServer interface {
-	// SetWorkerCapacity records what a Worker can hold. Capacity is the
-	// Worker's to report rather than the control plane's to infer: it is what
-	// the ateom can actually supply, only its node can observe it, and a fleet
-	// may run mixed ateom versions.
+	// SetWorkerCapacity records what a Worker can hold. Capacity is the Worker's
+	// to report rather than the control plane's to infer: it is what the ateom
+	// can actually supply, only its node can observe it, and a fleet may run
+	// mixed ateom versions.
 	//
 	// atelet calls this with its own client certificate, as it does for
 	// MintCert. Idempotent: re-sending the same capacity is not a write.
