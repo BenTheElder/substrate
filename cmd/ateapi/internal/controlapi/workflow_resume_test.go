@@ -186,11 +186,10 @@ func TestAssignWorkerAttempt_StampsSubstrateTemplateRef(t *testing.T) {
 		t.Fatalf("assignWorkerAttempt: %v", err)
 	}
 
-	stored, err := persistence.GetWorker(ctx, assigned.GetMetadata().GetName())
+	assignment, err := persistence.GetWorkerAssignment(ctx, assigned.GetMetadata().GetName(), actor.GetMetadata().GetUid())
 	if err != nil {
-		t.Fatalf("GetWorker: %v", err)
+		t.Fatalf("GetWorkerAssignment: %v", err)
 	}
-	assignment := stored.GetStatus().GetAssignment()
 	if assignment.GetActorTemplateRef().GetAtespace() != "team-a" || assignment.GetActorTemplateRef().GetName() != "sub-tmpl" {
 		t.Errorf("assignment ActorTemplateRef = %v, want team-a/sub-tmpl", assignment.GetActorTemplateRef())
 	}

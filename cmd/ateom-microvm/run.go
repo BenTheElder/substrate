@@ -644,9 +644,6 @@ func (s *AteomService) coldBootActor(ctx context.Context, hosted *hostedActor, p
 // mounted here — the merged overlays are assembled in stageMergedRootfs after the
 // sandbox state is clean. Both RunWorkload and RestoreWorkload go through here.
 func (s *AteomService) buildActorContainers(actorUID string, containers []*ateompb.Container) ([]actorContainer, error) {
-	// The actor's own namespace, not the worker pod's: each actor's guest holds
-	// the same frozen address, so they cannot share one.
-	netnsPath := ateompath.ActorNetNSPath(actorUID)
 	ctrs := make([]actorContainer, len(containers))
 	for i, c := range containers {
 		cn := c.GetName()
