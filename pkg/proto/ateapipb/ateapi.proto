@@ -1344,8 +1344,8 @@ message Worker {
   map<string, string> labels = 9;
 
   // What this worker has to give the Actors it hosts. Mutable: a pod can be
-  // resized, and how many Actors it can hold is something only the Worker can
-  // observe. An update may not CLEAR it: an omitted capacity asks to lose one.
+  // resized, and a Worker reports its own actor ceiling (ReportWorkerCapacity).
+  // An update may not CLEAR it, since an omitted capacity would ask to lose one.
   // Shrinking below what is allocated only stops new placements; nothing is
   // evicted.
   WorkerCapacity capacity = 10;
@@ -1468,6 +1468,33 @@ service ActorIdentity {
   //
   // The certificate in the response is the actor's identity, not the atelet's.
   rpc MintCert(MintCertRequest) returns (MintCertResponse);
+
+  // ReportWorkerCapacity records what a Worker can hold, as the Worker reports
+  // it. The actor ceiling is the ateom's — it owns the slot allocator, and only
+  // its node can observe the number — so a fleet may run mixed ateom versions.
+  //
+  // atelet calls this for the Worker with its own client certificate, as it
+  // does for MintCert; an atelet may speak only for the Workers on its node.
+  // Idempotent: re-reporting the same capacity is not an update.
+  rpc ReportWorkerCapacity(ReportWorkerCapacityRequest) returns (ReportWorkerCapacityResponse);
+}
+
+message ReportWorkerCapacityRequest {
+  // The Worker being reported on. atespace is always empty; Workers are
+  // global-scoped.
+  // +k8s:opaqueType
+  ObjectRef worker = 1;
+
+  // What the Worker can hold. An unset dimension keeps what is recorded rather
+  // than clearing it, so a reporter that knows only its actor ceiling does not
+  // erase the compute capacity taken from the pod's limits.
+  // +k8s:opaqueType
+  WorkerCapacity capacity = 2;
+}
+
+message ReportWorkerCapacityResponse {
+  // The Worker as recorded, so a caller sees what its report resolved to.
+  Worker worker = 1;
 }
 
 message MintJWTRequest {
