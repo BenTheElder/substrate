@@ -1588,6 +1588,11 @@ class ActorIdentityStub:
                 request_serializer=ateapi__pb2.MintCertRequest.SerializeToString,
                 response_deserializer=ateapi__pb2.MintCertResponse.FromString,
                 _registered_method=True)
+        self.ReportWorkerCapacity = channel.unary_unary(
+                '/ateapi.ActorIdentity/ReportWorkerCapacity',
+                request_serializer=ateapi__pb2.ReportWorkerCapacityRequest.SerializeToString,
+                response_deserializer=ateapi__pb2.ReportWorkerCapacityResponse.FromString,
+                _registered_method=True)
 
 
 class ActorIdentityServicer:
@@ -1626,6 +1631,19 @@ class ActorIdentityServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ReportWorkerCapacity(self, request, context):
+        """ReportWorkerCapacity records what a Worker can hold, as the Worker reports
+        it. The actor ceiling is the ateom's — it owns the slot allocator, and only
+        its node can observe the number — so a fleet may run mixed ateom versions.
+
+        atelet calls this for the Worker with its own client certificate, as it
+        does for MintCert; an atelet may speak only for the Workers on its node.
+        Idempotent: re-reporting the same capacity is not an update.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_ActorIdentityServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -1638,6 +1656,11 @@ def add_ActorIdentityServicer_to_server(servicer, server):
                     servicer.MintCert,
                     request_deserializer=ateapi__pb2.MintCertRequest.FromString,
                     response_serializer=ateapi__pb2.MintCertResponse.SerializeToString,
+            ),
+            'ReportWorkerCapacity': grpc.unary_unary_rpc_method_handler(
+                    servicer.ReportWorkerCapacity,
+                    request_deserializer=ateapi__pb2.ReportWorkerCapacityRequest.FromString,
+                    response_serializer=ateapi__pb2.ReportWorkerCapacityResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -1700,6 +1723,33 @@ class ActorIdentity:
             '/ateapi.ActorIdentity/MintCert',
             ateapi__pb2.MintCertRequest.SerializeToString,
             ateapi__pb2.MintCertResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ReportWorkerCapacity(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ateapi.ActorIdentity/ReportWorkerCapacity',
+            ateapi__pb2.ReportWorkerCapacityRequest.SerializeToString,
+            ateapi__pb2.ReportWorkerCapacityResponse.FromString,
             options,
             channel_credentials,
             insecure,
