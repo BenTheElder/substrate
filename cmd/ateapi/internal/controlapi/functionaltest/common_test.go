@@ -552,7 +552,7 @@ func waitForWorkerAvailable(t *testing.T, tc *testContext, workerName string) {
 		if err != nil {
 			return false, nil
 		}
-		return worker.GetStatus().GetState() == ateapipb.WorkerState_WORKER_STATE_ACTIVE && worker.GetStatus().GetAssignment() == nil, nil
+		return worker.GetStatus().GetState() == ateapipb.WorkerState_WORKER_STATE_ACTIVE && len(worker.GetStatus().GetAssignments()) == 0, nil
 	})
 	if err != nil {
 		t.Fatalf("failed to wait for worker %s to become available: %v", workerName, err)

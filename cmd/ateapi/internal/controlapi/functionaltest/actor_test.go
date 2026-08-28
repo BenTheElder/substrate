@@ -1768,20 +1768,34 @@ func TestResumeActor(t *testing.T) {
 		t.Errorf("GetActor response mismatch (-want +got):\n%s", diff)
 	}
 
-	// Verify that the worker record also has the assigned actor details
+	// A listing reports how full a worker is, not which actors it holds.
 	listWorkersResp, err := tc.client.ListWorkers(context.Background(), &ateapipb.ListWorkersRequest{})
 	if err != nil {
 		t.Fatalf("ListWorkers failed: %v", err)
 	}
-	var actorWorker *ateapipb.Worker
+	var listedWorker *ateapipb.Worker
 	for _, w := range listWorkersResp.GetWorkers() {
 		if w.GetWorkerNamespace() == ns && w.GetWorkerPod() == "worker-1" {
-			actorWorker = w
+			listedWorker = w
 			break
 		}
 	}
-	if actorWorker == nil {
+	if listedWorker == nil {
 		t.Fatalf("expected worker-1 in namespace %s not found in ListWorkers", ns)
+	}
+	if got := listedWorker.GetStatus().GetAssignments(); len(got) != 0 {
+		t.Errorf("ListWorkers carried %d assignments, want none: occupancy is reported through allocated", len(got))
+	}
+	if got, want := listedWorker.GetStatus().GetAllocated().GetActors(), int32(1); got != want {
+		t.Errorf("listed worker allocated.actors = %d, want %d", got, want)
+	}
+
+	// GetWorker is where the assignments are.
+	actorWorker, err := tc.client.GetWorker(context.Background(), &ateapipb.GetWorkerRequest{
+		Worker: &ateapipb.ObjectRef{Name: podUID},
+	})
+	if err != nil {
+		t.Fatalf("GetWorker failed: %v", err)
 	}
 
 	wantWorker := &ateapipb.Worker{
@@ -1795,7 +1809,7 @@ func TestResumeActor(t *testing.T) {
 		SandboxClass:    "gvisor",
 		Labels:          map[string]string{poolLabelKey: ns},
 		Status: &ateapipb.WorkerStatus{
-			Assignment: &ateapipb.ActorAssignment{
+			Assignments: []*ateapipb.ActorAssignment{{
 				ActorTemplate: &ateapipb.KubeNamespacedObjectRef{
 					Namespace: ns,
 					Name:      "tmpl1",
@@ -1805,8 +1819,10 @@ func TestResumeActor(t *testing.T) {
 					Atespace: testAtespace,
 				},
 				ActorUid: getResp.GetMetadata().GetUid(),
-			},
+			}},
 			State: ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+			// The store keeps the running total in step with the list it counts.
+			Allocated: &ateapipb.WorkerCapacity{Actors: 1},
 		},
 	}
 
@@ -2472,21 +2488,15 @@ func TestResumeActor_ReleasesStaleWorkerWhenPoolBecomesIneligible(t *testing.T) 
 			continue
 		}
 		switch w.GetWorkerPool() {
+		// A listing reports how full a worker is, not which actors it
+		// holds, so release is observed through the allocation total.
 		case "pool-a":
-			if wass := w.GetStatus().GetAssignment(); wass != nil {
-				got := "<nil-actor>"
-				if wass.Actor != nil {
-					got = wass.Actor.Name
-				}
-				t.Errorf("expected worker-a (now-ineligible pool-a) to be released, got actor name=%q", got)
+			if hosted := w.GetStatus().GetAllocated().GetActors(); hosted != 0 {
+				t.Errorf("expected worker-a (now-ineligible pool-a) to be released, still hosting %d", hosted)
 			}
 		case "pool-b":
-			if wass := w.GetStatus().GetAssignment(); wass != nil {
-				got := "<nil-actor>"
-				if wass.Actor != nil {
-					got = wass.Actor.Name
-				}
-				t.Errorf("expected worker-b to stay free (actor crashed, not migrated), got actor name=%q", got)
+			if hosted := w.GetStatus().GetAllocated().GetActors(); hosted != 0 {
+				t.Errorf("expected worker-b to stay free (actor crashed, not migrated), still hosting %d", hosted)
 			}
 		}
 	}
@@ -2598,8 +2608,8 @@ func TestResumeActor_CrashesIfAssignedWorkerIsDraining(t *testing.T) {
 			continue
 		}
 		if w.GetWorkerPod() == assignedPod {
-			if w.GetStatus().GetAssignment() != nil {
-				t.Errorf("expected draining worker %q to be released, still assigned to %q", assignedPod, w.GetStatus().GetAssignment().GetActor().GetName())
+			if hosted := w.GetStatus().GetAllocated().GetActors(); hosted != 0 {
+				t.Errorf("expected draining worker %q to be released, still hosting %d actors", assignedPod, hosted)
 			}
 		}
 	}

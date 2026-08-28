@@ -246,16 +246,7 @@ func TestPrintWorkersTo_Table(t *testing.T) {
 			WorkerPod:       "pod-1",
 			SandboxClass:    "gvisor",
 			Status: &ateapipb.WorkerStatus{
-				Assignment: &ateapipb.ActorAssignment{
-					ActorTemplate: &ateapipb.KubeNamespacedObjectRef{
-						Namespace: "default",
-						Name:      "template-1",
-					},
-					Actor: &ateapipb.ObjectRef{
-						Atespace: "space-1",
-						Name:     "id-1",
-					},
-				},
+				Allocated: &ateapipb.WorkerCapacity{Actors: 1},
 			},
 		},
 	}
@@ -265,8 +256,8 @@ func TestPrintWorkersTo_Table(t *testing.T) {
 	}
 	output := buf.String()
 
-	expected := `NAMESPACE   POOL     CLASS    POD     STATUS     ASSIGNED ACTOR
-default     pool-1   gvisor   pod-1   ASSIGNED   default/template-1/space-1/id-1
+	expected := `NAMESPACE   POOL     CLASS    POD     STATUS
+default     pool-1   gvisor   pod-1   ASSIGNED(1/1)
 `
 	if diff := cmp.Diff(expected, output); diff != "" {
 		t.Errorf("output mismatch (-want +got):\n%s", diff)
@@ -276,41 +267,6 @@ default     pool-1   gvisor   pod-1   ASSIGNED   default/template-1/space-1/id-1
 // A worker assigned to an actor created from a substrate ActorTemplate
 // carries only ActorTemplateRef; the printer must not dereference the legacy
 // CRD ref (regression test for a nil-pointer panic).
-func TestPrintWorkersTo_Table_TemplateRef(t *testing.T) {
-	var buf bytes.Buffer
-	workers := []*ateapipb.Worker{
-		{
-			WorkerNamespace: "default",
-			WorkerPool:      "pool-1",
-			WorkerPod:       "pod-1",
-			SandboxClass:    "gvisor",
-			Status: &ateapipb.WorkerStatus{
-				Assignment: &ateapipb.ActorAssignment{
-					ActorTemplateRef: &ateapipb.ObjectRef{
-						Atespace: "ate-demo-counter-substrate",
-						Name:     "counter",
-					},
-					Actor: &ateapipb.ObjectRef{
-						Atespace: "space-1",
-						Name:     "id-1",
-					},
-				},
-			},
-		},
-	}
-
-	if err := PrintWorkersTo(&buf, workers, "table"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	expected := `NAMESPACE   POOL     CLASS    POD     STATUS     ASSIGNED ACTOR
-default     pool-1   gvisor   pod-1   ASSIGNED   ate-demo-counter-substrate/counter/space-1/id-1
-`
-	if diff := cmp.Diff(expected, buf.String()); diff != "" {
-		t.Errorf("output mismatch (-want +got):\n%s", diff)
-	}
-}
-
 func TestPrintWorkersTo_Table_Free(t *testing.T) {
 	var buf bytes.Buffer
 	workers := []*ateapipb.Worker{
@@ -326,8 +282,8 @@ func TestPrintWorkersTo_Table_Free(t *testing.T) {
 	}
 	output := buf.String()
 
-	expected := `NAMESPACE   POOL     CLASS   POD     STATUS   ASSIGNED ACTOR
-default     pool-1           pod-1   FREE     <none>
+	expected := `NAMESPACE   POOL     CLASS   POD     STATUS
+default     pool-1           pod-1   FREE
 `
 	if diff := cmp.Diff(expected, output); diff != "" {
 		t.Errorf("output mismatch (-want +got):\n%s", diff)
@@ -358,10 +314,10 @@ func TestPrintWorkersTo_Table_Sorted(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	expected := `NAMESPACE   POOL     CLASS   POD     STATUS   ASSIGNED ACTOR
-default     pool-1           pod-a   FREE     <none>
-default     pool-1           pod-z   FREE     <none>
-other       pool-2           pod-1   FREE     <none>
+	expected := `NAMESPACE   POOL     CLASS   POD     STATUS
+default     pool-1           pod-a   FREE
+default     pool-1           pod-z   FREE
+other       pool-2           pod-1   FREE
 `
 	if diff := cmp.Diff(expected, buf.String()); diff != "" {
 		t.Errorf("output mismatch (-want +got):\n%s", diff)
@@ -605,24 +561,22 @@ func TestPrintWorkerTopTo_Table(t *testing.T) {
 	var buf bytes.Buffer
 	items := []*WorkerTopItem{
 		{
-			Pod:           "counter-worker-pool-7b9f8-x123",
-			Pool:          "counter",
-			Class:         "gvisor",
-			Status:        "ASSIGNED",
-			AssignedActor: "default/counter-template/ate-demo-counter/my-counter-1",
-			CPU:           "342m",
-			Memory:        "412Mi",
-			Namespace:     "ate-demo-counter",
+			Pod:       "counter-worker-pool-7b9f8-x123",
+			Pool:      "counter",
+			Class:     "gvisor",
+			Status:    "ASSIGNED",
+			CPU:       "342m",
+			Memory:    "412Mi",
+			Namespace: "ate-demo-counter",
 		},
 		{
-			Pod:           "counter-worker-pool-7b9f8-y456",
-			Pool:          "counter",
-			Class:         "microvm",
-			Status:        "FREE",
-			AssignedActor: "<none>",
-			CPU:           "2m",
-			Memory:        "64Mi",
-			Namespace:     "ate-demo-counter",
+			Pod:       "counter-worker-pool-7b9f8-y456",
+			Pool:      "counter",
+			Class:     "microvm",
+			Status:    "FREE",
+			CPU:       "2m",
+			Memory:    "64Mi",
+			Namespace: "ate-demo-counter",
 		},
 	}
 
@@ -631,9 +585,9 @@ func TestPrintWorkerTopTo_Table(t *testing.T) {
 	}
 	output := buf.String()
 
-	expected := `NAME                             POOL      CLASS     STATUS     ASSIGNED ACTOR                                           CPU(CORES)   MEMORY(bytes)
-counter-worker-pool-7b9f8-x123   counter   gvisor    ASSIGNED   default/counter-template/ate-demo-counter/my-counter-1   342m         412Mi
-counter-worker-pool-7b9f8-y456   counter   microvm   FREE       <none>                                                   2m           64Mi
+	expected := `NAME                             POOL      CLASS     STATUS     CPU(CORES)   MEMORY(bytes)
+counter-worker-pool-7b9f8-x123   counter   gvisor    ASSIGNED   342m         412Mi
+counter-worker-pool-7b9f8-y456   counter   microvm   FREE       2m           64Mi
 `
 	if diff := cmp.Diff(expected, output); diff != "" {
 		t.Errorf("output mismatch (-want +got):\n%s", diff)
@@ -644,12 +598,11 @@ func TestPrintWorkerTopTo_JSON(t *testing.T) {
 	var buf bytes.Buffer
 	items := []*WorkerTopItem{
 		{
-			Pod:           "worker-1",
-			Pool:          "pool-1",
-			Status:        "ASSIGNED",
-			AssignedActor: "default/template-1/space-1/actor-1",
-			CPU:           "100m",
-			Memory:        "128Mi",
+			Pod:    "worker-1",
+			Pool:   "pool-1",
+			Status: "ASSIGNED",
+			CPU:    "100m",
+			Memory: "128Mi",
 		},
 	}
 
@@ -664,7 +617,6 @@ func TestPrintWorkerTopTo_JSON(t *testing.T) {
       "pod": "worker-1",
       "pool": "pool-1",
       "status": "ASSIGNED",
-      "assignedActor": "default/template-1/space-1/actor-1",
       "cpu": "100m",
       "memory": "128Mi"
     }
@@ -680,12 +632,11 @@ func TestPrintWorkerTopTo_YAML(t *testing.T) {
 	var buf bytes.Buffer
 	items := []*WorkerTopItem{
 		{
-			Pod:           "worker-1",
-			Pool:          "pool-1",
-			Status:        "ASSIGNED",
-			AssignedActor: "default/template-1/space-1/actor-1",
-			CPU:           "100m",
-			Memory:        "128Mi",
+			Pod:    "worker-1",
+			Pool:   "pool-1",
+			Status: "ASSIGNED",
+			CPU:    "100m",
+			Memory: "128Mi",
 		},
 	}
 
@@ -695,8 +646,7 @@ func TestPrintWorkerTopTo_YAML(t *testing.T) {
 	output := buf.String()
 
 	expected := `workers:
-- assignedActor: default/template-1/space-1/actor-1
-  cpu: 100m
+- cpu: 100m
   memory: 128Mi
   pod: worker-1
   pool: pool-1

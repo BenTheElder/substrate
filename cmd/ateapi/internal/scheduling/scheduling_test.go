@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/agent-substrate/substrate/internal/ateattr"
+	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -166,6 +167,50 @@ func TestSchedule(t *testing.T) {
 			fleet:       fleet{},
 			constraints: Constraints{SandboxClass: "gvisor"},
 		},
+		{
+			// A worker that has not said it can hold more admits one, so this is
+			// the behavior every worker has until an ateom reports otherwise.
+			name: "unset actor capacity admits one actor",
+			fleet: fleet{
+				worker("w-busy", "gvisor", "node-a", tierTwo, assigned("demo", "other")),
+			},
+			constraints: Constraints{SandboxClass: "gvisor"},
+		},
+		{
+			name: "a worker below its actor ceiling still has room",
+			fleet: fleet{
+				worker("w-two", "gvisor", "node-a", tierTwo, withMaxActors(2), assigned("demo", "other")),
+			},
+			constraints: Constraints{SandboxClass: "gvisor"},
+			wantPod:     "w-two",
+		},
+		{
+			name: "a worker at its actor ceiling is full however small the actor",
+			fleet: fleet{
+				worker("w-two", "gvisor", "node-a", tierTwo, withMaxActors(2),
+					assigned("demo", "a"), assigned("demo", "b")),
+			},
+			constraints: Constraints{SandboxClass: "gvisor"},
+		},
+		{
+			// Placement is against what is left, not against the whole capacity:
+			// the resident actor already took half of it.
+			name: "capacity already allocated is not offered twice",
+			fleet: fleet{
+				worker("w-half", "gvisor", "node-a", tierTwo, withCapacity(4000, 8<<30), withMaxActors(4),
+					assignedFor("demo", "other", &ateapipb.WorkerCapacity{CpuMilli: 3000, MemoryBytes: 4 << 30})),
+			},
+			constraints: Constraints{SandboxClass: "gvisor", CPUMilli: 2000},
+		},
+		{
+			name: "what the residents left over is still placeable",
+			fleet: fleet{
+				worker("w-half", "gvisor", "node-a", tierTwo, withCapacity(4000, 8<<30), withMaxActors(4),
+					assignedFor("demo", "other", &ateapipb.WorkerCapacity{CpuMilli: 3000, MemoryBytes: 4 << 30})),
+			},
+			constraints: Constraints{SandboxClass: "gvisor", CPUMilli: 1000, MemoryBytes: 4 << 30},
+			wantPod:     "w-half",
+		},
 	}
 
 	for _, tc := range tests {
@@ -304,17 +349,49 @@ func withState(state ateapipb.WorkerState) func(*ateapipb.Worker) {
 }
 
 func assigned(atespace, name string) func(*ateapipb.Worker) {
+	return assignedFor(atespace, name, nil)
+}
+
+// assignedFor binds an actor that took resources from the worker, so a test can
+// place against what is left rather than against the whole capacity.
+func assignedFor(atespace, name string, took *ateapipb.WorkerCapacity) func(*ateapipb.Worker) {
 	return func(w *ateapipb.Worker) {
-		w.Status.Assignment = &ateapipb.ActorAssignment{
-			Actor:    &ateapipb.ObjectRef{Atespace: atespace, Name: name},
-			ActorUid: atespace + "/" + name,
+		resources.BindAssignment(w, &ateapipb.ActorAssignment{
+			Actor:     &ateapipb.ObjectRef{Atespace: atespace, Name: name},
+			ActorUid:  atespace + "/" + name,
+			Resources: took,
+		})
+	}
+}
+
+func withMaxActors(n int32) func(*ateapipb.Worker) {
+	return func(w *ateapipb.Worker) {
+		if w.Capacity == nil {
+			w.Capacity = &ateapipb.WorkerCapacity{}
 		}
+		w.Capacity.Actors = n
 	}
 }
 
 func withCapacity(cpuMilli, memBytes int64) func(*ateapipb.Worker) {
 	return func(w *ateapipb.Worker) {
 		w.Capacity = &ateapipb.WorkerCapacity{CpuMilli: cpuMilli, MemoryBytes: memBytes}
+	}
+}
+
+// The two questions are separate because a caller re-validating a worker that
+// already holds the actor must not be told the placement is illegal just
+// because the actor it is asking about filled the worker up.
+func TestAppliesIgnoresRoom(t *testing.T) {
+	full := worker("w-full", "gvisor", "node-a", nil, withMaxActors(1), assigned("demo", "resident"))
+	constraints := Constraints{SandboxClass: "gvisor"}
+	s := New(fleet{full})
+
+	if !s.Applies(full, constraints) {
+		t.Error("Applies() = false for a full but otherwise legal worker, want true")
+	}
+	if s.HasRoom(full, constraints) {
+		t.Error("HasRoom() = true for a worker at its actor ceiling, want false")
 	}
 }
 

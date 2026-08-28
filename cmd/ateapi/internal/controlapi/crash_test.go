@@ -69,15 +69,15 @@ func seedWorker(t *testing.T, ctx context.Context, st store.Interface, actorRef 
 	if actorRef != (resources.ActorRef{}) {
 		actor, err := st.GetActor(ctx, actorRef)
 		if err != nil {
-			worker.Status.Assignment = &ateapipb.ActorAssignment{
+			resources.BindAssignment(worker, &ateapipb.ActorAssignment{
 				Actor:    &ateapipb.ObjectRef{Atespace: actorRef.Atespace, Name: actorRef.Name},
 				ActorUid: "synthetic-" + actorRef.Name,
-			}
+			})
 		} else {
-			worker.Status.Assignment = &ateapipb.ActorAssignment{
+			resources.BindAssignment(worker, &ateapipb.ActorAssignment{
 				Actor:    &ateapipb.ObjectRef{Atespace: actor.GetMetadata().GetAtespace(), Name: actor.GetMetadata().GetName()},
 				ActorUid: actor.GetMetadata().GetUid(),
-			}
+			})
 		}
 	}
 	if _, err := st.CreateWorker(ctx, worker); err != nil {
@@ -154,8 +154,8 @@ func TestCrashActor(t *testing.T) {
 				if gerr != nil {
 					t.Fatalf("GetWorker() = %v, want nil", gerr)
 				}
-				if worker.GetStatus().GetAssignment() != nil {
-					t.Errorf("worker assignment = %v, want nil", worker.GetStatus().GetAssignment())
+				if soleAssignment(worker) != nil {
+					t.Errorf("worker assignment = %v, want nil", soleAssignment(worker))
 				}
 			},
 		},
@@ -174,10 +174,10 @@ func TestCrashActor(t *testing.T) {
 				if gerr != nil {
 					t.Fatalf("GetWorker() = %v, want nil", gerr)
 				}
-				if got := worker.GetStatus().GetAssignment().GetActor().GetName(); got != "actor-2" {
+				if got := soleAssignment(worker).GetActor().GetName(); got != "actor-2" {
 					t.Errorf("worker assigned actor name = %q, want %q", got, "actor-2")
 				}
-				if got := worker.GetStatus().GetAssignment().GetActorUid(); got != "synthetic-actor-2" {
+				if got := soleAssignment(worker).GetActorUid(); got != "synthetic-actor-2" {
 					t.Errorf("worker assigned actor uid = %q, want %q", got, "synthetic-actor-2")
 				}
 			},
@@ -193,12 +193,10 @@ func TestCrashActor(t *testing.T) {
 					WorkerPool:      "pool",
 					WorkerPod:       "pod",
 					WorkerPodUid:    "uid",
-					Status: &ateapipb.WorkerStatus{
-						Assignment: &ateapipb.ActorAssignment{
-							Actor:    &ateapipb.ObjectRef{Atespace: actorRef.Atespace, Name: actorRef.Name},
-							ActorUid: "stale-incarnation-uid",
-						},
-					},
+					Status: hostingStatus(ateapipb.WorkerState_WORKER_STATE_UNSPECIFIED, &ateapipb.ActorAssignment{
+						Actor:    &ateapipb.ObjectRef{Atespace: actorRef.Atespace, Name: actorRef.Name},
+						ActorUid: "stale-incarnation-uid",
+					}),
 				}
 				if _, err := st.CreateWorker(ctx, worker); err != nil {
 					t.Fatalf("CreateWorker: %v", err)
@@ -213,10 +211,10 @@ func TestCrashActor(t *testing.T) {
 				if gerr != nil {
 					t.Fatalf("GetWorker() = %v, want nil", gerr)
 				}
-				if got := worker.GetStatus().GetAssignment().GetActor().GetName(); got != actorRef.Name {
+				if got := soleAssignment(worker).GetActor().GetName(); got != actorRef.Name {
 					t.Errorf("worker assigned actor name = %q, want %q", got, actorRef.Name)
 				}
-				if got := worker.GetStatus().GetAssignment().GetActorUid(); got != "stale-incarnation-uid" {
+				if got := soleAssignment(worker).GetActorUid(); got != "stale-incarnation-uid" {
 					t.Errorf("worker assigned actor uid = %q, want %q", got, "stale-incarnation-uid")
 				}
 			},
@@ -240,7 +238,7 @@ func TestCrashActor(t *testing.T) {
 				if gerr != nil {
 					t.Fatalf("GetWorker() = %v, want nil", gerr)
 				}
-				if worker.GetStatus().GetAssignment() == nil {
+				if soleAssignment(worker) == nil {
 					t.Error("worker assignment = nil, want untouched")
 				}
 			},
@@ -426,11 +424,9 @@ func TestCrashActor_Metrics(t *testing.T) {
 		WorkerPod:       "pod-1",
 		WorkerPodUid:    "pod-uid-1",
 		SandboxClass:    "gvisor",
-		Status: &ateapipb.WorkerStatus{
-			Assignment: &ateapipb.ActorAssignment{
-				Actor: &ateapipb.ObjectRef{Atespace: actorRef.Atespace, Name: actorRef.Name},
-			},
-		},
+		Status: hostingStatus(ateapipb.WorkerState_WORKER_STATE_UNSPECIFIED, &ateapipb.ActorAssignment{
+			Actor: &ateapipb.ObjectRef{Atespace: actorRef.Atespace, Name: actorRef.Name},
+		}),
 	}
 	if _, err := st.CreateWorker(ctx, worker); err != nil {
 		t.Fatalf("CreateWorker: %v", err)
@@ -586,7 +582,7 @@ func TestCrashActorReleaseFailureLeavesWorkerReclaimable(t *testing.T) {
 	if werr != nil {
 		t.Fatalf("GetWorker() = %v, want nil", werr)
 	}
-	if worker.GetStatus().GetAssignment() == nil {
+	if soleAssignment(worker) == nil {
 		t.Error("worker assignment = nil, want still assigned (release failed, must remain retriable)")
 	}
 }

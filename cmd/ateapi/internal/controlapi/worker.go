@@ -38,8 +38,19 @@ func (s *RPCService) ListWorkers(ctx context.Context, req *ateapipb.ListWorkersR
 	if err != nil {
 		return nil, mapListError(fmt.Errorf("while listing workers in db: %w", err))
 	}
+	// A listed Worker reports how full it is, not which Actors it holds, so a
+	// listing costs the fleet's size and not its actor count. Only GetWorker
+	// carries the assignments; occupancy is in status.allocated.
+	workers := make([]*ateapipb.Worker, 0, len(page.Items))
+	for _, worker := range page.Items {
+		listed := proto.Clone(worker).(*ateapipb.Worker)
+		if listed.GetStatus() != nil {
+			listed.Status.Assignments = nil
+		}
+		workers = append(workers, listed)
+	}
 	return &ateapipb.ListWorkersResponse{
-		Workers:       page.Items,
+		Workers:       workers,
 		NextPageToken: page.NextPageToken,
 	}, nil
 }
@@ -225,9 +236,9 @@ func (s *RPCService) DrainWorker(ctx context.Context, req *ateapipb.DrainWorkerR
 			return &workerUnchanged{worker: proto.Clone(toUpdate).(*ateapipb.Worker)}
 		}
 		toUpdate.Status.State = ateapipb.WorkerState_WORKER_STATE_DRAINING
-		// status.assignment is deliberately left alone: a draining Worker keeps
-		// hosting the Actor bound to it until something releases it. Draining
-		// only stops the scheduler routing new Actors here.
+		// status.assignments is deliberately left alone: a draining Worker
+		// keeps hosting the Actors bound to it until something releases them.
+		// Draining only stops the scheduler routing new Actors here.
 		return nil
 	})
 }
