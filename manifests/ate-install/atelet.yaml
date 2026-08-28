@@ -121,16 +121,15 @@ spec:
       # must fit within terminationGracePeriodSeconds, plus slack for the force
       # Stop() and the tracer/meter flush on exit.
       terminationGracePeriodSeconds: 330
-      # atelet must run on every node a WorkerPool actor may schedule to.
-      # Microvm pools are tainted ate.dev/sandboxClass=<class>:NoSchedule per
-      # the convention in cmd/atecontroller/internal/controllers/workerpool_apply.go
-      # (which also adds the matching toleration to ateom worker pods).
-      # Tolerating the key with operator: Exists covers any current or future
-      # sandbox class value without needing another manifest edit.
+      # atelet must run on every node a WorkerPool actor may schedule to, so it
+      # tolerates everything. A worker pod carries whatever tolerations its pool
+      # declares, and a node agent that tolerates less than the workloads it
+      # serves gets stranded: the pod lands, atelet cannot follow, and every
+      # activation there fails with no atelet on the node. Enumerating keys is
+      # what caused that -- ate.dev/sandboxClass alone excluded atelet from any
+      # pool that taints for its own reasons.
       tolerations:
-      - key: ate.dev/sandboxClass
-        operator: Exists
-        effect: NoSchedule
+      - operator: Exists
       containers:
       - name: atelet
         image: ko://github.com/agent-substrate/substrate/cmd/atelet

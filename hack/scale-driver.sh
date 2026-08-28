@@ -82,7 +82,7 @@ if [[ -z "${GOLDEN_SNAPSHOT_URI}" && "${VIA}" == "atelet" ]]; then
   [[ -n "${ATE_ENDPOINT:-}" ]] && ATE+=(--endpoint="${ATE_ENDPOINT}")
   [[ -n "${ATE_TOKEN_FILE:-}" ]] && ATE+=(--token-file="${ATE_TOKEN_FILE}")
   GOLDEN_SNAPSHOT_URI="$("${ATE[@]}" get actor-snapshot "${golden}" -a ate-golden -o json \
-    | python3 -c 'import sys,json; print(json.load(sys.stdin)["snapshots"][0]["status"]["snapshotUri"])')"
+    | python3 -c 'import sys,json; print(json.load(sys.stdin)["actorSnapshots"][0]["status"]["snapshotUri"])')"
 fi
 log "golden snapshot: ${GOLDEN_SNAPSHOT_URI}"
 
