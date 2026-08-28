@@ -1,0 +1,96 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Runs storehammer in the cluster, against the real database.
+#
+# In-cluster because the point is the database's own rate: driven from a laptop,
+# every statement pays a round trip that dwarfs the query and the harness
+# measures the network instead. It authenticates as ate-api-server, with the
+# same projected pod certificate, because that is what the DSN's
+# sslmode=verify-full requires.
+# The servicedns signer refuses a pod no Service selects, since it would have no
+# DNS SAN to put in the certificate. Nothing routes here; this exists so the
+# certificate the DSN's sslmode=verify-full needs can be issued.
+apiVersion: v1
+kind: Service
+metadata:
+  name: storehammer
+  namespace: ate-system
+spec:
+  clusterIP: None
+  selector:
+    app: storehammer
+  ports:
+  - port: 1
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: storehammer
+  namespace: ate-system
+  labels:
+    app: storehammer
+spec:
+  serviceAccountName: ate-api-server
+  restartPolicy: Never
+  nodeSelector: ${DRIVER_NODESELECTOR}
+  containers:
+  - name: storehammer
+    image: ko://github.com/agent-substrate/substrate/cmd/ateapi/internal/storehammer
+    args:
+    # pgxpool defaults MaxConns to NumCPU, which caps the harness well below the
+    # database. Sized past the concurrency so the pool is never the limit.
+    - --dsn=$(ATE_API_POSTGRES_CONNECTION_STRING)&pool_max_conns=${POOL}
+    - --workers=${WORKERS}
+    - --claims=${CLAIMS}
+    - --concurrency=${CONCURRENCY}
+    envFrom:
+    - configMapRef:
+        name: ate-api-server-envvars
+    resources:
+      requests:
+        cpu: "2"
+        memory: 2Gi
+    volumeMounts:
+    - mountPath: /run/servicedns.podcert.ate.dev
+      name: servicedns
+    - mountPath: /run/podidentity.podcert.ate.dev
+      name: podidentity
+  volumes:
+  - name: servicedns
+    projected:
+      sources:
+      - podCertificate:
+          credentialBundlePath: credential-bundle.pem
+          keyType: ECDSAP256
+          signerName: servicedns.podcert.ate.dev/identity
+      - clusterTrustBundle:
+          labelSelector:
+            matchLabels:
+              podcert.ate.dev/canarying: live
+          path: trust-bundle.pem
+          signerName: servicedns.podcert.ate.dev/identity
+  - name: podidentity
+    projected:
+      sources:
+      - podCertificate:
+          credentialBundlePath: credential-bundle.pem
+          keyType: ECDSAP256
+          signerName: podidentity.podcert.ate.dev/identity
+      - clusterTrustBundle:
+          labelSelector:
+            matchLabels:
+              podcert.ate.dev/canarying: live
+          path: trust-bundle.pem
+          signerName: podidentity.podcert.ate.dev/identity
