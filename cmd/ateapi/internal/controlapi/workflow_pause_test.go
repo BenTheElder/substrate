@@ -125,12 +125,10 @@ func TestEnsurePausedFinalized_RecordsContentScope(t *testing.T) {
 				WorkerPool:      "pool1",
 				WorkerPod:       "worker-pod-1",
 				NodeName:        "node1",
-				Status: &ateapipb.WorkerStatus{
-					Assignment: &ateapipb.ActorAssignment{
-						Actor:    &ateapipb.ObjectRef{Atespace: actorRef.Atespace, Name: actorRef.Name},
-						ActorUid: created.GetMetadata().GetUid(),
-					},
-				},
+				Status: hostingStatus(ateapipb.WorkerState_WORKER_STATE_UNSPECIFIED, &ateapipb.ActorAssignment{
+					Actor:    &ateapipb.ObjectRef{Atespace: actorRef.Atespace, Name: actorRef.Name},
+					ActorUid: created.GetMetadata().GetUid(),
+				}),
 			}); err != nil {
 				t.Fatalf("CreateWorker: %v", err)
 			}

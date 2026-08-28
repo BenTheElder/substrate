@@ -232,8 +232,8 @@ func TestDeleteWorkerWorkflow_AssignedToAbsentActorDeletesAnyway(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeleteWorker() failed: %v", err)
 	}
-	if got.GetStatus().GetAssignment().GetActorUid() != "actor-uid-1" {
-		t.Errorf("deleted worker assignment = %v, want the one it was holding", got.GetStatus().GetAssignment())
+	if soleAssignment(got).GetActorUid() != "actor-uid-1" {
+		t.Errorf("deleted worker assignment = %v, want the one it was holding", soleAssignment(got))
 	}
 }
 

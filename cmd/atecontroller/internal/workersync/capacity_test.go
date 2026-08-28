@@ -17,6 +17,8 @@ package workersync
 import (
 	"testing"
 
+	"github.com/agent-substrate/substrate/internal/resources"
+	"google.golang.org/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
@@ -71,10 +73,10 @@ func TestWorkerCapacity(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := workerCapacity(tc.pod)
-			if got.GetCpuMilli() != tc.wantCPU || got.GetMemoryBytes() != tc.wantMemory {
-				t.Fatalf("workerCapacity() = (%d, %d), want (%d, %d)",
-					got.GetCpuMilli(), got.GetMemoryBytes(), tc.wantCPU, tc.wantMemory)
+			got := workerCapacity(tc.pod).GetResources()
+			want := resources.CPUMemory(tc.wantCPU, tc.wantMemory)
+			if !proto.Equal(want, got) {
+				t.Fatalf("workerCapacity() = %v, want %v", got, want)
 			}
 		})
 	}

@@ -23,6 +23,7 @@ import (
 	"maps"
 	"time"
 
+	"github.com/agent-substrate/substrate/internal/resources"
 	listersv1alpha1 "github.com/agent-substrate/substrate/pkg/client/listers/api/v1alpha1"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc/codes"
@@ -339,24 +340,25 @@ const ateomContainerName = "ateom"
 // runs nested in the ateom container's cgroup, so that container's limits — not
 // the pod total — are the relevant envelope.
 func workerCapacity(pod *corev1.Pod) *ateapipb.WorkerCapacity {
-	var capacity ateapipb.WorkerCapacity
+	var cpuMilli, memoryBytes int64
 	for i := range pod.Spec.Containers {
 		c := &pod.Spec.Containers[i]
 		if c.Name != ateomContainerName {
 			continue
 		}
 		if v := c.Resources.Limits.Cpu(); v != nil {
-			capacity.CpuMilli = v.MilliValue()
+			cpuMilli = v.MilliValue()
 		}
 		if v := c.Resources.Limits.Memory(); v != nil {
-			capacity.MemoryBytes = v.Value()
+			memoryBytes = v.Value()
 		}
 		break
 	}
-	if capacity.CpuMilli == 0 && capacity.MemoryBytes == 0 {
+	limits := resources.CPUMemory(cpuMilli, memoryBytes)
+	if limits == nil {
 		return nil
 	}
-	return &capacity
+	return &ateapipb.WorkerCapacity{Resources: limits}
 }
 
 // markWorkerDraining transitions a worker to STATE_DRAINING so the scheduler

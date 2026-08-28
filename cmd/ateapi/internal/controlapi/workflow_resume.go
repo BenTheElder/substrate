@@ -394,11 +394,11 @@ func (w *ActorWorkflow) validateAssignedWorker(ctx context.Context, actorRef res
 		}
 		return nil, status.Errorf(codes.Aborted, "actor %s crashed", actorRef.String())
 	}
-	// Verify the worker is still assigned to the same Actor.
-	if worker.GetStatus().GetAssignment().GetActorUid() != actor.GetMetadata().GetUid() {
-		slog.ErrorContext(ctx, "crashing actor because its assigned worker no longer belongs to it",
+	// Verify the worker is still hosting this Actor.
+	if resources.WorkerAssignmentFor(worker, actor.GetMetadata().GetUid()) == nil {
+		slog.ErrorContext(ctx, "crashing actor because its assigned worker no longer holds it",
 			slog.String("worker", worker.GetWorkerPod()),
-			slog.Any("assignment", worker.GetStatus().GetAssignment()))
+			slog.Any("assignments", worker.GetStatus().GetAssignments()))
 		if cerr := crashActor(ctx, w.store, actorRef, ateattr.OperationResume, ateattr.ReasonWorkerReassigned); cerr != nil {
 			return nil, fmt.Errorf("while crashing actor: %w", cerr)
 		}
@@ -415,7 +415,7 @@ func (w *ActorWorkflow) validateAssignedWorker(ctx context.Context, actorRef res
 		// to the free pool instead of leaving it claimed forever — nothing else
 		// reclaims a healthy worker whose actor moved on to a different pool.
 		if _, err := w.store.UpdateWorker(ctx, worker.GetMetadata().GetName(), store.PreconditionFrom(worker), func(toUpdate *ateapipb.Worker) error {
-			toUpdate.Status.Assignment = nil
+			resources.ReleaseAssignment(toUpdate, actor.GetMetadata().GetUid())
 			return nil
 		}); err != nil {
 			return nil, fmt.Errorf("while releasing stale worker assignment: %w", err)
@@ -426,6 +426,12 @@ func (w *ActorWorkflow) validateAssignedWorker(ctx context.Context, actorRef res
 		return nil, status.Errorf(codes.Aborted, "actor %s crashed", actorRef)
 	}
 	return worker, nil
+}
+
+// admittedResources is what an assignment books against its worker, or nil
+// when the actor declared no limits and so reserves nothing.
+func admittedResources(constraints scheduling.Constraints) *ateapipb.Resources {
+	return constraints.Limits
 }
 
 // schedulerRecordable excludes retried version conflicts: the assignment loop
@@ -472,10 +478,7 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 	// This can happen if ateapi crashed after updating worker with actor assignment,
 	// but has not yet updated the actor.
 	for _, worker := range workers {
-		if worker.GetStatus().GetAssignment() == nil {
-			continue
-		}
-		if worker.GetStatus().GetAssignment().GetActorUid() != actor.GetMetadata().GetUid() {
+		if resources.WorkerAssignmentFor(worker, actor.GetMetadata().GetUid()) == nil {
 			continue
 		}
 		if w.scheduler.Applies(worker, constraints) {
@@ -494,7 +497,7 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 			bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			if _, err := w.store.UpdateWorker(bgCtx, release.GetMetadata().GetName(), store.PreconditionFrom(release), func(toUpdate *ateapipb.Worker) error {
-				toUpdate.Status.Assignment = nil
+				resources.ReleaseAssignment(toUpdate, actor.GetMetadata().GetUid())
 				return nil
 			}); err != nil {
 				slog.ErrorContext(bgCtx, "Failed to release stale worker assignment",
@@ -523,6 +526,8 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 			Name:     actor.GetMetadata().GetName(),
 		},
 		ActorUid: actor.GetMetadata().GetUid(),
+		// Record what this claim reserves so release returns the same amount.
+		Resources: admittedResources(constraints),
 	}
 	assignment.ActorTemplateRef = actorTemplateObjectRef(actor)
 
@@ -530,7 +535,7 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 	// by mutating the store's own copy; the cached one is only read, for the
 	// version this claim is conditioned on.
 	stored, err := w.store.UpdateWorker(ctx, assignedWorker.GetMetadata().GetName(), store.PreconditionFrom(assignedWorker), func(toUpdate *ateapipb.Worker) error {
-		toUpdate.Status.Assignment = assignment
+		resources.BindAssignment(toUpdate, assignment)
 		return nil
 	})
 	if err != nil {
@@ -585,8 +590,8 @@ func workerAssignmentFrom(w *ateapipb.Worker) *ateapipb.WorkerAssignment {
 
 // actorResourceLimits returns the actor's declared CPU (millicores) and memory
 // (bytes) limits from its ActorTemplate, or 0 for a dimension the template did
-// not set. These size the sandbox (supplied over the actor RPCs) and gate
-// scheduling (a worker must have >= capacity).
+// not set. These size the sandbox, which takes the two scalars the runtimes
+// understand rather than the named set placement accounts in.
 func actorResourceLimits(tmpl *ateapipb.ActorTemplate) (cpuMilli, memBytes int64, err error) {
 	for _, limit := range tmpl.GetResources().GetLimits() {
 		q, perr := resource.ParseQuantity(limit.GetQuantity())
@@ -604,16 +609,17 @@ func actorResourceLimits(tmpl *ateapipb.ActorTemplate) (cpuMilli, memBytes int64
 }
 
 func schedulingConstraints(actor *ateapipb.Actor, tmpl *ateapipb.ActorTemplate) (scheduling.Constraints, error) {
-	cpuMilli, memBytes, err := actorResourceLimits(tmpl)
+	// Canonicalized here, the one place an assignment's booked resources are
+	// decided, so what is recorded is sorted however the template was authored.
+	limits, err := resources.ParseQuantities(tmpl.GetResources())
 	if err != nil {
-		return scheduling.Constraints{}, err
+		return scheduling.Constraints{}, fmt.Errorf("invalid template resource limits: %w", err)
 	}
 	c := scheduling.Constraints{
 		SandboxClass:  sandboxClassString(tmpl.GetSandboxConfig().GetSandboxClass()),
 		ActorSelector: labels.SelectorFromSet(labels.Set(actor.GetWorkerSelector().GetMatchLabels())),
 		RequiredNodes: actor.GetStatus().GetLocalSnapshotInfo().GetNodeVmsWithLocalSnapshots(),
-		CPUMilli:      cpuMilli,
-		MemoryBytes:   memBytes,
+		Limits:        limits.Proto(),
 	}
 	if sel := tmpl.GetWorkerSelector(); sel != nil {
 		c.TemplateSelector = labels.SelectorFromSet(labels.Set(sel.GetMatchLabels()))

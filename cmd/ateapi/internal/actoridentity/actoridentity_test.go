@@ -228,10 +228,10 @@ func TestMintCertReadsThroughStaleWorkerCache(t *testing.T) {
 					if toUpdate.Status == nil {
 						toUpdate.Status = &ateapipb.WorkerStatus{}
 					}
-					toUpdate.Status.Assignment = &ateapipb.ActorAssignment{
+					resources.BindAssignment(toUpdate, &ateapipb.ActorAssignment{
 						Actor:    (resources.ActorRef{Atespace: testAtespace, Name: testActorName}).ToObjectRef(),
 						ActorUid: actor.GetMetadata().GetUid(),
-					}
+					})
 					return nil
 				})
 				if err != nil {
@@ -288,21 +288,20 @@ func TestMintCertReadsThroughWorkerCacheMiss(t *testing.T) {
 			if workerInStore {
 				// Phase 2: register and assign the worker in the store only,
 				// after the cache stopped listening.
-				if _, err := st.CreateWorker(ctx, &ateapipb.Worker{
+				assigned := &ateapipb.Worker{
 					Metadata:        &ateapipb.ResourceMetadata{Name: testWorkerName},
 					WorkerNamespace: testPodNS,
 					WorkerPool:      testPool,
 					WorkerPod:       testWorkerPod,
 					WorkerPodUid:    testWorkerPodUID,
 					NodeName:        testNode,
-					Status: &ateapipb.WorkerStatus{
-						State: ateapipb.WorkerState_WORKER_STATE_ACTIVE,
-						Assignment: &ateapipb.ActorAssignment{
-							Actor:    (resources.ActorRef{Atespace: testAtespace, Name: testActorName}).ToObjectRef(),
-							ActorUid: actor.GetMetadata().GetUid(),
-						},
-					},
-				}); err != nil {
+					Status:          &ateapipb.WorkerStatus{State: ateapipb.WorkerState_WORKER_STATE_ACTIVE},
+				}
+				resources.BindAssignment(assigned, &ateapipb.ActorAssignment{
+					Actor:    (resources.ActorRef{Atespace: testAtespace, Name: testActorName}).ToObjectRef(),
+					ActorUid: actor.GetMetadata().GetUid(),
+				})
+				if _, err := st.CreateWorker(ctx, assigned); err != nil {
 					t.Fatalf("register worker in store: %v", err)
 				}
 			}
@@ -470,16 +469,13 @@ func seedActor(t *testing.T, ctx context.Context, st store.Interface, f actorFix
 		WorkerPod:       testWorkerPod,
 		WorkerPodUid:    testWorkerPodUID,
 		NodeName:        f.workerNode,
-		Status: &ateapipb.WorkerStatus{
-			State: ateapipb.WorkerState_WORKER_STATE_ACTIVE,
-			Assignment: &ateapipb.ActorAssignment{
-				Actor:    assigned.ToObjectRef(),
-				ActorUid: assignedActorUID,
-			},
-		},
+		Status:          &ateapipb.WorkerStatus{State: ateapipb.WorkerState_WORKER_STATE_ACTIVE},
 	}
-	if f.unassigned {
-		worker.Status.Assignment = nil
+	if !f.unassigned {
+		resources.BindAssignment(worker, &ateapipb.ActorAssignment{
+			Actor:    assigned.ToObjectRef(),
+			ActorUid: assignedActorUID,
+		})
 	}
 	if _, err := st.CreateWorker(ctx, worker); err != nil {
 		t.Fatalf("seed worker: %v", err)

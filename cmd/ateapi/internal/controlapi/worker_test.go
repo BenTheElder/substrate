@@ -22,6 +22,7 @@ import (
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store/storetest"
+	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/grpc/codes"
@@ -49,7 +50,7 @@ func validWorker(name string, mods ...func(*ateapipb.Worker)) *ateapipb.Worker {
 		NodeName:        "node-1",
 		Ip:              "10.1.2.3",
 		SandboxClass:    "gvisor",
-		Capacity:        &ateapipb.WorkerCapacity{CpuMilli: 2000, MemoryBytes: 4 << 30},
+		Capacity:        &ateapipb.WorkerCapacity{Resources: resources.CPUMemory(2000, 4<<30)},
 	}
 	for _, m := range mods {
 		m(w)
@@ -119,7 +120,7 @@ func assignAPIWorker(t *testing.T, ctx context.Context, persistence store.Interf
 		t.Fatalf("getting worker %s to assign: %v", name, err)
 	}
 	assigned, err := persistence.UpdateWorker(ctx, name, store.PreconditionFrom(observed), func(toUpdate *ateapipb.Worker) error {
-		toUpdate.Status.Assignment = newAPIAssignment(actorUID)
+		resources.BindAssignment(toUpdate, newAPIAssignment(actorUID))
 		return nil
 	})
 	if err != nil {
@@ -256,8 +257,8 @@ func TestCreateWorker_IgnoresRequestStatus(t *testing.T) {
 
 	in := validWorker(apiWorkerName)
 	in.Status = &ateapipb.WorkerStatus{
-		State:      ateapipb.WorkerState_WORKER_STATE_DRAINING,
-		Assignment: newAPIAssignment("actor-uid-1"),
+		State:       ateapipb.WorkerState_WORKER_STATE_DRAINING,
+		Assignments: []*ateapipb.ActorAssignment{newAPIAssignment("actor-uid-1")},
 	}
 
 	got, err := svc.CreateWorker(ctx, &ateapipb.CreateWorkerRequest{Worker: in})
@@ -468,9 +469,10 @@ func TestUpdateWorker_Errors(t *testing.T) {
 		{"ip changed", func(w *ateapipb.Worker) { w.Ip = "10.9.9.9" }, codes.InvalidArgument},
 		{"worker_pod changed", func(w *ateapipb.Worker) { w.WorkerPod = "worker-pod-2" }, codes.InvalidArgument},
 		{"node_name changed", func(w *ateapipb.Worker) { w.NodeName = "node-2" }, codes.InvalidArgument},
-		{"capacity changed", func(w *ateapipb.Worker) { w.Capacity.CpuMilli = 4000 }, codes.InvalidArgument},
 		// And immutable fields dropped, which a replacement update reads as a
 		// request to clear them. Rejected rather than silently applied.
+		// Capacity is here for the same reason even though it is not immutable:
+		// losing it is still not something an update may ask for.
 		{"ip omitted", func(w *ateapipb.Worker) { w.Ip = "" }, codes.InvalidArgument},
 		{"capacity omitted", func(w *ateapipb.Worker) { w.Capacity = nil }, codes.InvalidArgument},
 	}
@@ -485,6 +487,30 @@ func TestUpdateWorker_Errors(t *testing.T) {
 				t.Errorf("UpdateWorker() code = %v (err %v), want %v", got, err, tc.want)
 			}
 		})
+	}
+}
+
+// Capacity is the one non-identity field an update may change: a pod can be
+// resized, and a worker reports the actor ceiling only it can observe.
+func TestUpdateWorker_CapacityChanges(t *testing.T) {
+	ctx := context.Background()
+	svc, persistence := newWorkerAPIService(t)
+	seeded := seedAPIWorker(t, ctx, persistence, validWorker(apiWorkerName))
+
+	updated, err := svc.UpdateWorker(ctx, &ateapipb.UpdateWorkerRequest{
+		Worker: updateFrom(seeded, func(w *ateapipb.Worker) {
+			w.Capacity.Resources = resources.CPUMemory(4000, 0)
+			w.Capacity.Actors = 4094
+		}),
+	})
+	if err != nil {
+		t.Fatalf("UpdateWorker() changing capacity failed: %v", err)
+	}
+	if want := resources.CPUMemory(4000, 0); !proto.Equal(want, updated.GetCapacity().GetResources()) {
+		t.Errorf("capacity resources = %v, want %v", updated.GetCapacity().GetResources(), want)
+	}
+	if got, want := updated.GetCapacity().GetActors(), int32(4094); got != want {
+		t.Errorf("capacity.actors = %d, want %d", got, want)
 	}
 }
 
@@ -625,8 +651,8 @@ func TestDrainWorker_KeepsAssignment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DrainWorker() failed: %v", err)
 	}
-	if got.GetStatus().GetAssignment().GetActorUid() != "actor-uid-1" {
-		t.Errorf("assignment = %v, want it left in place", got.GetStatus().GetAssignment())
+	if soleAssignment(got).GetActorUid() != "actor-uid-1" {
+		t.Errorf("assignment = %v, want it left in place", soleAssignment(got))
 	}
 }
 
@@ -783,15 +809,25 @@ func TestValidateCreateWorkerRequest(t *testing.T) {
 		req:  validReq(validWorker(apiWorkerName, func(w *ateapipb.Worker) { w.Capacity = nil })),
 	}, {
 		name: "valid capacity",
-		req:  validReq(validWorker(apiWorkerName, func(w *ateapipb.Worker) { w.Capacity = &ateapipb.WorkerCapacity{CpuMilli: 2000, MemoryBytes: 4 << 30} })),
+		req: validReq(validWorker(apiWorkerName, func(w *ateapipb.Worker) {
+			w.Capacity = &ateapipb.WorkerCapacity{Resources: resources.CPUMemory(2000, 4<<30)}
+		})),
 	}, {
-		name: "negative capacity.cpu_milli",
-		req:  validReq(validWorker(apiWorkerName, func(w *ateapipb.Worker) { w.Capacity = &ateapipb.WorkerCapacity{CpuMilli: -1, MemoryBytes: 4 << 30} })),
-		want: field.ErrorList{field.Invalid(field.NewPath("worker", "capacity", "cpu_milli"), nil, "").WithOrigin("minimum")},
+		name: "negative capacity quantity",
+		req: validReq(validWorker(apiWorkerName, func(w *ateapipb.Worker) {
+			w.Capacity = &ateapipb.WorkerCapacity{Resources: resources.CPUMemory(-1, 4<<30)}
+		})),
+		want: field.ErrorList{field.Invalid(field.NewPath("worker", "capacity", "resources", "limits").Index(0).Child("quantity"), nil, "")},
 	}, {
-		name: "negative capacity.memory_bytes",
-		req:  validReq(validWorker(apiWorkerName, func(w *ateapipb.Worker) { w.Capacity = &ateapipb.WorkerCapacity{CpuMilli: 2000, MemoryBytes: -1} })),
-		want: field.ErrorList{field.Invalid(field.NewPath("worker", "capacity", "memory_bytes"), nil, "").WithOrigin("minimum")},
+		// A quantity is a string on the wire, so a Worker can report one that
+		// is not a quantity at all.
+		name: "unparseable capacity quantity",
+		req: validReq(validWorker(apiWorkerName, func(w *ateapipb.Worker) {
+			w.Capacity = &ateapipb.WorkerCapacity{
+				Resources: &ateapipb.Resources{Limits: []*ateapipb.Limits{{Name: "cpu", Quantity: "lots"}}},
+			}
+		})),
+		want: field.ErrorList{field.Invalid(field.NewPath("worker", "capacity", "resources", "limits").Index(0).Child("quantity"), nil, "")},
 	}, {
 		name: "status needs a state",
 		req:  validReq(validWorker(apiWorkerName, withStatus(func(s *ateapipb.WorkerStatus) { s.State = 0 }))),
@@ -807,42 +843,42 @@ func TestValidateCreateWorkerRequest(t *testing.T) {
 	}, {
 		name: "valid assignment, when carried, passes",
 		req: validReq(validWorker(apiWorkerName, withStatus(func(s *ateapipb.WorkerStatus) {
-			s.Assignment = newAPIAssignment(apiOtherWorkerName)
+			s.Assignments = []*ateapipb.ActorAssignment{newAPIAssignment(apiOtherWorkerName)}
 		}))),
 	}, {
 		name: "assignment actor_uid must be a uuid",
 		req: validReq(validWorker(apiWorkerName, withStatus(func(s *ateapipb.WorkerStatus) {
-			s.Assignment = newAPIAssignment("not a uuid")
+			s.Assignments = []*ateapipb.ActorAssignment{newAPIAssignment("not a uuid")}
 		}))),
-		want: field.ErrorList{field.Invalid(field.NewPath("worker", "status", "assignment", "actor_uid"), nil, "").WithOrigin("format=k8s-uuid")},
+		want: field.ErrorList{field.Invalid(field.NewPath("worker", "status", "assignments").Index(0).Child("actor_uid"), nil, "").WithOrigin("format=k8s-uuid")},
 	}, {
 		name: "assignment actor ref needs an atespace",
 		req: validReq(validWorker(apiWorkerName, withStatus(func(s *ateapipb.WorkerStatus) {
-			s.Assignment = newAPIAssignment(apiOtherWorkerName)
-			s.Assignment.Actor.Atespace = ""
+			s.Assignments = []*ateapipb.ActorAssignment{newAPIAssignment(apiOtherWorkerName)}
+			s.Assignments[0].Actor.Atespace = ""
 		}))),
-		want: field.ErrorList{field.Required(field.NewPath("worker", "status", "assignment", "actor", "atespace"), "")},
+		want: field.ErrorList{field.Required(field.NewPath("worker", "status", "assignments").Index(0).Child("actor", "atespace"), "")},
 	}, {
 		name: "assignment template ref needs an atespace",
 		req: validReq(validWorker(apiWorkerName, withStatus(func(s *ateapipb.WorkerStatus) {
-			s.Assignment = newAPIAssignment(apiOtherWorkerName)
-			s.Assignment.ActorTemplateRef = &ateapipb.ObjectRef{Name: "tmpl"}
+			s.Assignments = []*ateapipb.ActorAssignment{newAPIAssignment(apiOtherWorkerName)}
+			s.Assignments[0].ActorTemplateRef = &ateapipb.ObjectRef{Name: "tmpl"}
 		}))),
-		want: field.ErrorList{field.Required(field.NewPath("worker", "status", "assignment", "actor_template_ref", "atespace"), "")},
+		want: field.ErrorList{field.Required(field.NewPath("worker", "status", "assignments").Index(0).Child("actor_template_ref", "atespace"), "")},
 	}, {
 		name: "assignment needs a template ref",
 		req: validReq(validWorker(apiWorkerName, withStatus(func(s *ateapipb.WorkerStatus) {
-			s.Assignment = newAPIAssignment(apiOtherWorkerName)
-			s.Assignment.ActorTemplateRef = nil
+			s.Assignments = []*ateapipb.ActorAssignment{newAPIAssignment(apiOtherWorkerName)}
+			s.Assignments[0].ActorTemplateRef = nil
 		}))),
-		want: field.ErrorList{field.Required(field.NewPath("worker", "status", "assignment", "actor_template_ref"), "")},
+		want: field.ErrorList{field.Required(field.NewPath("worker", "status", "assignments").Index(0).Child("actor_template_ref"), "")},
 	}, {
 		name: "assignment template name must be a short name",
 		req: validReq(validWorker(apiWorkerName, withStatus(func(s *ateapipb.WorkerStatus) {
-			s.Assignment = newAPIAssignment(apiOtherWorkerName)
-			s.Assignment.ActorTemplateRef.Name = "TMPL_1"
+			s.Assignments = []*ateapipb.ActorAssignment{newAPIAssignment(apiOtherWorkerName)}
+			s.Assignments[0].ActorTemplateRef.Name = "TMPL_1"
 		}))),
-		want: field.ErrorList{field.Invalid(field.NewPath("worker", "status", "assignment", "actor_template_ref", "name"), nil, "").WithOrigin("format=k8s-short-name")},
+		want: field.ErrorList{field.Invalid(field.NewPath("worker", "status", "assignments").Index(0).Child("actor_template_ref", "name"), nil, "").WithOrigin("format=k8s-short-name")},
 	}}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -876,9 +912,11 @@ func TestServiceImplUpdateWorker_ImmutableFields(t *testing.T) {
 		{"worker_pod_uid", "worker_pod_uid", func(w *ateapipb.Worker) { w.WorkerPodUid = apiOtherWorkerName }},
 		{"node_name", "node_name", func(w *ateapipb.Worker) { w.NodeName = "other-node" }},
 		{"ip", "ip", func(w *ateapipb.Worker) { w.Ip = "10.0.0.9" }},
-		{"capacity_changed", "capacity", func(w *ateapipb.Worker) { w.Capacity.CpuMilli = 4000 }},
+		// capacity is absent: it MAY change, since a Worker can be resized and
+		// reports its own ceiling. See TestUpdateWorker_CapacityChanges.
+		//
 		// An update replaces the worker, so a caller that leaves capacity
-		// out is asking to clear it. That is a change like any other.
+		// out is asking to clear it. That is still rejected.
 		{"capacity_cleared", "capacity", func(w *ateapipb.Worker) { w.Capacity = nil }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1073,26 +1111,52 @@ func TestServiceImplUpdateWorker_ValidatesAssignment(t *testing.T) {
 
 	// A malformed assignment must not land.
 	_, err := impl.UpdateWorker(ctx, apiWorkerName, store.PreconditionFrom(created), func(toUpdate *ateapipb.Worker) error {
-		toUpdate.Status.Assignment = newAPIAssignment("not-a-uuid")
+		toUpdate.Status.Assignments = []*ateapipb.ActorAssignment{newAPIAssignment("not-a-uuid")}
 		return nil
 	})
 	if got := status.Code(err); got != codes.InvalidArgument {
 		t.Fatalf("assigning a malformed uid returned %v (err %v), want %v", got, err, codes.InvalidArgument)
 	}
 
-	// A well-formed assignment lands, and releasing it lands too: assignment
-	// is optional, so clearing is not otherwise constrained.
+	// A well-formed assignment lands, and releasing it lands too: the set is
+	// optional, so emptying it is not otherwise constrained.
 	assigned, err := impl.UpdateWorker(ctx, apiWorkerName, store.PreconditionFrom(created), func(toUpdate *ateapipb.Worker) error {
-		toUpdate.Status.Assignment = newAPIAssignment(apiOtherWorkerName)
+		toUpdate.Status.Assignments = []*ateapipb.ActorAssignment{newAPIAssignment(apiOtherWorkerName)}
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("assigning a valid assignment failed: %v", err)
 	}
 	if _, err := impl.UpdateWorker(ctx, apiWorkerName, store.PreconditionFrom(assigned), func(toUpdate *ateapipb.Worker) error {
-		toUpdate.Status.Assignment = nil
+		toUpdate.Status.Assignments = nil
 		return nil
 	}); err != nil {
 		t.Fatalf("releasing the assignment failed: %v", err)
+	}
+}
+
+// Every stored Worker carries an actor ceiling, so no reader has to know a
+// default. A Worker that reports its own keeps it; one that does not is worth
+// one Actor, which is what a Worker was before it could report.
+func TestCreateWorker_ReifiesActorCeiling(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := newWorkerAPIService(t)
+
+	got, err := svc.CreateWorker(ctx, &ateapipb.CreateWorkerRequest{Worker: validWorker(apiWorkerName)})
+	if err != nil {
+		t.Fatalf("CreateWorker() failed: %v", err)
+	}
+	if got := got.GetCapacity().GetActors(); got != 1 {
+		t.Errorf("created worker actor ceiling = %d, want 1", got)
+	}
+
+	reported := validWorker("11111111-2222-3333-4444-555555555555")
+	reported.Capacity = &ateapipb.WorkerCapacity{Actors: 4094}
+	got, err = svc.CreateWorker(ctx, &ateapipb.CreateWorkerRequest{Worker: reported})
+	if err != nil {
+		t.Fatalf("CreateWorker() with a reported ceiling failed: %v", err)
+	}
+	if got := got.GetCapacity().GetActors(); got != 4094 {
+		t.Errorf("reported ceiling = %d, want it kept at 4094", got)
 	}
 }

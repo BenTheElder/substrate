@@ -237,18 +237,16 @@ func (w *ActorWorkflow) ensurePausedFinalized(ctx context.Context, actorRef reso
 			nodeName = worker.GetNodeName()
 			// Only free it if it still belongs to us
 
-			if wass := worker.GetStatus().GetAssignment(); wass != nil {
-				if wass.GetActorUid() == latestActor.GetMetadata().GetUid() {
-					_, err := w.store.UpdateWorker(ctx, worker.GetMetadata().GetName(), store.PreconditionFrom(worker), func(toUpdate *ateapipb.Worker) error {
-						toUpdate.Status.Assignment = nil
-						return nil
-					})
-					if err != nil {
-						if errors.Is(err, store.ErrVersionConflict) {
-							return nil, status.Error(codes.Aborted, "concurrent update conflict, please retry")
-						}
-						return nil, err
+			if resources.WorkerAssignmentFor(worker, latestActor.GetMetadata().GetUid()) != nil {
+				_, err := w.store.UpdateWorker(ctx, worker.GetMetadata().GetName(), store.PreconditionFrom(worker), func(toUpdate *ateapipb.Worker) error {
+					resources.ReleaseAssignment(toUpdate, latestActor.GetMetadata().GetUid())
+					return nil
+				})
+				if err != nil {
+					if errors.Is(err, store.ErrVersionConflict) {
+						return nil, status.Error(codes.Aborted, "concurrent update conflict, please retry")
 					}
+					return nil, err
 				}
 			}
 		}

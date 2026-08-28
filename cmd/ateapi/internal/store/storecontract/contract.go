@@ -110,7 +110,7 @@ func newTestWorker(name, pod string) *ateapipb.Worker {
 		WorkerPool:      "pool-1",
 		WorkerPod:       pod,
 		WorkerPodUid:    testWorkerPodUID,
-		Capacity:        &ateapipb.WorkerCapacity{CpuMilli: 2000, MemoryBytes: 4 << 30},
+		Capacity:        &ateapipb.WorkerCapacity{Resources: resources.CPUMemory(2000, 4<<30)},
 		Status:          &ateapipb.WorkerStatus{},
 	}
 }
@@ -1280,7 +1280,7 @@ func runWorkerContractTests(t *testing.T, setup func(t *testing.T) store.Interfa
 			Actor:            &ateapipb.ObjectRef{Name: "session-1"},
 		}
 		updated, err := s.UpdateWorker(ctx, testWorkerName, store.PreconditionFrom(created), func(toUpdate *ateapipb.Worker) error {
-			toUpdate.Status.Assignment = assignment
+			resources.BindAssignment(toUpdate, assignment)
 			return nil
 		})
 		if err != nil {
@@ -1299,7 +1299,7 @@ func runWorkerContractTests(t *testing.T, setup func(t *testing.T) store.Interfa
 		}
 
 		want := proto.Clone(worker).(*ateapipb.Worker)
-		want.Status.Assignment = assignment
+		resources.BindAssignment(want, assignment)
 		want.Metadata.Version = 2
 		if diff := cmp.Diff(want, got, protocmp.Transform(), ignoreUID, ignoreTimestamps); diff != "" {
 			t.Errorf("UpdateWorker yielded unexpected state in DB (-want +got):\n%s", diff)
@@ -1414,14 +1414,14 @@ func runWorkerContractTests(t *testing.T, setup func(t *testing.T) store.Interfa
 			t.Fatalf("GetWorker failed: %v", err)
 		}
 		if _, err := s.UpdateWorker(ctx, testWorkerName, store.PreconditionFrom(observed), func(toUpdate *ateapipb.Worker) error {
-			toUpdate.Status.Assignment = &ateapipb.ActorAssignment{Actor: &ateapipb.ObjectRef{Name: "session-1"}}
+			toUpdate.Status.Assignments = []*ateapipb.ActorAssignment{{Actor: &ateapipb.ObjectRef{Name: "session-1"}}}
 			return nil
 		}); err != nil {
 			t.Fatalf("UpdateWorker failed: %v", err)
 		}
 
 		_, err = s.UpdateWorker(ctx, testWorkerName, store.PreconditionFrom(observed), func(toUpdate *ateapipb.Worker) error {
-			toUpdate.Status.Assignment = &ateapipb.ActorAssignment{Actor: &ateapipb.ObjectRef{Name: "session-2"}}
+			toUpdate.Status.Assignments = []*ateapipb.ActorAssignment{{Actor: &ateapipb.ObjectRef{Name: "session-2"}}}
 			return nil
 		})
 		if !errors.Is(err, store.ErrVersionConflict) {
@@ -1486,13 +1486,13 @@ func runWorkerContractTests(t *testing.T, setup func(t *testing.T) store.Interfa
 			go func() {
 				defer wg.Done()
 				_, err := s.UpdateWorker(ctx, testWorkerName, store.PreconditionFrom(created), func(toUpdate *ateapipb.Worker) error {
-					if toUpdate.GetStatus().GetAssignment() != nil {
+					if len(toUpdate.GetStatus().GetAssignments()) != 0 {
 						return errTaken
 					}
-					toUpdate.Status.Assignment = &ateapipb.ActorAssignment{
+					toUpdate.Status.Assignments = []*ateapipb.ActorAssignment{{
 						Actor:    &ateapipb.ObjectRef{Atespace: "team-a", Name: fmt.Sprintf("actor-%d", i)},
 						ActorUid: fmt.Sprintf("uid-%d", i),
-					}
+					}}
 					return nil
 				})
 				switch {
@@ -1520,7 +1520,7 @@ func runWorkerContractTests(t *testing.T, setup func(t *testing.T) store.Interfa
 		if err != nil {
 			t.Fatalf("GetWorker failed: %v", err)
 		}
-		if uid := got.GetStatus().GetAssignment().GetActorUid(); !strings.HasPrefix(uid, "uid-") {
+		if uid := got.GetStatus().GetAssignments()[0].GetActorUid(); !strings.HasPrefix(uid, "uid-") {
 			t.Errorf("stored assignment names %q, want one of the claimants", uid)
 		}
 		// One winning write on top of the create, and no partial ones.

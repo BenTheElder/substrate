@@ -352,9 +352,17 @@ func (s *Server) authorizeWithWorker(ctx context.Context, worker *ateapipb.Worke
 		return nil, resources.ActorRef{}, "worker is hosted on a different node", errAssignmentMismatch
 	}
 
-	actorRef := resources.ActorRefFromObjectRef(worker.GetStatus().GetAssignment().GetActor())
-	if actorRef == (resources.ActorRef{}) {
+	// Which of the worker's actors to mint for. A worker admits one at a time
+	// (capacity.actors), so the sole assignment is the answer; selecting among
+	// several arrives with the workers that can hold several.
+	assignments := worker.GetStatus().GetAssignments()
+	if len(assignments) == 0 {
 		return nil, resources.ActorRef{}, "worker has no actor assignment", errAssignmentMismatch
+	}
+	assigned := assignments[0]
+	actorRef := resources.ActorRefFromObjectRef(assigned.GetActor())
+	if actorRef == (resources.ActorRef{}) {
+		return nil, resources.ActorRef{}, "worker assignment names no actor", errAssignmentMismatch
 	}
 
 	actor, err := s.store.GetActor(ctx, actorRef)
@@ -378,7 +386,7 @@ func (s *Server) authorizeWithWorker(ctx context.Context, worker *ateapipb.Worke
 		slog.ErrorContext(ctx, "ActorIdentity: running actor has no worker assignment", slog.Any("actor", actorRef))
 		return nil, resources.ActorRef{}, "", status.Error(codes.FailedPrecondition, "actor has no worker assigned")
 	}
-	if worker.GetStatus().GetAssignment().GetActorUid() != actor.GetMetadata().GetUid() {
+	if assigned.GetActorUid() != actor.GetMetadata().GetUid() {
 		return nil, resources.ActorRef{}, "worker is no longer assigned to this actor incarnation", errAssignmentMismatch
 	}
 	if assignment.GetWorker().GetName() != worker.GetMetadata().GetName() {
