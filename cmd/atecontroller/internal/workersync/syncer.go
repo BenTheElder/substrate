@@ -27,6 +27,7 @@ import (
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
@@ -296,6 +297,13 @@ func (s *WorkerPoolSyncer) createOrUpdateWorker(ctx context.Context, key workerK
 		w.Labels = pool.GetLabels()
 		changed = true
 	}
+	// Only the dimensions the pod states; the reported actors ceiling is carried
+	// across rather than recomputed.
+	if capacity := withReportedActors(workerCapacity(pod), w.GetCapacity()); !proto.Equal(w.GetCapacity(), capacity) {
+		slog.InfoContext(ctx, "Syncer: updating worker in store (capacity changed)", key.logAttrs()...)
+		w.Capacity = capacity
+		changed = true
+	}
 	if w.GetIp() != pod.Status.PodIP {
 		// TODO: I don't think this is possible, but handling this case so we can
 		// log it just in case we can reproduce it. It is logged rather than
@@ -331,13 +339,14 @@ func isWorkerEligible(pod *corev1.Pod) bool {
 // actor's sandbox; its resource limits bound what an actor placed here can use.
 const ateomContainerName = "ateom"
 
-// workerCapacity returns the worker pod's capacity for hosting an actor — CPU
-// in millicores and memory in bytes — taken from the ateom container's resource
-// limits. A dimension the pod does not limit reports 0, which the scheduler
-// treats as "unknown" (unconstrained); a pod that limits neither reports nil
-// rather than an all-zero message that says the same thing. The actor sandbox
-// runs nested in the ateom container's cgroup, so that container's limits — not
-// the pod total — are the relevant envelope.
+// workerCapacity is the pod's whole capacity for hosting actors: CPU in
+// millicores and memory in bytes from the ateom container's limits, which is
+// the relevant envelope because the sandbox runs nested in that cgroup. An
+// unlimited dimension reports 0, which the scheduler reads as unconstrained.
+//
+// The actors ceiling is absent on purpose: it belongs to the ateom, which
+// reports it once running (see ReportWorkerCapacity). Unset reads as one until
+// then.
 func workerCapacity(pod *corev1.Pod) *ateapipb.WorkerCapacity {
 	var capacity ateapipb.WorkerCapacity
 	for i := range pod.Spec.Containers {
@@ -466,4 +475,19 @@ func (s *WorkerPoolSyncer) listWorkersPageWithRetry(ctx context.Context, pageTok
 		case <-time.After(backoff.Step()):
 		}
 	}
+}
+
+// withReportedActors carries the worker's reported actors ceiling onto a freshly
+// computed capacity. The syncer recomputes cpu and memory on every pod event;
+// without this it would clear the report each time and the two would fight.
+func withReportedActors(computed, stored *ateapipb.WorkerCapacity) *ateapipb.WorkerCapacity {
+	if stored.GetActors() == 0 {
+		return computed
+	}
+	if computed == nil {
+		computed = &ateapipb.WorkerCapacity{}
+	}
+	out := proto.Clone(computed).(*ateapipb.WorkerCapacity)
+	out.Actors = stored.GetActors()
+	return out
 }
