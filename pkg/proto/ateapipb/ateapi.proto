@@ -1661,18 +1661,18 @@ message Worker {
   // +k8s:eachVal=+k8s:format=k8s-label-value
   map<string, string> labels = 9;
 
-  // The compute capacity this worker can give an actor sandbox. Immutable, set
-  // at creation: a worker pod's limits are fixed for its lifetime. An update
-  // replaces the worker rather than patching it, so a request that omits
-  // capacity is asking to clear it, which the immutability rule rejects.
+  // What this Worker can supply to the Actors it hosts.
+  //
+  // Mutable: a Worker can be resized, and it reports its own actor ceiling.
+  // Clearing is rejected. Shrinking below allocated stops new placements and
+  // evicts nothing.
   //
   // +k8s:optional
-  // +k8s:immutable
   WorkerCapacity capacity = 10;
 
   // Output-only server-managed state. Absent from Create/Update request
   // payloads; whatever a request carries here is ignored. DrainWorker is the
-  // only way a client moves state, and assignment is the scheduler's.
+  // only way a client moves state, and the assignments are the scheduler's.
   //
   // +k8s:optional
   WorkerStatus status = 11;
@@ -1693,33 +1693,52 @@ message WorkerStatus {
   // +k8s:maximum=2 # keep this in sync with the WorkerState enum
   WorkerState state = 1;
 
-  // The Actor currently bound to this Worker, if any.
+  // The Actors bound to this Worker.
+  //
+  // Populated only by GetWorker. ListWorkers leaves it empty and reports
+  // occupancy through allocated, so a listing costs the fleet's size, not its
+  // actor count.
   //
   // +k8s:optional
-  ActorAssignment assignment = 2;
+  repeated ActorAssignment assignments = 2;
+
+  // What the assignments consume of capacity. A running total because placement
+  // reads it for every Worker on every decision, and summing the assignments
+  // would cost the fleet's actor count each time.
+  //
+  // +k8s:optional
+  WorkerCapacity allocated = 3;
 }
 
-// WorkerCapacity is the worker pod's compute capacity available to host an
-// actor sandbox, taken from the ateom container's resource limits. The
-// scheduler only places an actor on a worker whose capacity is >= the actor's
-// declared resource limits. An unset message, or a zero field within it, means
-// "unknown/unset" for that dimension: treated as unconstrained so placement is
-// not blocked (matching the pre-capacity behavior).
+// WorkerCapacity is a Worker's total, not what is free. Free is capacity minus
+// WorkerStatus.allocated, which uses this same message, so the two subtract. An
+// Actor is placed only where free covers its limits in every dimension.
+//
+// A Worker overcommits by reporting more than it has.
 message WorkerCapacity {
-  // CPU capacity in millicores (1000 = one core).
+  // What a Worker supplies, named as an ActorTemplate names what it asks for,
+  // so the two are one vocabulary and subtract directly. A name the Worker does
+  // not report is unconstrained rather than absent, so a Worker that has said
+  // nothing is not unschedulable.
+  //
+  // Sorted by name, so equal capacities compare equal.
   //
   // +k8s:optional
-  // +k8s:minimum=1
-  int64 cpu_milli = 1;
+  Resources resources = 1;
 
-  // Memory capacity in bytes.
+  // How many Actors may be bound at once. Not a resource because nothing
+  // divides it: every Actor costs exactly one. It bounds what one more Actor
+  // costs where CPU and memory do not — netns, mounts, file descriptors, blast
+  // radius. Kubernetes bounds a node the same way, with allocatable pods.
+  //
+  // Always set: CreateWorker reifies one for a Worker that did not report.
   //
   // +k8s:optional
   // +k8s:minimum=1
-  int64 memory_bytes = 2;
+  int32 actors = 2;
 }
 
-// ActorAssignment names the Actor currently bound to a Worker — the inverse of
+// ActorAssignment names an Actor bound to a Worker — the inverse of
 // WorkerAssignment.
 message ActorAssignment {
   // +k8s:required
@@ -1736,6 +1755,15 @@ message ActorAssignment {
   // +k8s:required
   // +k8s:subfield(atespace)=+k8s:required
   ObjectRef actor_template_ref = 4;
+
+  // What the Worker admitted this Actor for: the Actor's declared limits as
+  // they read at placement time. Recorded rather than re-read so release
+  // returns exactly what binding consumed, even if the template changed since.
+  //
+  // Sorted by name, as WorkerCapacity.resources is.
+  //
+  // +k8s:optional
+  Resources resources = 5;
 }
 
 // ActorIdentity allows substrate workloads to exchange their
@@ -1763,6 +1791,39 @@ service ActorIdentity {
   //
   // The certificate in the response is the actor's identity, not the atelet's.
   rpc MintCert(MintCertRequest) returns (MintCertResponse);
+}
+
+// WorkerService is how a Worker tells the control plane about itself. It is
+// separate from Control because the two have different callers and different
+// authorization: Control is the client-facing API, while these RPCs are served
+// only to an atelet, and only for the Workers on its own node.
+service WorkerService {
+  // SetWorkerCapacity records what a Worker can hold. Capacity is the
+  // Worker's to report rather than the control plane's to infer: it is what
+  // the ateom can actually supply, only its node can observe it, and a fleet
+  // may run mixed ateom versions.
+  //
+  // atelet calls this with its own client certificate, as it does for
+  // MintCert. Idempotent: re-sending the same capacity is not a write.
+  rpc SetWorkerCapacity(SetWorkerCapacityRequest) returns (SetWorkerCapacityResponse);
+}
+
+message SetWorkerCapacityRequest {
+  // The Worker being reported on. atespace is always empty; Workers are
+  // global-scoped.
+  // +k8s:opaqueType
+  ObjectRef worker = 1;
+
+  // What the Worker can hold. An unset dimension keeps what is recorded rather
+  // than clearing it, so a reporter that knows only its actor ceiling does not
+  // erase the compute capacity taken from the pod's limits.
+  // +k8s:opaqueType
+  WorkerCapacity capacity = 2;
+}
+
+message SetWorkerCapacityResponse {
+  // The Worker as recorded, so a caller sees what its report resolved to.
+  Worker worker = 1;
 }
 
 message MintJWTRequest {

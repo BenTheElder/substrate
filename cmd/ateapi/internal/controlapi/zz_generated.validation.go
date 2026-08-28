@@ -375,6 +375,36 @@ func Validate_ActorAssignment(
 		errs = append(errs, fn(fldPath.Child("actor_template_ref"), obj.ActorTemplateRef, oldVal, oldObj != nil)...)
 	}
 
+	{ // field ateapipb.ActorAssignment.Resources
+		fn := func(
+			fldPath *field.Path,
+			obj, oldObj *ateapipb.Resources,
+			oldValueCorrelated bool) (errs field.ErrorList) {
+			// don't revalidate unchanged data
+			if oldValueCorrelated && op.Type == operation.Update {
+				if ateDeepEqual(obj, oldObj) {
+					return nil
+				}
+			}
+			// call field-attached validations
+			earlyReturn := false
+			if e := validate.OptionalPointer(ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
+				earlyReturn = true
+			}
+			if earlyReturn {
+				return // do not proceed
+			}
+			// call the type's validation function
+			errs = append(errs, Validate_Resources(ctx, op, fldPath, obj, oldObj)...)
+			return
+		}
+		oldVal := safe.Field(oldObj,
+			func(oldObj *ateapipb.ActorAssignment) *ateapipb.Resources {
+				return oldObj.Resources
+			})
+		errs = append(errs, fn(fldPath.Child("resources"), obj.Resources, oldVal, oldObj != nil)...)
+	}
+
 	return errs
 }
 
@@ -6627,10 +6657,6 @@ func Validate_Worker(
 			}
 			// call field-attached validations
 			earlyReturn := false
-			if e := validate.Immutable(ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
-				errs = append(errs, e...)
-				earlyReturn = true
-			}
 			if e := validate.OptionalPointer(ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
 				earlyReturn = true
 			}
@@ -6907,41 +6933,40 @@ func Validate_WorkerCapacity(
 	ctx context.Context, op operation.Operation, fldPath *field.Path,
 	obj, oldObj *ateapipb.WorkerCapacity) (errs field.ErrorList) {
 
-	{ // field ateapipb.WorkerCapacity.CpuMilli
+	{ // field ateapipb.WorkerCapacity.Resources
 		fn := func(
 			fldPath *field.Path,
-			obj, oldObj *int64,
+			obj, oldObj *ateapipb.Resources,
 			oldValueCorrelated bool) (errs field.ErrorList) {
 			// don't revalidate unchanged data
 			if oldValueCorrelated && op.Type == operation.Update {
-				if obj == oldObj || (obj != nil && oldObj != nil && *obj == *oldObj) {
+				if ateDeepEqual(obj, oldObj) {
 					return nil
 				}
 			}
 			// call field-attached validations
 			earlyReturn := false
-			if e := validate.OptionalValue(ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
+			if e := validate.OptionalPointer(ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
 				earlyReturn = true
 			}
 			if earlyReturn {
 				return // do not proceed
 			}
-			if e := validate.Minimum(ctx, op, fldPath, obj, oldObj, 1); len(e) != 0 {
-				errs = append(errs, e...)
-			}
+			// call the type's validation function
+			errs = append(errs, Validate_Resources(ctx, op, fldPath, obj, oldObj)...)
 			return
 		}
 		oldVal := safe.Field(oldObj,
-			func(oldObj *ateapipb.WorkerCapacity) *int64 {
-				return &oldObj.CpuMilli
+			func(oldObj *ateapipb.WorkerCapacity) *ateapipb.Resources {
+				return oldObj.Resources
 			})
-		errs = append(errs, fn(fldPath.Child("cpu_milli"), &obj.CpuMilli, oldVal, oldObj != nil)...)
+		errs = append(errs, fn(fldPath.Child("resources"), obj.Resources, oldVal, oldObj != nil)...)
 	}
 
-	{ // field ateapipb.WorkerCapacity.MemoryBytes
+	{ // field ateapipb.WorkerCapacity.Actors
 		fn := func(
 			fldPath *field.Path,
-			obj, oldObj *int64,
+			obj, oldObj *int32,
 			oldValueCorrelated bool) (errs field.ErrorList) {
 			// don't revalidate unchanged data
 			if oldValueCorrelated && op.Type == operation.Update {
@@ -6963,10 +6988,10 @@ func Validate_WorkerCapacity(
 			return
 		}
 		oldVal := safe.Field(oldObj,
-			func(oldObj *ateapipb.WorkerCapacity) *int64 {
-				return &oldObj.MemoryBytes
+			func(oldObj *ateapipb.WorkerCapacity) *int32 {
+				return &oldObj.Actors
 			})
-		errs = append(errs, fn(fldPath.Child("memory_bytes"), &obj.MemoryBytes, oldVal, oldObj != nil)...)
+		errs = append(errs, fn(fldPath.Child("actors"), &obj.Actors, oldVal, oldObj != nil)...)
 	}
 
 	return errs
@@ -7013,10 +7038,46 @@ func Validate_WorkerStatus(
 		errs = append(errs, fn(fldPath.Child("state"), &obj.State, oldVal, oldObj != nil)...)
 	}
 
-	{ // field ateapipb.WorkerStatus.Assignment
+	{ // field ateapipb.WorkerStatus.Assignments
 		fn := func(
 			fldPath *field.Path,
-			obj, oldObj *ateapipb.ActorAssignment,
+			obj, oldObj []*ateapipb.ActorAssignment,
+			oldValueCorrelated bool) (errs field.ErrorList) {
+			// don't revalidate unchanged data
+			if oldValueCorrelated && op.Type == operation.Update {
+				if ateDeepEqual(obj, oldObj) {
+					return nil
+				}
+			}
+			// call field-attached validations
+			earlyReturn := false
+			if e := validate.PtrSliceNoNils[ateapipb.ActorAssignment](ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
+				errs = append(errs, e...)
+				earlyReturn = true
+			}
+			if e := validate.OptionalSlice(ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
+				earlyReturn = true
+			}
+			if earlyReturn {
+				return // do not proceed
+			}
+			// iterate the list and call the type's validation function
+			if e := validate.EachPtrSliceVal(ctx, op, fldPath, obj, oldObj, nil, nil, Validate_ActorAssignment); len(e) != 0 {
+				errs = append(errs, e...)
+			}
+			return
+		}
+		oldVal := safe.Field(oldObj,
+			func(oldObj *ateapipb.WorkerStatus) []*ateapipb.ActorAssignment {
+				return oldObj.Assignments
+			})
+		errs = append(errs, fn(fldPath.Child("assignments"), obj.Assignments, oldVal, oldObj != nil)...)
+	}
+
+	{ // field ateapipb.WorkerStatus.Allocated
+		fn := func(
+			fldPath *field.Path,
+			obj, oldObj *ateapipb.WorkerCapacity,
 			oldValueCorrelated bool) (errs field.ErrorList) {
 			// don't revalidate unchanged data
 			if oldValueCorrelated && op.Type == operation.Update {
@@ -7033,14 +7094,14 @@ func Validate_WorkerStatus(
 				return // do not proceed
 			}
 			// call the type's validation function
-			errs = append(errs, Validate_ActorAssignment(ctx, op, fldPath, obj, oldObj)...)
+			errs = append(errs, Validate_WorkerCapacity(ctx, op, fldPath, obj, oldObj)...)
 			return
 		}
 		oldVal := safe.Field(oldObj,
-			func(oldObj *ateapipb.WorkerStatus) *ateapipb.ActorAssignment {
-				return oldObj.Assignment
+			func(oldObj *ateapipb.WorkerStatus) *ateapipb.WorkerCapacity {
+				return oldObj.Allocated
 			})
-		errs = append(errs, fn(fldPath.Child("assignment"), obj.Assignment, oldVal, oldObj != nil)...)
+		errs = append(errs, fn(fldPath.Child("allocated"), obj.Allocated, oldVal, oldObj != nil)...)
 	}
 
 	return errs
