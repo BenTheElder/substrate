@@ -26,6 +26,7 @@ import (
 	"path"
 	"time"
 
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/ateletauth"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/controlapi"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/workercache"
@@ -37,8 +38,6 @@ import (
 	"github.com/agent-substrate/substrate/internal/substratex509"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 	"k8s.io/apimachinery/pkg/api/operation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -73,19 +72,7 @@ func New(actorIdentityJWTIssuer string, actorIDJWTPool localjwtauthority.Pool, a
 	}
 }
 
-// The SPIFFE identity that atelet client certs carry, as minted by the
-// podidentity signer (cmd/podcertcontroller/internal/podidentitysigner).
-//
-// These mirror the constants the atelet dialer verifies against in
-// cmd/ateapi/internal/controlapi/dialer.go. They are duplicated rather than
-// imported so that this package does not depend on controlapi for three
-// strings; if a third pkg that need these constants appears, they should move to a shared package.
-const (
-	ateletTrustDomain        = "cluster.local"
-	ateletNamespace          = "ate-system"
-	ateletSA                 = "atelet"
-	actorCertificateLifetime = time.Hour
-)
+const actorCertificateLifetime = time.Hour
 
 func (s *Server) MintJWT(ctx context.Context, req *ateapipb.MintJWTRequest) (*ateapipb.MintJWTResponse, error) {
 	caller, ok := principal.FromContext(ctx)
@@ -136,7 +123,7 @@ func (s *Server) MintJWT(ctx context.Context, req *ateapipb.MintJWTRequest) (*at
 }
 
 func (s *Server) MintCert(ctx context.Context, req *ateapipb.MintCertRequest) (*ateapipb.MintCertResponse, error) {
-	caller, err := authenticateAtelet(ctx)
+	caller, err := ateletauth.Authenticate(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -218,62 +205,6 @@ func (s *Server) MintCert(ctx context.Context, req *ateapipb.MintCertRequest) (*
 	}, nil
 }
 
-// ateletCaller is the verified identity of an atelet requesting an actor credential.
-type ateletCaller struct {
-	podName  string
-	nodeName string
-}
-
-// authenticateAtelet verifies that the RPC arrived over mTLS from an atelet,
-// and returns the identity that atelet's certificate asserts.
-//
-// The certificate chain is already verified by the TLS layer against the
-// pod-identity CA (see buildServerCreds in cmd/ateapi/main.go), so the
-// extensions read here are trustworthy: only the pod-identity signer can mint
-// a certificate carrying a given pod's node name.
-func authenticateAtelet(ctx context.Context) (*ateletCaller, error) {
-	p, ok := peer.FromContext(ctx)
-	if !ok {
-		return nil, status.Errorf(codes.Unauthenticated, "no peer transport information found")
-	}
-
-	tlsInfo, ok := p.AuthInfo.(credentials.TLSInfo)
-	if !ok {
-		return nil, status.Errorf(codes.Unauthenticated, "unexpected peer transport credentials")
-	}
-
-	if len(tlsInfo.State.PeerCertificates) == 0 {
-		return nil, status.Errorf(codes.Unauthenticated, "could not verify peer certificate")
-	}
-	leaf := tlsInfo.State.PeerCertificates[0]
-
-	// Only atelet may mint actor credentials. Everything else with a valid
-	// pod-identity certificate — including the actor workloads themselves — is
-	// rejected here.
-	expected := (&url.URL{
-		Scheme: "spiffe",
-		Host:   ateletTrustDomain,
-		Path:   path.Join("ns", ateletNamespace, "sa", ateletSA),
-	}).String()
-	if len(leaf.URIs) == 0 || leaf.URIs[0].String() != expected {
-		slog.WarnContext(ctx, "ActorIdentity denied: caller is not atelet",
-			slog.Any("uris", leaf.URIs), slog.String("expected", expected))
-		return nil, status.Errorf(codes.PermissionDenied, "caller is not permitted to mint actor credentials")
-	}
-
-	identity, err := substratex509.PodIdentityFromCertificate(leaf)
-	if err != nil {
-		slog.WarnContext(ctx, "ActorIdentity denied: malformed PodIdentity extension", slog.Any("err", err))
-		return nil, status.Errorf(codes.PermissionDenied, "caller is not permitted to mint actor credentials")
-	}
-	if identity == nil {
-		slog.WarnContext(ctx, "ActorIdentity denied: certificate has no PodIdentity extension")
-		return nil, status.Errorf(codes.PermissionDenied, "caller is not permitted to mint actor credentials")
-	}
-
-	return &ateletCaller{podName: identity.PodName, nodeName: identity.NodeName}, nil
-}
-
 func validateMintJWTRequest(ctx context.Context, req *ateapipb.MintJWTRequest) field.ErrorList {
 	// Call the generated validation.
 	op := operation.Operation{Type: operation.Create}
@@ -292,7 +223,7 @@ func validateMintCertRequest(ctx context.Context, req *ateapipb.MintCertRequest)
 // The worker is resolved from cache first (hot path), but cache misses and
 // denials fall back to the authoritative store to handle watch-delivery lag
 // right after ResumeActor.
-func (s *Server) authorizeActor(ctx context.Context, caller *ateletCaller, req *ateapipb.MintCertRequest) (*ateapipb.Actor, resources.ActorRef, error) {
+func (s *Server) authorizeActor(ctx context.Context, caller *ateletauth.Caller, req *ateapipb.MintCertRequest) (*ateapipb.Actor, resources.ActorRef, error) {
 	reason := "worker not found"
 	worker, err := s.workers.Worker(req.GetWorker().GetName())
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -337,9 +268,9 @@ func (s *Server) authorizeActor(ctx context.Context, caller *ateletCaller, req *
 // denyMint logs the internal reason and returns a uniform PermissionDenied.
 // Denials are deliberately indistinguishable from each other: a caller that
 // is not entitled to a worker should not learn its assignment.
-func (s *Server) denyMint(ctx context.Context, caller *ateletCaller, req *ateapipb.MintCertRequest, reason string, args ...any) error {
+func (s *Server) denyMint(ctx context.Context, caller *ateletauth.Caller, req *ateapipb.MintCertRequest, reason string, args ...any) error {
 	slog.WarnContext(ctx, "ActorIdentity denied: "+reason,
-		append([]any{slog.String("worker", req.GetWorker().GetName()), slog.String("callerPod", caller.podName), slog.String("callerNode", caller.nodeName)}, args...)...)
+		append([]any{slog.String("worker", req.GetWorker().GetName()), slog.String("callerPod", caller.PodName), slog.String("callerNode", caller.NodeName)}, args...)...)
 	return status.Error(codes.PermissionDenied, "caller is not permitted to mint credentials for this actor")
 }
 
@@ -347,8 +278,8 @@ var errAssignmentMismatch = errors.New("assignment mismatch")
 
 // authorizeWithWorker returns errAssignmentMismatch and a reason string if the authorization failed
 // due to an assignment mismatch, indicating the caller may want to refetch the worker and retry.
-func (s *Server) authorizeWithWorker(ctx context.Context, worker *ateapipb.Worker, caller *ateletCaller, req *ateapipb.MintCertRequest) (*ateapipb.Actor, resources.ActorRef, string, error) {
-	if worker.GetNodeName() != caller.nodeName {
+func (s *Server) authorizeWithWorker(ctx context.Context, worker *ateapipb.Worker, caller *ateletauth.Caller, req *ateapipb.MintCertRequest) (*ateapipb.Actor, resources.ActorRef, string, error) {
+	if worker.GetNodeName() != caller.NodeName {
 		return nil, resources.ActorRef{}, "worker is hosted on a different node", errAssignmentMismatch
 	}
 

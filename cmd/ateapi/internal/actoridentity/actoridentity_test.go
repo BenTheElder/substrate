@@ -18,16 +18,16 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"fmt"
-	"math/big"
-	"net/url"
 	"path"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/ateletauth"
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/ateletauth/ateletauthtest"
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store/storetest"
@@ -39,8 +39,6 @@ import (
 	"github.com/agent-substrate/substrate/internal/substratex509"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
@@ -75,73 +73,6 @@ const (
 // populates. Self-signing is sufficient because the code under test reads an
 // already transport-verified peer certificate and never re-validates the chain
 // itself.
-func newTestCert(t *testing.T, spiffePath string, podIdentity *substratex509.PodIdentity) *x509.Certificate {
-	t.Helper()
-
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-
-	template := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "test-caller"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-	}
-	if spiffePath != "" {
-		template.URIs = []*url.URL{{Scheme: "spiffe", Host: ateletTrustDomain, Path: spiffePath}}
-	}
-	if podIdentity != nil {
-		if err := substratex509.AddPodIdentityToCertificate(podIdentity, template); err != nil {
-			t.Fatalf("add pod identity: %v", err)
-		}
-	}
-
-	der, err := x509.CreateCertificate(rand.Reader, template, template, pub, priv)
-	if err != nil {
-		t.Fatalf("create certificate: %v", err)
-	}
-	cert, err := x509.ParseCertificate(der)
-	if err != nil {
-		t.Fatalf("parse certificate: %v", err)
-	}
-	return cert
-}
-
-// podIdentityOn returns a well-formed atelet PodIdentity pinned to nodeName.
-func podIdentityOn(nodeName string) *substratex509.PodIdentity {
-	return &substratex509.PodIdentity{
-		Namespace:          ateletNamespace,
-		ServiceAccountName: ateletSA,
-		ServiceAccountUID:  "sa-uid",
-		PodName:            "atelet-xyz",
-		PodUID:             "pod-uid",
-		NodeName:           nodeName,
-		NodeUID:            "node-uid",
-	}
-}
-
-// ateletCertOn returns the certificate of the atelet running on nodeName.
-func ateletCertOn(t *testing.T, nodeName string) *x509.Certificate {
-	t.Helper()
-	return newTestCert(t, path.Join("ns", ateletNamespace, "sa", ateletSA), podIdentityOn(nodeName))
-}
-
-// ctxWithCert injects cert as the transport-authenticated peer certificate.
-// A nil cert yields a context with no peer information at all, which is what
-// an unauthenticated call looks like.
-func ctxWithCert(cert *x509.Certificate) context.Context {
-	ctx := context.Background()
-	if cert == nil {
-		return ctx
-	}
-	return peer.NewContext(ctx, &peer.Peer{
-		AuthInfo: credentials.TLSInfo{
-			State: tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}},
-		},
-	})
-}
 
 // newTestServer returns a Server backed by st, with a freshly generated actor
 // CA pool written to a temp file.
@@ -240,7 +171,7 @@ func TestMintCertReadsThroughStaleWorkerCache(t *testing.T) {
 			}
 
 			srv := newTestServerWithCache(t, st, workers)
-			resp, err := srv.MintCert(ctxWithCert(ateletCertOn(t, testNode)), mintCertRequest(t, actor.GetMetadata().GetUid()))
+			resp, err := srv.MintCert(ateletauthtest.ContextWith(ateletauthtest.CertOn(t, testNode)), mintCertRequest(t, actor.GetMetadata().GetUid()))
 
 			wantCode := codes.PermissionDenied
 			if assignInStore {
@@ -307,7 +238,7 @@ func TestMintCertReadsThroughWorkerCacheMiss(t *testing.T) {
 			}
 
 			srv := newTestServerWithCache(t, st, workers)
-			resp, err := srv.MintCert(ctxWithCert(ateletCertOn(t, testNode)), mintCertRequest(t, actor.GetMetadata().GetUid()))
+			resp, err := srv.MintCert(ateletauthtest.ContextWith(ateletauthtest.CertOn(t, testNode)), mintCertRequest(t, actor.GetMetadata().GetUid()))
 
 			wantCode := codes.PermissionDenied
 			if workerInStore {
@@ -526,32 +457,32 @@ func TestMintCertAuthorization(t *testing.T) {
 		},
 		"caller is not the atelet service account": {
 			cert: func(t *testing.T) *x509.Certificate {
-				id := podIdentityOn(testNode)
+				id := ateletauthtest.PodIdentityOn(testNode)
 				id.ServiceAccountName = "some-workload"
-				return newTestCert(t, path.Join("ns", ateletNamespace, "sa", "some-workload"), id)
+				return ateletauthtest.Cert(t, path.Join("ns", ateletauth.Namespace, "sa", "some-workload"), id)
 			},
 			fixture:  runningOnNode(testNode),
 			wantCode: codes.PermissionDenied,
 		},
 		"caller is an atelet in the wrong namespace": {
 			cert: func(t *testing.T) *x509.Certificate {
-				id := podIdentityOn(testNode)
+				id := ateletauthtest.PodIdentityOn(testNode)
 				id.Namespace = "someone-elses-system"
-				return newTestCert(t, path.Join("ns", "someone-elses-system", "sa", ateletSA), id)
+				return ateletauthtest.Cert(t, path.Join("ns", "someone-elses-system", "sa", ateletauth.ServiceAccount), id)
 			},
 			fixture:  runningOnNode(testNode),
 			wantCode: codes.PermissionDenied,
 		},
 		"certificate carries no SPIFFE URI": {
 			cert: func(t *testing.T) *x509.Certificate {
-				return newTestCert(t, "", podIdentityOn(testNode))
+				return ateletauthtest.Cert(t, "", ateletauthtest.PodIdentityOn(testNode))
 			},
 			fixture:  runningOnNode(testNode),
 			wantCode: codes.PermissionDenied,
 		},
 		"certificate carries no PodIdentity extension": {
 			cert: func(t *testing.T) *x509.Certificate {
-				return newTestCert(t, path.Join("ns", ateletNamespace, "sa", ateletSA), nil)
+				return ateletauthtest.Cert(t, path.Join("ns", ateletauth.Namespace, "sa", ateletauth.ServiceAccount), nil)
 			},
 			fixture:  runningOnNode(testNode),
 			wantCode: codes.PermissionDenied,
@@ -664,7 +595,7 @@ func TestMintCertAuthorization(t *testing.T) {
 			case tc.cert != nil:
 				callerCert = tc.cert(t)
 			default:
-				callerCert = ateletCertOn(t, testNode)
+				callerCert = ateletauthtest.CertOn(t, testNode)
 			}
 
 			actor, err := st.GetActor(ctx, resources.ActorRef{Atespace: testAtespace, Name: testActorName})
@@ -681,7 +612,7 @@ func TestMintCertAuthorization(t *testing.T) {
 			if tc.expectedActorUID != nil {
 				req.ExpectedActorUid = *tc.expectedActorUID
 			}
-			resp, err := srv.MintCert(ctxWithCert(callerCert), req)
+			resp, err := srv.MintCert(ateletauthtest.ContextWith(callerCert), req)
 			if got := status.Code(err); got != tc.wantCode {
 				t.Fatalf("MintCert() code = %v (err = %v), want %v", got, err, tc.wantCode)
 			}
@@ -690,7 +621,7 @@ func TestMintCertAuthorization(t *testing.T) {
 				// message must not vary with why the mint was refused, or a
 				// caller could probe workers it is not entitled to.
 				msg := status.Convert(err).Message()
-				if msg != "caller is not permitted to mint actor credentials" &&
+				if msg != "caller is not permitted" &&
 					msg != "caller is not permitted to mint credentials for this actor" {
 					t.Errorf("MintCert() denial leaks its reason: %q", msg)
 				}
@@ -724,7 +655,7 @@ func TestMintCertRejectsUnsupportedPurpose(t *testing.T) {
 		"unknown":     ateapipb.ActorCertificatePurpose(99),
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := server.MintCert(ctxWithCert(ateletCertOn(t, testNode)), &ateapipb.MintCertRequest{Purpose: purpose})
+			_, err := server.MintCert(ateletauthtest.ContextWith(ateletauthtest.CertOn(t, testNode)), &ateapipb.MintCertRequest{Purpose: purpose})
 			if got := status.Code(err); got != codes.InvalidArgument {
 				t.Fatalf("MintCert() code = %v (err = %v), want %v", got, err, codes.InvalidArgument)
 			}
@@ -752,7 +683,7 @@ func mintCertFor(t *testing.T, request func(actorUID string) *ateapipb.MintCertR
 		t.Fatal("seeded actor has no UID; the store is expected to assign one")
 	}
 
-	resp, err := newTestServer(t, st).MintCert(ctxWithCert(ateletCertOn(t, testNode)), request(actorUID))
+	resp, err := newTestServer(t, st).MintCert(ateletauthtest.ContextWith(ateletauthtest.CertOn(t, testNode)), request(actorUID))
 	if err != nil {
 		return nil, actorUID, err
 	}
@@ -865,7 +796,7 @@ func TestMintCertActorState(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = srv.MintCert(ctxWithCert(ateletCertOn(t, testNode)), mintCertRequest(t, actor.GetMetadata().GetUid()))
+			_, err = srv.MintCert(ateletauthtest.ContextWith(ateletauthtest.CertOn(t, testNode)), mintCertRequest(t, actor.GetMetadata().GetUid()))
 			if got := status.Code(err); got != wantCode {
 				t.Errorf("MintCert() code = %v (err = %v), want %v", got, err, wantCode)
 			}
@@ -900,7 +831,7 @@ func TestMintCertDeniesUnassignedActorWhateverItsState(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = srv.MintCert(ctxWithCert(ateletCertOn(t, testNode)), mintCertRequest(t, actor.GetMetadata().GetUid()))
+			_, err = srv.MintCert(ateletauthtest.ContextWith(ateletauthtest.CertOn(t, testNode)), mintCertRequest(t, actor.GetMetadata().GetUid()))
 			if got := status.Code(err); got != codes.PermissionDenied {
 				t.Errorf("MintCert() code = %v (err = %v), want %v", got, err, codes.PermissionDenied)
 			}
@@ -954,7 +885,7 @@ func TestMintCertAuthorizesBeforeSigning(t *testing.T) {
 	}
 	req := mintCertRequest(t, actor.GetMetadata().GetUid())
 	req.CertificateSigningRequest = []byte("not a CSR")
-	_, err = srv.MintCert(ctxWithCert(ateletCertOn(t, testNode)), req)
+	_, err = srv.MintCert(ateletauthtest.ContextWith(ateletauthtest.CertOn(t, testNode)), req)
 	if got := status.Code(err); got != codes.PermissionDenied {
 		t.Errorf("MintCert() code = %v (err = %v), want %v", got, err, codes.PermissionDenied)
 	}
