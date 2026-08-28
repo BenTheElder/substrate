@@ -49,92 +49,52 @@ func TestWorkerMaxActors(t *testing.T) {
 	}
 }
 
-func TestBindAssignmentTracksAllocation(t *testing.T) {
-	worker := &ateapipb.Worker{}
+// The total moves by one assignment's worth in each direction, and a Worker
+// back to holding nothing carries no allocation at all rather than a zeroed
+// message: emptied and never-filled have to be the same record.
+func TestAddToAllocated(t *testing.T) {
+	var total *ateapipb.WorkerCapacity
+	total = AddToAllocated(total, assignment("a", 1000, 1<<30), +1)
+	total = AddToAllocated(total, assignment("b", 500, 2<<30), +1)
 
-	BindAssignment(worker, assignment("a", 1000, 1<<30))
-	BindAssignment(worker, assignment("b", 500, 2<<30))
-
-	if got, want := len(worker.GetStatus().GetAssignments()), 2; got != want {
-		t.Fatalf("assignments = %d, want %d", got, want)
+	if got, want := total.GetActors(), int32(2); got != want {
+		t.Errorf("actors = %d, want %d", got, want)
 	}
-	allocated := worker.GetStatus().GetAllocated()
-	if got, want := allocated.GetActors(), int32(2); got != want {
-		t.Errorf("allocated.actors = %d, want %d", got, want)
+	if got, want := total.GetCpuMilli(), int64(1500); got != want {
+		t.Errorf("cpu_milli = %d, want %d", got, want)
 	}
-	if got, want := allocated.GetCpuMilli(), int64(1500); got != want {
-		t.Errorf("allocated.cpu_milli = %d, want %d", got, want)
-	}
-	if got, want := allocated.GetMemoryBytes(), int64(3<<30); got != want {
-		t.Errorf("allocated.memory_bytes = %d, want %d", got, want)
-	}
-}
-
-// A claim can be retried for one Actor, and appending would book it against the
-// Worker's capacity twice.
-func TestBindAssignmentReplacesTheSameActor(t *testing.T) {
-	worker := &ateapipb.Worker{}
-	BindAssignment(worker, assignment("a", 1000, 1<<30))
-	BindAssignment(worker, assignment("a", 2000, 1<<30))
-
-	if got, want := len(worker.GetStatus().GetAssignments()), 1; got != want {
-		t.Fatalf("assignments = %d, want %d", got, want)
-	}
-	if got, want := worker.GetStatus().GetAllocated().GetActors(), int32(1); got != want {
-		t.Errorf("allocated.actors = %d, want %d", got, want)
-	}
-	if got, want := worker.GetStatus().GetAllocated().GetCpuMilli(), int64(2000); got != want {
-		t.Errorf("allocated.cpu_milli = %d, want %d after replacement", got, want)
-	}
-}
-
-func TestReleaseAssignment(t *testing.T) {
-	worker := &ateapipb.Worker{}
-	BindAssignment(worker, assignment("a", 1000, 1<<30))
-	BindAssignment(worker, assignment("b", 500, 2<<30))
-
-	if !ReleaseAssignment(worker, "a") {
-		t.Fatal("ReleaseAssignment() = false for an Actor the Worker holds, want true")
-	}
-	if got, want := worker.GetStatus().GetAllocated().GetCpuMilli(), int64(500); got != want {
-		t.Errorf("allocated.cpu_milli = %d, want %d", got, want)
-	}
-	if WorkerAssignmentFor(worker, "a") != nil {
-		t.Error("released Actor is still assigned")
-	}
-	if WorkerAssignmentFor(worker, "b") == nil {
-		t.Error("releasing one Actor dropped another")
+	if got, want := total.GetMemoryBytes(), int64(3<<30); got != want {
+		t.Errorf("memory_bytes = %d, want %d", got, want)
 	}
 
-	// Release runs on paths that retry; the second pass converges rather than
-	// failing.
-	if ReleaseAssignment(worker, "a") {
-		t.Error("ReleaseAssignment() = true for an Actor already released, want false")
+	total = AddToAllocated(total, assignment("b", 500, 2<<30), -1)
+	if got, want := total.GetCpuMilli(), int64(1000); got != want {
+		t.Errorf("cpu_milli = %d after release, want %d", got, want)
 	}
-}
-
-// An idle Worker carries no allocation at all, rather than an all-zero message
-// that says the same thing in more bytes on every record and every event.
-func TestReleasingTheLastAssignmentClearsAllocation(t *testing.T) {
-	worker := &ateapipb.Worker{}
-	BindAssignment(worker, assignment("a", 1000, 1<<30))
-	ReleaseAssignment(worker, "a")
-
-	if got := worker.GetStatus().GetAllocated(); got != nil {
-		t.Errorf("allocated = %v for an idle Worker, want nil", got)
+	if total = AddToAllocated(total, assignment("a", 1000, 1<<30), -1); total != nil {
+		t.Errorf("allocated = %v for a Worker holding nothing, want nil", total)
 	}
 }
 
 // An Actor that declared no limits reserves nothing but still costs a slot.
-func TestAssignmentWithoutResourcesCountsOnlyTheActor(t *testing.T) {
-	worker := &ateapipb.Worker{}
-	BindAssignment(worker, &ateapipb.ActorAssignment{ActorUid: "a"})
-
-	allocated := worker.GetStatus().GetAllocated()
-	if got, want := allocated.GetActors(), int32(1); got != want {
-		t.Errorf("allocated.actors = %d, want %d", got, want)
+func TestAddToAllocatedCountsAnActorWithoutResources(t *testing.T) {
+	total := AddToAllocated(nil, &ateapipb.ActorAssignment{ActorUid: "a"}, +1)
+	if got, want := total.GetActors(), int32(1); got != want {
+		t.Errorf("actors = %d, want %d", got, want)
 	}
-	if got := allocated.GetCpuMilli(); got != 0 {
-		t.Errorf("allocated.cpu_milli = %d, want 0", got)
+	if got := total.GetCpuMilli(); got != 0 {
+		t.Errorf("cpu_milli = %d, want 0", got)
+	}
+}
+
+// SumAllocated rebuilds what AddToAllocated adjusts; the contract tests hold the
+// two to each other, so they have to agree on the empty case as well.
+func TestSumAllocated(t *testing.T) {
+	if got := SumAllocated(nil); got != nil {
+		t.Errorf("SumAllocated(nil) = %v, want nil", got)
+	}
+	got := SumAllocated([]*ateapipb.ActorAssignment{assignment("a", 1000, 1<<30), assignment("b", 500, 0)})
+	if got.GetActors() != 2 || got.GetCpuMilli() != 1500 || got.GetMemoryBytes() != 1<<30 {
+		t.Errorf("SumAllocated() = %v, want 2 actors / 1500 milli / 1GiB", got)
 	}
 }

@@ -23,7 +23,6 @@ import (
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/workercache"
-	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -114,19 +113,19 @@ func TestCache_UpdatedEvent_NewerVersionApplied(t *testing.T) {
 	}
 
 	updated := makeWorker("ns", "pod1", 2)
-	resources.BindAssignment(updated, &ateapipb.ActorAssignment{
+	updated.Status.Assignments = []*ateapipb.ActorAssignment{{
 		Actor:    &ateapipb.ObjectRef{Atespace: "team-a", Name: "actor-1"},
 		ActorUid: "actor-1-uid",
-	})
+	}}
 	fs.send(store.WorkerEvent{Type: store.WorkerEventUpdated, Worker: updated})
 
 	eventually(t, func() bool {
 		workers, err := c.Workers()
-		if err != nil || len(workers) != 1 {
+		if err != nil || len(workers) != 1 || len(workers[0].GetStatus().GetAssignments()) != 1 {
 			return false
 		}
-		wass := resources.WorkerAssignmentFor(workers[0], "actor-1-uid")
-		return wass.GetActor().GetName() == "actor-1"
+		wass := workers[0].GetStatus().GetAssignments()[0]
+		return wass.Actor.Name == "actor-1" && wass.ActorUid == "actor-1-uid"
 	}, 2*time.Second)
 
 	got, _ := c.Workers()
@@ -147,10 +146,10 @@ func TestCache_UpdatedEvent_OlderVersionIgnored(t *testing.T) {
 
 	// Send a stale update followed by a sentinel we can detect.
 	stale := makeWorker("ns", "pod1", 3)
-	resources.BindAssignment(stale, &ateapipb.ActorAssignment{
+	stale.Status.Assignments = []*ateapipb.ActorAssignment{{
 		Actor:    &ateapipb.ObjectRef{Atespace: "team-a", Name: "stale-actor"},
 		ActorUid: "stale-actor-uid",
-	})
+	}}
 	fs.send(store.WorkerEvent{Type: store.WorkerEventUpdated, Worker: stale})
 
 	sentinel := makeWorker("ns", "pod2", 1)

@@ -127,8 +127,15 @@ func (w *ActorWorkflow) ensureAteletTerminated(ctx context.Context, actorRef res
 			}
 			return fmt.Errorf("while checking worker assignment: %w", err)
 		}
-		if resources.WorkerAssignmentFor(worker, actor.GetMetadata().GetUid()) == nil {
-			slog.InfoContext(ctx, "worker is no longer hosting this actor, skipping atelet terminate request",
+		// Ask whether the worker still HOSTS this actor, not whether its one
+		// assignment happens to be this actor: a worker hosting several is the
+		// ordinary case, and the others are none of this delete's business.
+		hosted, err := workerHostsActor(ctx, w.store, worker.GetMetadata().GetName(), actor.GetMetadata().GetUid())
+		if err != nil {
+			return err
+		}
+		if !hosted {
+			slog.InfoContext(ctx, "worker is no longer assigned to this actor, skipping atelet terminate request",
 				slog.String("worker", workerName),
 				slog.Any("actor", actorRef))
 			return nil
@@ -227,9 +234,14 @@ func (w *ActorWorkflow) ensureWorkerReleased(ctx context.Context, actorRef resou
 	}
 
 	if latestActor.GetStatus().GetWorkerAssignment() != nil {
-		if _, err := releaseWorker(ctx, w.store, latestActor); err != nil {
+		_, released, err := releaseWorker(ctx, w.store, latestActor)
+		if err != nil {
 			return nil, err
 		}
+		// Hand the freed worker straight to the cache: a resume can follow
+		// immediately, and until the change event lands the cache still counts
+		// this actor against the worker.
+		w.workerCache.Observe(released)
 
 		latestActor, err = w.store.GetActor(ctx, actorRef)
 		if err != nil {

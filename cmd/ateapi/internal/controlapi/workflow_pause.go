@@ -235,20 +235,20 @@ func (w *ActorWorkflow) ensurePausedFinalized(ctx context.Context, actorRef reso
 			slog.Warn("Worker already gone during finalize pause, skipping release", "worker", assignment.GetWorkerPod())
 		} else {
 			nodeName = worker.GetNodeName()
-			// Only free it if it still belongs to us
-
-			if resources.WorkerAssignmentFor(worker, latestActor.GetMetadata().GetUid()) != nil {
-				_, err := w.store.UpdateWorker(ctx, worker.GetMetadata().GetName(), store.PreconditionFrom(worker), func(toUpdate *ateapipb.Worker) error {
-					resources.ReleaseAssignment(toUpdate, latestActor.GetMetadata().GetUid())
-					return nil
-				})
-				if err != nil {
-					if errors.Is(err, store.ErrVersionConflict) {
-						return nil, status.Error(codes.Aborted, "concurrent update conflict, please retry")
-					}
-					return nil, err
+			// Drop just this actor's assignment; any other actors the worker
+			// hosts keep theirs.
+			released, err := w.store.ReleaseActorFromWorker(ctx, worker.GetMetadata().GetName(),
+				worker.GetMetadata().GetVersion(), latestActor.GetMetadata().GetUid())
+			if err != nil {
+				if errors.Is(err, store.ErrVersionConflict) {
+					return nil, status.Error(codes.Aborted, "concurrent update conflict, please retry")
 				}
+				return nil, err
 			}
+			// Hand the freed worker straight to the cache: a resume can follow
+			// immediately, and until the change event lands the cache still
+			// counts this actor against the worker.
+			w.workerCache.Observe(released)
 		}
 
 		// 2. Clear the actor's assignment, now that the worker is freed

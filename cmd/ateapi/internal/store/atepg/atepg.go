@@ -1282,6 +1282,7 @@ func (p *Persistence) CreateWorker(ctx context.Context, worker *ateapipb.Worker)
 	dbWorker := proto.Clone(worker).(*ateapipb.Worker)
 	// Workers are global-scoped, so the atespace is always empty.
 	dbWorker.Metadata = newCreateMetadata("", worker.GetMetadata().GetName())
+	store.ClearAssignments(dbWorker)
 
 	protoBytes, err := proto.Marshal(dbWorker)
 	if err != nil {
@@ -1375,6 +1376,7 @@ func (p *Persistence) UpdateWorker(ctx context.Context, name string, preconditio
 		// Stored metadata is authoritative; discard any metadata edits made by
 		// the closure and derive the next revision from the row we locked.
 		dbWorker.Metadata = newUpdateMetadata(workerBeforeMutation.GetMetadata())
+		store.ClearAssignments(dbWorker)
 
 		protoBytes, err := proto.Marshal(dbWorker)
 		if err != nil {
@@ -1416,6 +1418,233 @@ func (p *Persistence) DeleteWorker(ctx context.Context, name string, pre store.D
 		}
 		return deleted, nil
 	})
+}
+
+// Worker assignments and status.allocated are updated in one transaction.
+
+// lockWorkerForAssignment serializes updates to a Worker's allocation.
+func lockWorkerForAssignment(ctx context.Context, tx pgx.Tx, name string, expectedVersion int64) (*ateapipb.Worker, error) {
+	var protoBytes []byte
+	err := tx.QueryRow(ctx, `SELECT proto FROM workers WHERE name = $1 FOR UPDATE`, name).Scan(&protoBytes)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, store.ErrNotFound
+		}
+		return nil, fmt.Errorf("locking worker %s: %w", name, err)
+	}
+	worker := &ateapipb.Worker{}
+	if err := proto.Unmarshal(protoBytes, worker); err != nil {
+		return nil, fmt.Errorf("unmarshaling worker: %w", err)
+	}
+	if worker.GetMetadata().GetVersion() != expectedVersion {
+		return nil, store.ErrVersionConflict
+	}
+	return worker, nil
+}
+
+// saveWorkerAfterAssignment writes back a worker whose allocation just moved,
+// at the next version.
+func saveWorkerAfterAssignment(ctx context.Context, tx pgx.Tx, worker *ateapipb.Worker) error {
+	worker.Metadata = newUpdateMetadata(worker.GetMetadata())
+	protoBytes, err := proto.Marshal(worker)
+	if err != nil {
+		return fmt.Errorf("marshaling worker: %w", err)
+	}
+	_, err = tx.Exec(ctx, `UPDATE workers SET version = $1, proto = $2 WHERE name = $3`,
+		worker.GetMetadata().GetVersion(), protoBytes, worker.GetMetadata().GetName())
+	if err != nil {
+		return fmt.Errorf("updating worker %s: %w", worker.GetMetadata().GetName(), err)
+	}
+	return nil
+}
+
+func (p *Persistence) BindActorToWorker(ctx context.Context, workerName string, expectedVersion int64, assignment *ateapipb.ActorAssignment) error {
+	actorUID := assignment.GetActorUid()
+	if actorUID == "" {
+		return fmt.Errorf("binding an assignment with no actor_uid to worker %s", workerName)
+	}
+	assignmentBytes, err := proto.Marshal(assignment)
+	if err != nil {
+		return fmt.Errorf("marshaling assignment: %w", err)
+	}
+
+	return p.writeAndAppendEventFor(ctx, store.WorkerEventUpdated, func(ctx context.Context, tx pgx.Tx) (*ateapipb.Worker, error) {
+		worker, err := lockWorkerForAssignment(ctx, tx, workerName, expectedVersion)
+		if err != nil {
+			return nil, err
+		}
+		if worker.Status == nil {
+			worker.Status = &ateapipb.WorkerStatus{}
+		}
+
+		// The ordinary bind is a first bind, and the insert landing is proof
+		// nothing was there to account for: one statement, no read.
+		//
+		// Deciding it on the write is also what makes it correct. A read cannot
+		// see a claim that commits after it, so two claims for one Actor onto
+		// two Workers would each find nothing and each add one, leaving the
+		// loser counting an Actor it does not host. The insert cannot miss it.
+		tag, err := tx.Exec(ctx, `
+			INSERT INTO worker_assignments (actor_uid, worker_name, proto)
+			VALUES ($1, $2, $3)
+			ON CONFLICT (actor_uid) DO NOTHING`,
+			actorUID, workerName, assignmentBytes)
+		if err != nil {
+			return nil, fmt.Errorf("binding actor %s to worker %s: %w", actorUID, workerName, err)
+		}
+		if tag.RowsAffected() == 1 {
+			worker.Status.Allocated = resources.AddToAllocated(worker.Status.Allocated, assignment, +1)
+			if err := saveWorkerAfterAssignment(ctx, tx, worker); err != nil {
+				return nil, err
+			}
+			return worker, nil
+		}
+
+		// Something is already bound to this Actor. Reading it costs a second
+		// statement, which is why it is here and not above: this is the
+		// retried claim, not the common one.
+		previous, previousWorker, err := getAssignmentRow(ctx, tx, actorUID)
+		if err != nil {
+			return nil, err
+		}
+		if previousWorker != workerName {
+			return nil, fmt.Errorf("actor %s is already hosted by worker %s", actorUID, previousWorker)
+		}
+
+		// A replacement subtracts before it adds: the Actor was already
+		// counted, and its declared size may have changed since.
+		worker.Status.Allocated = resources.AddToAllocated(worker.Status.Allocated, previous, -1)
+		worker.Status.Allocated = resources.AddToAllocated(worker.Status.Allocated, assignment, +1)
+
+		// Guarded on the worker it was read against, so a claim that moves the
+		// Actor elsewhere in between is refused rather than overwritten.
+		rebind, err := tx.Exec(ctx, `
+			UPDATE worker_assignments SET proto = $3
+			WHERE actor_uid = $1 AND worker_name = $2`,
+			actorUID, workerName, assignmentBytes)
+		if err != nil {
+			return nil, fmt.Errorf("rebinding actor %s on worker %s: %w", actorUID, workerName, err)
+		}
+		if rebind.RowsAffected() != 1 {
+			return nil, fmt.Errorf("%w: actor %s left worker %s while it was being rebound", store.ErrVersionConflict, actorUID, workerName)
+		}
+		if err := saveWorkerAfterAssignment(ctx, tx, worker); err != nil {
+			return nil, err
+		}
+		return worker, nil
+	})
+}
+
+func (p *Persistence) ReleaseActorFromWorker(ctx context.Context, workerName string, expectedVersion int64, actorUID string) (*ateapipb.Worker, error) {
+	var released *ateapipb.Worker
+	err := p.writeAndAppendEventFor(ctx, store.WorkerEventUpdated, func(ctx context.Context, tx pgx.Tx) (*ateapipb.Worker, error) {
+		released = nil
+		worker, err := lockWorkerForAssignment(ctx, tx, workerName, expectedVersion)
+		if err != nil {
+			return nil, err
+		}
+
+		var protoBytes []byte
+		err = tx.QueryRow(ctx, `
+			DELETE FROM worker_assignments
+			WHERE actor_uid = $1 AND worker_name = $2
+			RETURNING proto`, actorUID, workerName).Scan(&protoBytes)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil // nothing to release, and so nothing to announce
+		}
+		if err != nil {
+			return nil, fmt.Errorf("releasing actor %s from worker %s: %w", actorUID, workerName, err)
+		}
+		assignment := &ateapipb.ActorAssignment{}
+		if err := proto.Unmarshal(protoBytes, assignment); err != nil {
+			return nil, fmt.Errorf("unmarshaling released assignment: %w", err)
+		}
+
+		if worker.Status == nil {
+			worker.Status = &ateapipb.WorkerStatus{}
+		}
+		worker.Status.Allocated = resources.AddToAllocated(worker.Status.Allocated, assignment, -1)
+		if err := saveWorkerAfterAssignment(ctx, tx, worker); err != nil {
+			return nil, err
+		}
+		released = worker
+		return worker, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return released, nil
+}
+
+// getAssignmentRow reads the assignment for actorUID and names the worker
+// holding it.
+func getAssignmentRow(ctx context.Context, q querier, actorUID string) (*ateapipb.ActorAssignment, string, error) {
+	var (
+		protoBytes []byte
+		workerName string
+	)
+	err := q.QueryRow(ctx, `SELECT proto, worker_name FROM worker_assignments WHERE actor_uid = $1`, actorUID).
+		Scan(&protoBytes, &workerName)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, "", store.ErrNotFound
+		}
+		return nil, "", fmt.Errorf("getting assignment for actor %s: %w", actorUID, err)
+	}
+	assignment := &ateapipb.ActorAssignment{}
+	if err := proto.Unmarshal(protoBytes, assignment); err != nil {
+		return nil, "", fmt.Errorf("unmarshaling assignment: %w", err)
+	}
+	return assignment, workerName, nil
+}
+
+func (p *Persistence) GetWorkerAssignment(ctx context.Context, workerName, actorUID string) (*ateapipb.ActorAssignment, error) {
+	assignment, holder, err := getAssignmentRow(ctx, p.pool, actorUID)
+	if err != nil {
+		return nil, err
+	}
+	if holder != workerName {
+		return nil, store.ErrNotFound
+	}
+	return assignment, nil
+}
+
+func (p *Persistence) ListWorkerAssignments(ctx context.Context, workerName string) ([]*ateapipb.ActorAssignment, error) {
+	rows, err := p.pool.Query(ctx, `
+		SELECT proto FROM worker_assignments WHERE worker_name = $1 ORDER BY actor_uid`, workerName)
+	if err != nil {
+		return nil, fmt.Errorf("listing assignments of worker %s: %w", workerName, err)
+	}
+	defer rows.Close()
+
+	var assignments []*ateapipb.ActorAssignment
+	for rows.Next() {
+		var protoBytes []byte
+		if err := rows.Scan(&protoBytes); err != nil {
+			return nil, fmt.Errorf("scanning assignment of worker %s: %w", workerName, err)
+		}
+		assignment := &ateapipb.ActorAssignment{}
+		if err := proto.Unmarshal(protoBytes, assignment); err != nil {
+			return nil, fmt.Errorf("unmarshaling assignment: %w", err)
+		}
+		assignments = append(assignments, assignment)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("listing assignments of worker %s: %w", workerName, err)
+	}
+	return assignments, nil
+}
+
+func (p *Persistence) FindWorkerHostingActor(ctx context.Context, actorUID string) (string, error) {
+	var workerName string
+	err := p.pool.QueryRow(ctx, `SELECT worker_name FROM worker_assignments WHERE actor_uid = $1`, actorUID).Scan(&workerName)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", store.ErrNotFound
+		}
+		return "", fmt.Errorf("finding the worker hosting actor %s: %w", actorUID, err)
+	}
+	return workerName, nil
 }
 
 func (p *Persistence) ListWorkers(ctx context.Context, opts store.ListOptions) (store.ListResponse[*ateapipb.Worker], error) {
@@ -1626,7 +1855,7 @@ func (p *Persistence) releaseLease(ctx context.Context, key, token string) error
 // --- Debug ---
 
 func (p *Persistence) DebugClearAll(ctx context.Context) error {
-	if _, err := p.pool.Exec(ctx, `TRUNCATE atespaces, actors, actor_egress_policies, actor_templates, actor_snapshots, actor_snapshot_tags, workers, leases, worker_outbox, worker_outbox_trim`); err != nil {
+	if _, err := p.pool.Exec(ctx, `TRUNCATE atespaces, actors, actor_egress_policies, actor_templates, actor_snapshots, actor_snapshot_tags, workers, worker_assignments, leases, worker_outbox, worker_outbox_trim`); err != nil {
 		return fmt.Errorf("truncating tables: %w", err)
 	}
 	return nil

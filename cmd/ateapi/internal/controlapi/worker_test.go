@@ -16,12 +16,12 @@ package controlapi
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"testing"
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store/storetest"
-	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/grpc/codes"
@@ -64,11 +64,16 @@ func newAPIAssignment(actorUID string) *ateapipb.ActorAssignment {
 // newWorkerAPIService returns a service backed by a real store, which is what
 // makes the compare-and-set assertions below meaningful — a fake would decide
 // the outcome the test is trying to observe.
+// impl is a real ServiceImpl rather than the store itself, as main wires it:
+// the service layer is where a read composes the Worker with records kept
+// outside it, so a test that hands RPCService the bare store silently skips
+// that and reports whatever the store row happens to hold.
 func newWorkerAPIService(t *testing.T) (*RPCService, store.Interface) {
 	t.Helper()
 	persistence, cleanup := storetest.SetupTestStore(t)
 	t.Cleanup(cleanup)
-	return &RPCService{impl: persistence, workerWorkflow: NewWorkerWorkflow(persistence)}, persistence
+	impl := newServiceImpl(persistence, nil, nil)
+	return &RPCService{impl: impl, workerWorkflow: NewWorkerWorkflow(persistence)}, persistence
 }
 
 // seedAPIWorker registers a worker directly through the store and returns it as
@@ -94,12 +99,12 @@ func assignAPIWorker(t *testing.T, ctx context.Context, persistence store.Interf
 	if err != nil {
 		t.Fatalf("getting worker %s to assign: %v", name, err)
 	}
-	assigned, err := persistence.UpdateWorker(ctx, name, store.PreconditionFrom(observed), func(toUpdate *ateapipb.Worker) error {
-		resources.BindAssignment(toUpdate, newAPIAssignment(actorUID))
-		return nil
-	})
-	if err != nil {
+	if err := persistence.BindActorToWorker(ctx, name, observed.GetMetadata().GetVersion(), newAPIAssignment(actorUID)); err != nil {
 		t.Fatalf("assigning worker %s: %v", name, err)
+	}
+	assigned, err := persistence.GetWorker(ctx, name)
+	if err != nil {
+		t.Fatalf("re-reading worker %s after assigning: %v", name, err)
 	}
 	return assigned
 }
@@ -157,6 +162,72 @@ func TestGetWorker(t *testing.T) {
 	}
 	if diff := cmp.Diff(want, got, protocmp.Transform()); diff != "" {
 		t.Errorf("GetWorker() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// The assignments are their own records, so GetWorker is what puts them back on
+// the Worker it returns. Without this the field is structurally always empty and
+// a Worker hosting a crowd is indistinguishable from an idle one.
+func TestGetWorker_ReportsAssignments(t *testing.T) {
+	ctx := context.Background()
+	svc, persistence := newWorkerAPIService(t)
+	seedAPIWorker(t, ctx, persistence, newAPIWorker(apiWorkerName))
+	assignAPIWorker(t, ctx, persistence, apiWorkerName, "actor-uid-1")
+	assignAPIWorker(t, ctx, persistence, apiWorkerName, "actor-uid-2")
+
+	got, err := svc.GetWorker(ctx, &ateapipb.GetWorkerRequest{Worker: workerRef(apiWorkerName)})
+	if err != nil {
+		t.Fatalf("GetWorker() failed: %v", err)
+	}
+	var uids []string
+	for _, a := range got.GetStatus().GetAssignments() {
+		uids = append(uids, a.GetActorUid())
+	}
+	sort.Strings(uids)
+	if diff := cmp.Diff([]string{"actor-uid-1", "actor-uid-2"}, uids); diff != "" {
+		t.Errorf("GetWorker() assignments mismatch (-want +got):\n%s", diff)
+	}
+
+	// allocated is a moved total kept alongside them, so the two must agree.
+	if got.GetStatus().GetAllocated() == nil {
+		t.Error("allocated = nil, want the total of both assignments")
+	}
+}
+
+// ListWorkers stays flat however full its Workers are: occupancy is reported
+// through status.allocated, not by carrying every assignment on every Worker.
+func TestListWorkers_OmitsAssignments(t *testing.T) {
+	ctx := context.Background()
+	svc, persistence := newWorkerAPIService(t)
+	seedAPIWorker(t, ctx, persistence, newAPIWorker(apiWorkerName))
+	assignAPIWorker(t, ctx, persistence, apiWorkerName, "actor-uid-1")
+
+	page, err := svc.ListWorkers(ctx, &ateapipb.ListWorkersRequest{})
+	if err != nil {
+		t.Fatalf("ListWorkers() failed: %v", err)
+	}
+	for _, w := range page.GetWorkers() {
+		if got := w.GetStatus().GetAssignments(); len(got) != 0 {
+			t.Errorf("worker %s carried %d assignments, want none", w.GetMetadata().GetName(), len(got))
+		}
+	}
+}
+
+// Capacity is the Worker's own and may move over its lifetime; only clearing it
+// is refused (see TestUpdateWorker_Errors/capacity_omitted).
+func TestUpdateWorker_CapacityChanges(t *testing.T) {
+	ctx := context.Background()
+	svc, persistence := newWorkerAPIService(t)
+	seeded := seedAPIWorker(t, ctx, persistence, newAPIWorker(apiWorkerName))
+
+	got, err := svc.UpdateWorker(ctx, &ateapipb.UpdateWorkerRequest{
+		Worker: updateFrom(seeded, func(w *ateapipb.Worker) { w.Capacity.Actors = 4094 }),
+	})
+	if err != nil {
+		t.Fatalf("UpdateWorker() raising the actor ceiling failed: %v", err)
+	}
+	if got.GetCapacity().GetActors() != 4094 {
+		t.Errorf("capacity.actors = %d, want 4094", got.GetCapacity().GetActors())
 	}
 }
 
@@ -436,10 +507,12 @@ func TestUpdateWorker_Errors(t *testing.T) {
 		{"ip changed", func(w *ateapipb.Worker) { w.Ip = "10.9.9.9" }, codes.InvalidArgument},
 		{"worker_pod changed", func(w *ateapipb.Worker) { w.WorkerPod = "worker-pod-2" }, codes.InvalidArgument},
 		{"node_name changed", func(w *ateapipb.Worker) { w.NodeName = "node-2" }, codes.InvalidArgument},
+		// capacity is deliberately absent here: it may change (the pool's actor
+		// ceiling moves, a pod can be resized, a Worker may report its own).
+		// TestUpdateWorker_CapacityChanges covers that.
+		//
 		// And immutable fields dropped, which a replacement update reads as a
 		// request to clear them. Rejected rather than silently applied.
-		// Capacity is here for the same reason even though it is not immutable:
-		// losing it is still not something an update may ask for.
 		{"ip omitted", func(w *ateapipb.Worker) { w.Ip = "" }, codes.InvalidArgument},
 		{"capacity omitted", func(w *ateapipb.Worker) { w.Capacity = nil }, codes.InvalidArgument},
 	}
@@ -454,30 +527,6 @@ func TestUpdateWorker_Errors(t *testing.T) {
 				t.Errorf("UpdateWorker() code = %v (err %v), want %v", got, err, tc.want)
 			}
 		})
-	}
-}
-
-// Capacity is the one non-identity field an update may change: a pod can be
-// resized, and a worker reports the actor ceiling only it can observe.
-func TestUpdateWorker_CapacityChanges(t *testing.T) {
-	ctx := context.Background()
-	svc, persistence := newWorkerAPIService(t)
-	seeded := seedAPIWorker(t, ctx, persistence, newAPIWorker(apiWorkerName))
-
-	updated, err := svc.UpdateWorker(ctx, &ateapipb.UpdateWorkerRequest{
-		Worker: updateFrom(seeded, func(w *ateapipb.Worker) {
-			w.Capacity.CpuMilli = 4000
-			w.Capacity.Actors = 4094
-		}),
-	})
-	if err != nil {
-		t.Fatalf("UpdateWorker() changing capacity failed: %v", err)
-	}
-	if got, want := updated.GetCapacity().GetCpuMilli(), int64(4000); got != want {
-		t.Errorf("capacity.cpu_milli = %d, want %d", got, want)
-	}
-	if got, want := updated.GetCapacity().GetActors(), int32(4094); got != want {
-		t.Errorf("capacity.actors = %d, want %d", got, want)
 	}
 }
 
@@ -533,6 +582,24 @@ func TestDeleteWorker_Absent(t *testing.T) {
 	_, err := svc.DeleteWorker(ctx, &ateapipb.DeleteWorkerRequest{Worker: workerRef(apiWorkerName)})
 	if got := status.Code(err); got != codes.NotFound {
 		t.Errorf("DeleteWorker() code = %v (err %v), want %v", got, err, codes.NotFound)
+	}
+}
+
+// An assigned worker deletes like any other: the delete does not cascade, and
+// an Actor pointing at a Worker that is gone is an expected steady state.
+func TestDeleteWorker_AssignedWorkerDeletesAnyway(t *testing.T) {
+	ctx := context.Background()
+	svc, persistence := newWorkerAPIService(t)
+	seedAPIWorker(t, ctx, persistence, newAPIWorker(apiWorkerName))
+	assignAPIWorker(t, ctx, persistence, apiWorkerName, "actor-uid-1")
+
+	got, err := svc.DeleteWorker(ctx, &ateapipb.DeleteWorkerRequest{Worker: workerRef(apiWorkerName)})
+	if err != nil {
+		t.Fatalf("DeleteWorker() failed: %v", err)
+	}
+	// The record carries the total, not the assignments themselves.
+	if n := got.GetStatus().GetAllocated().GetActors(); n != 1 {
+		t.Errorf("deleted worker hosted %d actors, want the 1 it was holding", n)
 	}
 }
 
@@ -618,8 +685,8 @@ func TestDrainWorker_KeepsAssignment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DrainWorker() failed: %v", err)
 	}
-	if soleAssignment(got).GetActorUid() != "actor-uid-1" {
-		t.Errorf("assignment = %v, want it left in place", soleAssignment(got))
+	if n := got.GetStatus().GetAllocated().GetActors(); n != 1 {
+		t.Errorf("drained worker hosts %d actors, want the 1 left in place", n)
 	}
 }
 

@@ -221,10 +221,37 @@ type Interface interface {
 	// exhausted, or the mutate's error verbatim otherwise.
 	UpdateWorker(ctx context.Context, name string, precondition Precondition, mutate func(toUpdate *ateapipb.Worker) error) (*ateapipb.Worker, error)
 
-	// Removes a worker by name and returns the deleted resource. Returns
-	// ErrNotFound if missing, or ErrUIDConflict/ErrVersionConflict if pre does
-	// not describe the worker the caller observed.
+	// Removes a worker by name, along with every assignment it holds, and
+	// returns the deleted resource. Returns ErrNotFound if missing, or
+	// ErrUIDConflict/ErrVersionConflict if pre does not describe the worker the
+	// caller observed.
 	DeleteWorker(ctx context.Context, name string, pre DeletePreconditions) (*ateapipb.Worker, error)
+
+	// Assignments and Worker allocation are updated atomically.
+
+	// BindActorToWorker assigns an Actor and updates the Worker's allocation.
+	// Rebinding the same Actor replaces its assignment.
+	//
+	// ErrNotFound if the Worker is gone, ErrVersionConflict if it has moved past
+	// expectedVersion, which is how a claim loses to a concurrent one.
+	BindActorToWorker(ctx context.Context, workerName string, expectedVersion int64, assignment *ateapipb.ActorAssignment) error
+
+	// ReleaseActorFromWorker removes an assignment and updates allocation,
+	// returning the Worker as it now stands so the caller can feed the
+	// watch-fed cache, which until then reports it full. It returns nil if the
+	// assignment was already absent.
+	ReleaseActorFromWorker(ctx context.Context, workerName string, expectedVersion int64, actorUID string) (*ateapipb.Worker, error)
+
+	// GetWorkerAssignment returns a Worker's assignment for actorUID, or
+	// ErrNotFound when the Worker is not hosting that Actor.
+	GetWorkerAssignment(ctx context.Context, workerName, actorUID string) (*ateapipb.ActorAssignment, error)
+
+	// ListWorkerAssignments returns every Actor a Worker hosts.
+	ListWorkerAssignments(ctx context.Context, workerName string) ([]*ateapipb.ActorAssignment, error)
+
+	// FindWorkerHostingActor names the Worker holding an assignment for
+	// actorUID, or ErrNotFound if none does.
+	FindWorkerHostingActor(ctx context.Context, actorUID string) (string, error)
 
 	// WatchWorkers returns an active subscription to track worker state changes.
 	// The watch's Events channel is closed when the caller calls Close, the
@@ -290,9 +317,12 @@ func (p DeletePreconditions) Check(md *ateapipb.ResourceMetadata) error {
 // metadata is not checked: a backend re-stamps it from the object it read, so
 // whatever the mutation made of it is discarded either way.
 //
-// capacity is not one of them: it MAY change, since a pod can be resized and a
-// worker reports its own actor ceiling. CLEARING it is still rejected, because
-// an update replaces the worker and so an omitted capacity asks to lose it.
+// capacity is not one of them: it MAY change. The pool's actor ceiling moves
+// when maxActorsPerWorker is edited, a pod can be resized, and a worker may
+// come to report its own. What is still rejected is CLEARING it, which is the
+// case the immutability was really guarding: UpdateWorker replaces the worker
+// rather than patching it, so a request that omits capacity is asking to lose
+// it, and silently dropping a worker's capacity is worse than refusing.
 //
 // A rejection wraps ErrImmutableField, so a backend can return it as-is and
 // callers still get the sentinel they map to INVALID_ARGUMENT.
@@ -453,4 +483,14 @@ type ListResponse[T any] struct {
 // HasNextPage reports whether another page follows this one.
 func (r ListResponse[T]) HasNextPage() bool {
 	return r.NextPageToken != ""
+}
+
+// ClearAssignments drops the list a Worker record does not carry, which every
+// backend holds on the way in. GetWorker populates it, so it can arrive here on
+// any copy that came back out of ateapi, and storing it would put the same fact
+// in two places -- with the copy on the Worker the one that goes stale.
+func ClearAssignments(worker *ateapipb.Worker) {
+	if worker.GetStatus() != nil {
+		worker.Status.Assignments = nil
+	}
 }

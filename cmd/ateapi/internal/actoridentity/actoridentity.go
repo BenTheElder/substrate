@@ -166,8 +166,9 @@ func (s *Server) MintCert(ctx context.Context, req *ateapipb.MintCertRequest) (*
 	}
 	atespace, actorName := actorRef.Atespace, actorRef.Name
 
-	// Actor identity comes only from ateapi state. expected_actor_uid is a
-	// fail-closed guard against a request crossing an assignment change.
+	// expected_actor_uid picked which actor to mint for (see authorizeActor);
+	// re-checking it here fails closed if the request crossed an assignment
+	// change.
 	actorUID := actor.GetMetadata().GetUid()
 	if actorUID == "" {
 		slog.ErrorContext(ctx, "MintCert: actor has no UID", slog.Any("actor", actorRef))
@@ -292,9 +293,10 @@ func validateWorkerRef(worker *ateapipb.ObjectRef) error {
 	return resources.ValidateGlobalObjectRef(worker, field.NewPath("worker")).ToAggregate()
 }
 
-// authorizeActor resolves the actor from the authenticated worker and verifies
-// that the worker and actor still point at one another. Actor identity supplied
-// by the requester never participates in this authorization decision.
+// authorizeActor resolves the actor the request names among those the worker is
+// hosting and verifies the two still point at one another. Requester-supplied
+// identity never participates in the decision.
+//
 // The worker is resolved from cache first (hot path), but cache misses and
 // denials fall back to the authoritative store to handle watch-delivery lag
 // right after ResumeActor.
@@ -358,14 +360,14 @@ func (s *Server) authorizeWithWorker(ctx context.Context, worker *ateapipb.Worke
 		return nil, resources.ActorRef{}, "worker is hosted on a different node", errAssignmentMismatch
 	}
 
-	// Which of the worker's actors to mint for. A worker admits one at a time
-	// (capacity.actors), so the sole assignment is the answer; selecting among
-	// several arrives with the workers that can hold several.
-	assignments := worker.GetStatus().GetAssignments()
-	if len(assignments) == 0 {
-		return nil, resources.ActorRef{}, "worker has no actor assignment", errAssignmentMismatch
+	assigned, err := s.assignmentToMintFor(ctx, worker.GetMetadata().GetName(), req.GetExpectedActorUid())
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, resources.ActorRef{}, "worker is not hosting the requested actor", errAssignmentMismatch
 	}
-	assigned := assignments[0]
+	if err != nil {
+		slog.ErrorContext(ctx, "ActorIdentity: failed to read worker assignment", slog.Any("err", err))
+		return nil, resources.ActorRef{}, "", status.Error(codes.Internal, "failed to look up worker assignment")
+	}
 	actorRef := resources.ActorRefFromObjectRef(assigned.GetActor())
 	if actorRef == (resources.ActorRef{}) {
 		return nil, resources.ActorRef{}, "worker assignment names no actor", errAssignmentMismatch
@@ -399,4 +401,30 @@ func (s *Server) authorizeWithWorker(ctx context.Context, worker *ateapipb.Worke
 		return nil, resources.ActorRef{}, "actor no longer points to the requesting worker", errAssignmentMismatch
 	}
 	return actor, actorRef, "", nil
+}
+
+// assignmentToMintFor picks which of the worker's actors to mint for, or
+// ErrNotFound when it hosts none. expected_actor_uid selects from what ateapi
+// records the worker as hosting; it does not assert.
+//
+// Falling back to another of the worker's assignments keeps a bad binding
+// (PermissionDenied) apart from a stale expectation (retryable). Reads go to
+// the store: the binding was committed moments ago and the watch has not
+// delivered it. The O(occupancy) listing only runs on the miss.
+func (s *Server) assignmentToMintFor(ctx context.Context, workerName, actorUID string) (*ateapipb.ActorAssignment, error) {
+	assigned, err := s.store.GetWorkerAssignment(ctx, workerName, actorUID)
+	if err == nil {
+		return assigned, nil
+	}
+	if !errors.Is(err, store.ErrNotFound) {
+		return nil, err
+	}
+	assignments, err := s.store.ListWorkerAssignments(ctx, workerName)
+	if err != nil {
+		return nil, err
+	}
+	if len(assignments) == 0 {
+		return nil, store.ErrNotFound
+	}
+	return assignments[0], nil
 }

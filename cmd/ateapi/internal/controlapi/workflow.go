@@ -117,6 +117,13 @@ type actorWorkflowStore interface {
 	DeleteActor(ctx context.Context, actorRef resources.ActorRef) (*ateapipb.Actor, error)
 	GetWorker(ctx context.Context, name string) (*ateapipb.Worker, error)
 	UpdateWorker(ctx context.Context, name string, precondition store.Precondition, mutate func(toUpdate *ateapipb.Worker) error) (*ateapipb.Worker, error)
+	BindActorToWorker(ctx context.Context, workerName string, expectedVersion int64, assignment *ateapipb.ActorAssignment) error
+	ReleaseActorFromWorker(ctx context.Context, workerName string, expectedVersion int64, actorUID string) (*ateapipb.Worker, error)
+	GetWorkerAssignment(ctx context.Context, workerName, actorUID string) (*ateapipb.ActorAssignment, error)
+	FindWorkerHostingActor(ctx context.Context, actorUID string) (string, error)
+	// Read from the records rather than the Worker's status: only the service
+	// layer attaches assignments on read, and this workflow holds the store.
+	ListWorkerAssignments(ctx context.Context, workerName string) ([]*ateapipb.ActorAssignment, error)
 	GetActorSnapshot(ctx context.Context, snapshotRef resources.ActorSnapshotRef) (*ateapipb.ActorSnapshot, error)
 	CreateActorSnapshot(ctx context.Context, snapshot *ateapipb.ActorSnapshot) (*ateapipb.ActorSnapshot, error)
 	GetActorTemplate(ctx context.Context, templateRef resources.ActorTemplateRef) (*ateapipb.ActorTemplate, error)
@@ -142,6 +149,7 @@ func NewWorkerWorkflow(store workerWorkflowStore) *WorkerWorkflow {
 type workerWorkflowStore interface {
 	GetWorker(ctx context.Context, name string) (*ateapipb.Worker, error)
 	DeleteWorker(ctx context.Context, name string, pre store.DeletePreconditions) (*ateapipb.Worker, error)
+	ListWorkerAssignments(ctx context.Context, workerName string) ([]*ateapipb.ActorAssignment, error)
 	GetActor(ctx context.Context, actorRef resources.ActorRef) (*ateapipb.Actor, error)
 	UpdateActor(ctx context.Context, actorRef resources.ActorRef, precondition store.Precondition, mutate func(toUpdate *ateapipb.Actor) error) (*ateapipb.Actor, error)
 }

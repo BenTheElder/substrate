@@ -27,59 +27,24 @@ func WorkerMaxActors(capacity *ateapipb.WorkerCapacity) int32 {
 	return capacity.GetActors()
 }
 
-// WorkerAssignmentFor returns the Worker's assignment for actorUID, or nil if
-// it is not hosting that Actor.
-func WorkerAssignmentFor(worker *ateapipb.Worker, actorUID string) *ateapipb.ActorAssignment {
-	for _, assignment := range worker.GetStatus().GetAssignments() {
-		if assignment.GetActorUid() == actorUID {
-			return assignment
-		}
+// AddToAllocated adjusts allocation by an assignment; sign is 1 or -1.
+// It returns nil when allocation reaches zero.
+func AddToAllocated(total *ateapipb.WorkerCapacity, assignment *ateapipb.ActorAssignment, sign int64) *ateapipb.WorkerCapacity {
+	if total == nil {
+		total = &ateapipb.WorkerCapacity{}
 	}
-	return nil
-}
-
-// BindAssignment records an Actor as hosted by a Worker, replacing any
-// assignment for the same Actor UID. Replacing, not appending: a retried claim
-// would otherwise book the Actor against the Worker's capacity twice.
-func BindAssignment(worker *ateapipb.Worker, assignment *ateapipb.ActorAssignment) {
-	if worker.GetStatus() == nil {
-		worker.Status = &ateapipb.WorkerStatus{}
+	total.Actors += int32(sign)
+	total.CpuMilli += sign * assignment.GetResources().GetCpuMilli()
+	total.MemoryBytes += sign * assignment.GetResources().GetMemoryBytes()
+	if total.Actors == 0 && total.CpuMilli == 0 && total.MemoryBytes == 0 {
+		return nil
 	}
-	replaced := false
-	for i, existing := range worker.Status.GetAssignments() {
-		if existing.GetActorUid() == assignment.GetActorUid() {
-			worker.Status.Assignments[i] = assignment
-			replaced = true
-			break
-		}
-	}
-	if !replaced {
-		worker.Status.Assignments = append(worker.Status.GetAssignments(), assignment)
-	}
-	worker.Status.Allocated = SumAllocated(worker.Status.GetAssignments())
-}
-
-// ReleaseAssignment drops a Worker's assignment for actorUID, reporting whether
-// it held one. Release runs on paths that retry, so already-free is not an
-// error.
-func ReleaseAssignment(worker *ateapipb.Worker, actorUID string) bool {
-	kept := make([]*ateapipb.ActorAssignment, 0, len(worker.GetStatus().GetAssignments()))
-	for _, assignment := range worker.GetStatus().GetAssignments() {
-		if assignment.GetActorUid() != actorUID {
-			kept = append(kept, assignment)
-		}
-	}
-	if len(kept) == len(worker.GetStatus().GetAssignments()) {
-		return false
-	}
-	worker.Status.Assignments = kept
-	worker.Status.Allocated = SumAllocated(kept)
-	return true
+	return total
 }
 
 // SumAllocated is what a set of assignments takes from a Worker, or nil for
-// none, so an idle Worker carries no allocation rather than a zeroed message.
-// status.allocated is kept as this sum so placement never has to compute it.
+// none. Rebuilds the total rather than adjusting it, which is what the checks
+// holding AddToAllocated to the assignments it counts compare against.
 func SumAllocated(assignments []*ateapipb.ActorAssignment) *ateapipb.WorkerCapacity {
 	if len(assignments) == 0 {
 		return nil

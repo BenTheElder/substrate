@@ -352,15 +352,17 @@ func assigned(atespace, name string) func(*ateapipb.Worker) {
 	return assignedFor(atespace, name, nil)
 }
 
-// assignedFor binds an actor that took resources from the worker, so a test can
-// place against what is left rather than against the whole capacity.
+// assignedFor books an actor that took resources from the worker, so a test can
+// place against what is left rather than against the whole capacity. Only the
+// allocation total, which is all placement reads: the assignments themselves are
+// their own records and never on the worker.
 func assignedFor(atespace, name string, took *ateapipb.WorkerCapacity) func(*ateapipb.Worker) {
 	return func(w *ateapipb.Worker) {
-		resources.BindAssignment(w, &ateapipb.ActorAssignment{
-			Actor:     &ateapipb.ObjectRef{Atespace: atespace, Name: name},
-			ActorUid:  atespace + "/" + name,
-			Resources: took,
-		})
+		if w.Status == nil {
+			w.Status = &ateapipb.WorkerStatus{}
+		}
+		w.Status.Allocated = resources.AddToAllocated(w.Status.Allocated,
+			&ateapipb.ActorAssignment{ActorUid: atespace + "/" + name, Resources: took}, +1)
 	}
 }
 

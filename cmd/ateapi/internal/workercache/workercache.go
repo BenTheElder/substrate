@@ -120,6 +120,15 @@ func (c *Cache) Forget(name string) {
 	delete(c.workers, name)
 }
 
+// Observe applies a store result before its watch event arrives.
+// It is version guarded and nil-receiver safe.
+func (c *Cache) Observe(worker *ateapipb.Worker) {
+	if c == nil || worker.GetMetadata().GetName() == "" {
+		return
+	}
+	c.applyEvent(store.WorkerEvent{Type: store.WorkerEventUpdated, Worker: worker})
+}
+
 func (c *Cache) sync(ctx context.Context) (*store.WorkerWatch, error) {
 	watch, err := c.store.WatchWorkers(ctx)
 	if err != nil {
