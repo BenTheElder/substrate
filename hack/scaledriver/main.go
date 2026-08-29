@@ -55,12 +55,13 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
+	"github.com/agent-substrate/substrate/internal/ateclient"
 	"github.com/agent-substrate/substrate/internal/atelet"
 	"github.com/agent-substrate/substrate/internal/credbundle"
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
+	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/internal/substratex509"
-	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
-	"github.com/agent-substrate/substrate/pkg/client/clientset/versioned"
+	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 )
 
 const (
@@ -72,6 +73,10 @@ const (
 
 var (
 	mode = pflag.String("mode", "restore", "restore (pack actors on) or terminate (tear them back down).")
+	// The whole point of having both: the difference between them IS the control
+	// plane's share of an activation, and nothing else measures it. Same process,
+	// same concurrency, same clock -- only the layer being dialed changes.
+	via = pflag.String("via", "atelet", "atelet (dial the node's AteomHerder, control plane removed) or ateapi (create+resume through the control plane, as any client would).")
 
 	poolNamespace     = pflag.String("pool-namespace", "ate-scale-tiny", "Namespace of the WorkerPool to pack.")
 	poolName          = pflag.String("pool-name", "tiny", "Name of the WorkerPool to pack.")
@@ -107,8 +112,14 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if *mode == "restore" && *goldenURI == "" {
-		return fmt.Errorf("--golden-snapshot-uri is required for --mode=restore")
+	if *mode == "restore" && *via == "atelet" && *goldenURI == "" {
+		return fmt.Errorf("--golden-snapshot-uri is required for --mode=restore --via=atelet")
+	}
+	if *via != "atelet" && *via != "ateapi" {
+		return fmt.Errorf("--via must be atelet or ateapi, got %q", *via)
+	}
+	if *via == "ateapi" {
+		return driveViaAteapi(ctx)
 	}
 
 	cfg, err := rest.InClusterConfig()
@@ -119,12 +130,15 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("kube client: %w", err)
 	}
-	ate, err := versioned.NewForConfig(cfg)
+	ateapi, err := ateclient.NewClient(ctx, "", "", *ateapiEndpoint, *ateapiToken, false)
 	if err != nil {
 		return fmt.Errorf("ate client: %w", err)
 	}
+	defer ateapi.Close()
 
-	tmpl, err := ate.ApiV1alpha1().ActorTemplates(*templateNamespace).Get(ctx, *templateName, metav1.GetOptions{})
+	tmpl, err := ateapi.GetActorTemplate(ctx, &ateapipb.GetActorTemplateRequest{
+		ActorTemplate: &ateapipb.ObjectRef{Atespace: *templateNamespace, Name: *templateName},
+	})
 	if err != nil {
 		return fmt.Errorf("get ActorTemplate %s/%s: %w", *templateNamespace, *templateName, err)
 	}
@@ -132,7 +146,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	cpuMilli, memBytes := actorLimits(tmpl)
+	cpuMilli, memBytes, err := actorLimits(tmpl)
+	if err != nil {
+		return fmt.Errorf("actor limits: %w", err)
+	}
 
 	workerUID, node, err := workerPod(ctx, kube)
 	if err != nil {
@@ -363,28 +380,29 @@ func dialCredentials(ateletPodUID string) (credentials.TransportCredentials, err
 // only what a density fixture declares. Volumes are rejected rather than
 // dropped: a silently missing mount would restore into a subtly different actor
 // than the one whose golden snapshot is being restored.
-func workloadSpec(tmpl *atev1alpha1.ActorTemplate) (*ateletpb.WorkloadSpec, error) {
-	if len(tmpl.Spec.Volumes) > 0 {
-		return nil, fmt.Errorf("ActorTemplate %s/%s declares volumes; scaledriver only handles volume-free templates", tmpl.Namespace, tmpl.Name)
+func workloadSpec(tmpl *ateapipb.ActorTemplate) (*ateletpb.WorkloadSpec, error) {
+	if len(tmpl.GetVolumes()) > 0 {
+		return nil, fmt.Errorf("ActorTemplate %s/%s declares volumes; scaledriver only handles volume-free templates",
+			tmpl.GetMetadata().GetAtespace(), tmpl.GetMetadata().GetName())
 	}
 	spec := &ateletpb.WorkloadSpec{}
-	for _, ctr := range tmpl.Spec.Containers {
+	for _, ctr := range tmpl.GetContainers() {
 		out := &ateletpb.Container{
-			Name:    ctr.Name,
-			Image:   ctr.Image,
-			Command: ctr.Command,
-			Args:    ctr.Args,
+			Name:    ctr.GetName(),
+			Image:   ctr.GetImage(),
+			Command: ctr.GetCommand(),
+			Args:    ctr.GetArgs(),
 		}
-		for _, env := range ctr.Env {
-			out.Env = append(out.Env, &ateletpb.EnvEntry{Name: env.Name, Value: env.Value})
+		for _, env := range ctr.GetEnv() {
+			out.Env = append(out.Env, &ateletpb.EnvEntry{Name: env.GetName(), Value: env.GetValue()})
 		}
-		if r := ctr.Readyz; r != nil {
-			out.Readyz = &ateletpb.Readyz{TimeoutSeconds: r.TimeoutSeconds}
+		if r := ctr.GetReadyz(); r != nil {
+			out.Readyz = &ateletpb.Readyz{TimeoutSeconds: r.GetTimeoutSeconds()}
 			if *readyzTimeout > 0 {
 				out.Readyz.TimeoutSeconds = *readyzTimeout
 			}
-			if r.HTTPGet != nil {
-				out.Readyz.HttpGet = &ateletpb.HTTPGetAction{Path: r.HTTPGet.Path, Port: r.HTTPGet.Port}
+			if g := r.GetHttpGet(); g != nil {
+				out.Readyz.HttpGet = &ateletpb.HTTPGetAction{Path: g.GetPath(), Port: g.GetPort()}
 			}
 		}
 		spec.Containers = append(spec.Containers, out)
@@ -392,16 +410,16 @@ func workloadSpec(tmpl *atev1alpha1.ActorTemplate) (*ateletpb.WorkloadSpec, erro
 	return spec, nil
 }
 
-func actorLimits(tmpl *atev1alpha1.ActorTemplate) (cpuMilli, memBytes int64) {
-	res := tmpl.Spec.Resources
-	if res == nil {
-		return 0, 0
+func actorLimits(tmpl *ateapipb.ActorTemplate) (cpuMilli, memBytes int64, err error) {
+	limits, err := resources.ParseQuantities(tmpl.GetResources())
+	if err != nil {
+		return 0, 0, err
 	}
-	if c := res.Limits.Cpu(); c != nil {
+	if c, ok := limits[resources.ResourceCPU]; ok {
 		cpuMilli = c.MilliValue()
 	}
-	if m := res.Limits.Memory(); m != nil {
+	if m, ok := limits[resources.ResourceMemory]; ok {
 		memBytes = m.Value()
 	}
-	return cpuMilli, memBytes
+	return cpuMilli, memBytes, nil
 }
