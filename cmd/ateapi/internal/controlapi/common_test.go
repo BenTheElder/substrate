@@ -74,11 +74,7 @@ func seedAssignment(t *testing.T, st store.Interface, workerName string, assignm
 		return
 	}
 	ctx := context.Background()
-	worker, err := st.GetWorker(ctx, workerName)
-	if err != nil {
-		t.Fatalf("read worker %q to seed an assignment on: %v", workerName, err)
-	}
-	if err := st.BindActorToWorker(ctx, workerName, worker.GetMetadata().GetVersion(), assignment); err != nil {
+	if err := st.BindActorToWorker(ctx, workerName, assignment, nil); err != nil {
 		t.Fatalf("seed assignment on worker %q: %v", workerName, err)
 	}
 }

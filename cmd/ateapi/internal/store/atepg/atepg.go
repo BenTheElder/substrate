@@ -1423,7 +1423,7 @@ func (p *Persistence) DeleteWorker(ctx context.Context, name string, pre store.D
 // Worker assignments and status.allocated are updated in one transaction.
 
 // lockWorkerForAssignment serializes updates to a Worker's allocation.
-func lockWorkerForAssignment(ctx context.Context, tx pgx.Tx, name string, expectedVersion int64) (*ateapipb.Worker, error) {
+func lockWorkerForAssignment(ctx context.Context, tx pgx.Tx, name string) (*ateapipb.Worker, error) {
 	var protoBytes []byte
 	err := tx.QueryRow(ctx, `SELECT proto FROM workers WHERE name = $1 FOR UPDATE`, name).Scan(&protoBytes)
 	if err != nil {
@@ -1435,9 +1435,6 @@ func lockWorkerForAssignment(ctx context.Context, tx pgx.Tx, name string, expect
 	worker := &ateapipb.Worker{}
 	if err := proto.Unmarshal(protoBytes, worker); err != nil {
 		return nil, fmt.Errorf("unmarshaling worker: %w", err)
-	}
-	if worker.GetMetadata().GetVersion() != expectedVersion {
-		return nil, store.ErrVersionConflict
 	}
 	return worker, nil
 }
@@ -1458,7 +1455,7 @@ func saveWorkerAfterAssignment(ctx context.Context, tx pgx.Tx, worker *ateapipb.
 	return nil
 }
 
-func (p *Persistence) BindActorToWorker(ctx context.Context, workerName string, expectedVersion int64, assignment *ateapipb.ActorAssignment) error {
+func (p *Persistence) BindActorToWorker(ctx context.Context, workerName string, assignment *ateapipb.ActorAssignment, admit func(*ateapipb.Worker) error) error {
 	actorUID := assignment.GetActorUid()
 	if actorUID == "" {
 		return fmt.Errorf("binding an assignment with no actor_uid to worker %s", workerName)
@@ -1469,7 +1466,7 @@ func (p *Persistence) BindActorToWorker(ctx context.Context, workerName string, 
 	}
 
 	return p.writeAndAppendEventFor(ctx, store.WorkerEventUpdated, func(ctx context.Context, tx pgx.Tx) (*ateapipb.Worker, error) {
-		worker, err := lockWorkerForAssignment(ctx, tx, workerName, expectedVersion)
+		worker, err := lockWorkerForAssignment(ctx, tx, workerName)
 		if err != nil {
 			return nil, err
 		}
@@ -1493,6 +1490,15 @@ func (p *Persistence) BindActorToWorker(ctx context.Context, workerName string, 
 			return nil, fmt.Errorf("binding actor %s to worker %s: %w", actorUID, workerName, err)
 		}
 		if tag.RowsAffected() == 1 {
+			// A new binding, so the Worker has to have room for it. Asked here
+			// rather than before the insert because only the insert says whether
+			// this is new, and asked under the row lock so the answer holds
+			// until commit. Refusing rolls the speculative insert back.
+			if admit != nil {
+				if err := admit(worker); err != nil {
+					return nil, err
+				}
+			}
 			worker.Status.Allocated = resources.AddToAllocated(worker.Status.Allocated, assignment, +1)
 			if err := saveWorkerAfterAssignment(ctx, tx, worker); err != nil {
 				return nil, err
@@ -1539,7 +1545,7 @@ func (p *Persistence) ReleaseActorFromWorker(ctx context.Context, workerName str
 	var released *ateapipb.Worker
 	err := p.writeAndAppendEventFor(ctx, store.WorkerEventUpdated, func(ctx context.Context, tx pgx.Tx) (*ateapipb.Worker, error) {
 		released = nil
-		worker, err := lockWorkerForAssignment(ctx, tx, workerName, expectedVersion)
+		worker, err := lockWorkerForAssignment(ctx, tx, workerName)
 		if err != nil {
 			return nil, err
 		}

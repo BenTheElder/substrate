@@ -172,8 +172,8 @@ func (s *ServiceImpl) UpdateWorker(ctx context.Context, name string, preconditio
 // The assignment operations are pass-throughs: an assignment is its own record,
 // so binding and releasing are single store calls rather than a read-modify-write
 // of the Worker.
-func (s *ServiceImpl) BindActorToWorker(ctx context.Context, workerName string, expectedVersion int64, assignment *ateapipb.ActorAssignment) error {
-	return s.store.BindActorToWorker(ctx, workerName, expectedVersion, assignment)
+func (s *ServiceImpl) BindActorToWorker(ctx context.Context, workerName string, assignment *ateapipb.ActorAssignment, admit func(*ateapipb.Worker) error) error {
+	return s.store.BindActorToWorker(ctx, workerName, assignment, admit)
 }
 
 func (s *ServiceImpl) ReleaseActorFromWorker(ctx context.Context, workerName string, expectedVersion int64, actorUID string) (*ateapipb.Worker, error) {

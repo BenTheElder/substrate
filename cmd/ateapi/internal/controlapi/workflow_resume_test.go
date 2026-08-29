@@ -104,7 +104,7 @@ type bindErrorStore struct {
 	err error
 }
 
-func (s *bindErrorStore) BindActorToWorker(context.Context, string, int64, *ateapipb.ActorAssignment) error {
+func (s *bindErrorStore) BindActorToWorker(context.Context, string, *ateapipb.ActorAssignment, func(*ateapipb.Worker) error) error {
 	return s.err
 }
 

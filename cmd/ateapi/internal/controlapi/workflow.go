@@ -79,10 +79,6 @@ type ActorWorkflow struct {
 	instruments          *Instruments
 	egressGatewayAddress string
 	pluginRegistry       VolumePluginRegistry
-	// claimLocks keeps this process's own goroutines from racing each other for
-	// the same worker record; see claimlock.go. Usable zero value, and 64KiB, so
-	// keep ActorWorkflow behind a pointer.
-	claimLocks claimLocks
 }
 
 // NewActorWorkflow creates a new ActorWorkflow. instruments may be nil.
@@ -121,7 +117,7 @@ type actorWorkflowStore interface {
 	DeleteActor(ctx context.Context, actorRef resources.ActorRef) (*ateapipb.Actor, error)
 	GetWorker(ctx context.Context, name string) (*ateapipb.Worker, error)
 	UpdateWorker(ctx context.Context, name string, precondition store.Precondition, mutate func(toUpdate *ateapipb.Worker) error) (*ateapipb.Worker, error)
-	BindActorToWorker(ctx context.Context, workerName string, expectedVersion int64, assignment *ateapipb.ActorAssignment) error
+	BindActorToWorker(ctx context.Context, workerName string, assignment *ateapipb.ActorAssignment, admit func(*ateapipb.Worker) error) error
 	ReleaseActorFromWorker(ctx context.Context, workerName string, expectedVersion int64, actorUID string) (*ateapipb.Worker, error)
 	GetWorkerAssignment(ctx context.Context, workerName, actorUID string) (*ateapipb.ActorAssignment, error)
 	FindWorkerHostingActor(ctx context.Context, actorUID string) (string, error)

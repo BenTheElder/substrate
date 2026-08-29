@@ -1799,16 +1799,12 @@ func runWorkerAssignmentContractTests(t *testing.T, setup func(t *testing.T) sto
 		}
 	}
 
-	// bind binds one assignment at whatever version the worker is currently at,
-	// for the tests that care about the outcome rather than the concurrency.
+	// bind binds one assignment with no admission check, for the tests that care
+	// about the outcome rather than about admission.
 	bind := func(t *testing.T, s store.Interface, workerName string, assignment *ateapipb.ActorAssignment) {
 		t.Helper()
 		ctx := context.Background()
-		worker, err := s.GetWorker(ctx, workerName)
-		if err != nil {
-			t.Fatalf("GetWorker failed: %v", err)
-		}
-		if err := s.BindActorToWorker(ctx, workerName, worker.GetMetadata().GetVersion(), assignment); err != nil {
+		if err := s.BindActorToWorker(ctx, workerName, assignment, nil); err != nil {
 			t.Fatalf("BindActorToWorker(%s) failed: %v", assignment.GetActorUid(), err)
 		}
 	}
@@ -1892,27 +1888,81 @@ func runWorkerAssignmentContractTests(t *testing.T, setup func(t *testing.T) sto
 		}
 	})
 
-	t.Run("BindActorToWorker_VersionConflict", func(t *testing.T) {
+	t.Run("BindActorToWorker_RefusedAdmissionLeavesNothingBehind", func(t *testing.T) {
 		s := setup(t)
 		ctx := context.Background()
 
 		if _, err := s.CreateWorker(ctx, newTestWorker(testWorkerName, "pod-1")); err != nil {
 			t.Fatalf("CreateWorker failed: %v", err)
 		}
-		stale, err := s.GetWorker(ctx, testWorkerName)
+
+		full := errors.New("worker is full")
+		err := s.BindActorToWorker(ctx, testWorkerName, newTestAssignment("uid-1", 500, 0),
+			func(*ateapipb.Worker) error { return full })
+		if !errors.Is(err, full) {
+			t.Errorf("BindActorToWorker with a refusing admit = %v, want %v", err, full)
+		}
+		// The bind speculates the row in before it asks, so a refusal has to
+		// take it back out.
+		if _, err := s.GetWorkerAssignment(ctx, testWorkerName, "uid-1"); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("a refused bind left an assignment behind: %v", err)
+		}
+		worker, err := s.GetWorker(ctx, testWorkerName)
 		if err != nil {
 			t.Fatalf("GetWorker failed: %v", err)
 		}
-		bind(t, s, testWorkerName, newTestAssignment("uid-1", 500, 0))
-
-		// Two replicas claiming the same Worker: the one holding the older
-		// version loses, which is what stops both of them fitting.
-		err = s.BindActorToWorker(ctx, testWorkerName, stale.GetMetadata().GetVersion(), newTestAssignment("uid-2", 500, 0))
-		if !errors.Is(err, store.ErrVersionConflict) {
-			t.Errorf("BindActorToWorker on a stale version = %v, want ErrVersionConflict", err)
+		if got := worker.GetStatus().GetAllocated().GetActors(); got != 0 {
+			t.Errorf("a refused bind left %d actors allocated, want 0", got)
 		}
-		if _, err := s.GetWorkerAssignment(ctx, testWorkerName, "uid-2"); !errors.Is(err, store.ErrNotFound) {
-			t.Errorf("a refused bind left an assignment behind: %v", err)
+	})
+
+	// What the caller needs from admission: it runs against the Worker as the
+	// bind will write it, so concurrent binds cannot both find room for the last
+	// place. Nothing outside the store can offer that -- a check made before the
+	// call is stale by the time it commits.
+	t.Run("BindActorToWorker_AdmitSeesConcurrentBinds", func(t *testing.T) {
+		s := setup(t)
+		ctx := context.Background()
+
+		if _, err := s.CreateWorker(ctx, newTestWorker(testWorkerName, "pod-1")); err != nil {
+			t.Fatalf("CreateWorker failed: %v", err)
+		}
+
+		const claims = 16
+		full := errors.New("worker is full")
+		roomForOne := func(w *ateapipb.Worker) error {
+			if w.GetStatus().GetAllocated().GetActors() >= 1 {
+				return full
+			}
+			return nil
+		}
+
+		var wg sync.WaitGroup
+		won := make([]bool, claims)
+		for i := range claims {
+			wg.Go(func() {
+				err := s.BindActorToWorker(ctx, testWorkerName,
+					newTestAssignment(fmt.Sprintf("uid-%d", i), 0, 0), roomForOne)
+				won[i] = err == nil
+			})
+		}
+		wg.Wait()
+
+		var winners int
+		for _, w := range won {
+			if w {
+				winners++
+			}
+		}
+		if winners != 1 {
+			t.Errorf("%d of %d concurrent binds were admitted, want exactly 1", winners, claims)
+		}
+		worker, err := s.GetWorker(ctx, testWorkerName)
+		if err != nil {
+			t.Fatalf("GetWorker failed: %v", err)
+		}
+		if got := worker.GetStatus().GetAllocated().GetActors(); got != 1 {
+			t.Errorf("worker allocation counts %d actors, want 1", got)
 		}
 	})
 
@@ -1934,8 +1984,7 @@ func runWorkerAssignmentContractTests(t *testing.T, setup func(t *testing.T) sto
 		if err != nil {
 			t.Fatalf("GetWorker failed: %v", err)
 		}
-		if err := s.BindActorToWorker(ctx, otherTestWorkerName, other.GetMetadata().GetVersion(),
-			newTestAssignment("uid-1", 500, 1<<20)); err == nil {
+		if err := s.BindActorToWorker(ctx, otherTestWorkerName, newTestAssignment("uid-1", 500, 1<<20), nil); err == nil {
 			t.Fatal("BindActorToWorker onto a second worker succeeded, want an error")
 		}
 
@@ -1996,7 +2045,7 @@ func runWorkerAssignmentContractTests(t *testing.T, setup func(t *testing.T) sto
 			go func() {
 				defer wg.Done()
 				start.Wait()
-				won[i] = s.BindActorToWorker(ctx, name, versions[i], newTestAssignment("uid-1", 500, 1<<20)) == nil
+				won[i] = s.BindActorToWorker(ctx, name, newTestAssignment("uid-1", 500, 1<<20), nil) == nil
 			}()
 		}
 		start.Done()
@@ -2030,7 +2079,7 @@ func runWorkerAssignmentContractTests(t *testing.T, setup func(t *testing.T) sto
 
 	t.Run("BindActorToWorker_WorkerNotFound", func(t *testing.T) {
 		s := setup(t)
-		err := s.BindActorToWorker(context.Background(), "no-such-worker", 1, newTestAssignment("uid-1", 0, 0))
+		err := s.BindActorToWorker(context.Background(), "no-such-worker", newTestAssignment("uid-1", 0, 0), nil)
 		if !errors.Is(err, store.ErrNotFound) {
 			t.Errorf("BindActorToWorker on a missing worker = %v, want ErrNotFound", err)
 		}
@@ -2247,7 +2296,7 @@ func runWorkerAssignmentContractTests(t *testing.T, setup func(t *testing.T) sto
 				// Bind, sometimes over an actor already there and at a different
 				// size, which is the case that has to subtract before it adds.
 				assignment := newTestAssignment(actorUID, int64(rng.IntN(4)+1)*500, int64(rng.IntN(4)+1)<<24)
-				if err := s.BindActorToWorker(ctx, testWorkerName, version, assignment); err != nil {
+				if err := s.BindActorToWorker(ctx, testWorkerName, assignment, nil); err != nil {
 					t.Fatalf("step %d: BindActorToWorker(%s) failed: %v", step, actorUID, err)
 				}
 			} else if _, err := s.ReleaseActorFromWorker(ctx, testWorkerName, version, actorUID); err != nil {

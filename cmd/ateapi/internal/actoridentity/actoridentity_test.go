@@ -508,11 +508,7 @@ func seedActor(t *testing.T, ctx context.Context, st store.Interface, f actorFix
 // bindActor places an actor on a worker at whatever version it is currently at.
 func bindActor(t *testing.T, ctx context.Context, st store.Interface, workerName string, assignment *ateapipb.ActorAssignment) {
 	t.Helper()
-	worker, err := st.GetWorker(ctx, workerName)
-	if err != nil {
-		t.Fatalf("read worker to bind to: %v", err)
-	}
-	if err := st.BindActorToWorker(ctx, workerName, worker.GetMetadata().GetVersion(), assignment); err != nil {
+	if err := st.BindActorToWorker(ctx, workerName, assignment, nil); err != nil {
 		t.Fatalf("bind actor %s to worker: %v", assignment.GetActorUid(), err)
 	}
 }
