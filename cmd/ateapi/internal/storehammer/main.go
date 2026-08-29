@@ -39,6 +39,7 @@ import (
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store/atepg"
+	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/google/uuid"
 	"github.com/spf13/pflag"
@@ -46,6 +47,7 @@ import (
 
 var (
 	dsn         = pflag.String("dsn", "", "PostgreSQL DSN. Required.")
+	schema      = pflag.String("schema", "public", "PostgreSQL schema holding the Substrate tables, as ateapi is configured with.")
 	workers     = pflag.Int("workers", 128, "Worker records to seed and claim against.")
 	claims      = pflag.Int("claims", 20000, "Total claims to attempt.")
 	concurrency = pflag.Int("concurrency", 64, "Claims in flight at once.")
@@ -63,7 +65,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	st, err := atepg.Connect(ctx, *dsn)
+	st, err := atepg.Connect(ctx, *dsn, *schema)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "connecting: %v\n", err)
 		os.Exit(1)
@@ -111,7 +113,7 @@ func seed(ctx context.Context, st store.Interface, run string) ([]string, error)
 				NodeName:        fmt.Sprintf("node-%d", i),
 				Ip:              "10.0.0.1",
 				SandboxClass:    "gvisor",
-				Capacity:        &ateapipb.WorkerCapacity{CpuMilli: 64000, MemoryBytes: 256 << 30, Actors: 4094},
+				Capacity:        &ateapipb.WorkerCapacity{Actors: 4094, Resources: resources.CPUMemory(64000, 256<<30)},
 				Status:          &ateapipb.WorkerStatus{State: ateapipb.WorkerState_WORKER_STATE_ACTIVE},
 			}); err != nil {
 				errs[i] = fmt.Errorf("creating worker %d: %w", i, err)
@@ -191,35 +193,32 @@ func hammer(ctx context.Context, st store.Interface, names []string) result {
 // still retries.
 func claim(ctx context.Context, st store.Interface, workerName, actorUID string, conflicts *atomic.Int64) error {
 	const attempts = 50
-	{
-		err := st.BindActorToWorker(ctx, workerName, &ateapipb.ActorAssignment{
-			Actor:     &ateapipb.ObjectRef{Atespace: "storehammer", Name: actorUID},
-			ActorUid:  actorUID,
-			Resources: &ateapipb.WorkerCapacity{CpuMilli: 10, MemoryBytes: 1 << 20},
-		}, nil)
+	err := st.BindActorToWorker(ctx, workerName, &ateapipb.ActorAssignment{
+		Actor:     &ateapipb.ObjectRef{Atespace: "storehammer", Name: actorUID},
+		ActorUid:  actorUID,
+		Resources: resources.CPUMemory(10, 1<<20),
+	}, nil)
+	if err != nil {
+		return err
+	}
+	if !*release {
+		return nil
+	}
+	for range attempts {
+		fresh, err := st.GetWorker(ctx, workerName)
 		if err != nil {
 			return err
 		}
-		if !*release {
-			return nil
-		}
-		for range attempts {
-			fresh, err := st.GetWorker(ctx, workerName)
-			if err != nil {
-				return err
+		if _, err := st.ReleaseActorFromWorker(ctx, workerName, fresh.GetMetadata().GetVersion(), actorUID); err != nil {
+			if isConflict(err) {
+				conflicts.Add(1)
+				continue
 			}
-			if _, err := st.ReleaseActorFromWorker(ctx, workerName, fresh.GetMetadata().GetVersion(), actorUID); err != nil {
-				if isConflict(err) {
-					conflicts.Add(1)
-					continue
-				}
-				return err
-			}
-			return nil
+			return err
 		}
-		return fmt.Errorf("release of %s lost %d version races", actorUID, attempts)
+		return nil
 	}
-	return fmt.Errorf("claim of %s lost %d version races", actorUID, attempts)
+	return fmt.Errorf("release of %s lost %d version races", actorUID, attempts)
 }
 
 func isConflict(err error) bool {
