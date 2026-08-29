@@ -49,6 +49,7 @@ import (
 	"github.com/spf13/pflag"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
@@ -180,6 +181,14 @@ func main() {
 	}
 	if err := controlapi.RegisterActorCrashes(otel.Meter("ateapi")); err != nil {
 		serverboot.Fatal(ctx, "Failed to register actor-crashes metric", err)
+	}
+	// Only the PostgreSQL store has pools to report on.
+	if pooled, ok := persistence.(interface {
+		RegisterPoolMetrics(metric.Meter) error
+	}); ok {
+		if err := pooled.RegisterPoolMetrics(otel.Meter("ateapi")); err != nil {
+			serverboot.Fatal(ctx, "Failed to register store pool metrics", err)
+		}
 	}
 
 	instruments, err := controlapi.NewInstruments(otel.Meter("ateapi"))

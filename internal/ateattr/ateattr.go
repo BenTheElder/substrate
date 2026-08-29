@@ -104,6 +104,9 @@ const (
 	ActivationPhaseKey      = attribute.Key("ate.activation.phase")
 	ImageCacheOutcomeKey    = attribute.Key("ate.imagecache.outcome")
 	SchedulerOutcomeKey     = attribute.Key("ate.scheduler.outcome")
+	StorePoolKey            = attribute.Key("ate.store.pool")
+	PoolConnectionStateKey  = attribute.Key("ate.pool.connection.state")
+	AcquireOutcomeKey       = attribute.Key("ate.pool.acquire.outcome")
 	SchedulingConstraintKey = attribute.Key("ate.scheduling.constraint")
 	RouterResumeKey         = attribute.Key("ate.router.resume")
 	RouterOutcomeKey        = attribute.Key("ate.router.outcome")
@@ -202,6 +205,20 @@ func NormalizeOperationName(op string) string {
 // Values for SchedulerOutcomeKey. NoFreeWorker is a capacity signal, not a
 // failure, so it is a distinct outcome rather than an error.type value; only the
 // Error outcome carries an error.type.
+const (
+	StorePoolMain  = "main"
+	StorePoolWatch = "watch"
+
+	PoolConnectionAcquired = "acquired"
+	PoolConnectionIdle     = "idle"
+	PoolConnectionMax      = "max"
+
+	// AcquireOutcomeWaited is an acquisition that found no free connection, so
+	// it is the pool, not the database, that the caller queued on.
+	AcquireOutcomeWaited    = "waited"
+	AcquireOutcomeImmediate = "immediate"
+)
+
 const (
 	SchedulerOutcomeAssigned     = "assigned"
 	SchedulerOutcomeNoFreeWorker = "no_free_worker"

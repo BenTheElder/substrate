@@ -331,6 +331,53 @@ groups:
               stability: development
               value: error
               brief: The attempt failed. Only this outcome has an error.type key.
+      - id: ate.store.pool
+        stability: development
+        brief: Which connection pool of the store a measurement is about.
+        type:
+          members:
+            - id: main
+              stability: development
+              value: main
+              brief: The pool serving reads and writes.
+            - id: watch
+              stability: development
+              value: watch
+              brief: The small pool reserved for outbox polling and maintenance.
+      - id: ate.pool.connection.state
+        stability: development
+        brief: What a counted pool connection is doing.
+        type:
+          members:
+            - id: acquired
+              stability: development
+              value: acquired
+              brief: Checked out by a caller.
+            - id: idle
+              stability: development
+              value: idle
+              brief: Open and free.
+            - id: max
+              stability: development
+              value: max
+              brief: >
+                The ceiling the pool is configured for. Reported as a state so
+                utilization is a ratio of series from one metric.
+      - id: ate.pool.acquire.outcome
+        stability: development
+        brief: Whether an acquisition of a pool connection had to wait.
+        type:
+          members:
+            - id: immediate
+              stability: development
+              value: immediate
+              brief: A connection was free.
+            - id: waited
+              stability: development
+              value: waited
+              brief: >
+                None was free, so the caller queued. This is what separates a
+                query slowed by the pool from one slowed by the database.
       - id: ate.scheduling.constraint
         stability: development
         brief: The type of constraint in the scheduling request.
@@ -701,6 +748,71 @@ groups:
       - ref: ate.workerpool.namespace
         requirement_level: required
       - ref: ate.workerpool.name
+        requirement_level: required
+
+  - id: metric.ate.store.pool.connections
+    type: metric
+    metric_name: ate.store.pool.connections
+    instrument: updowncounter
+    unit: "{connection}"
+    stability: development
+    brief: Connections held by a store pool, by state.
+    note: >
+      Read acquired against max for utilization. The pool defaults to one
+      connection per CPU, which is not related to the load the process takes.
+    annotations:
+      substrate:
+        emitted_by: [ateapi]
+        golden_signals: [saturation]
+        code_anchor: cmd/ateapi/internal/store/atepg/metrics.go
+        cuj: Is the store pool full?
+    attributes:
+      - ref: ate.store.pool
+        requirement_level: required
+      - ref: ate.pool.connection.state
+        requirement_level: required
+
+  - id: metric.ate.store.pool.acquires
+    type: metric
+    metric_name: ate.store.pool.acquires
+    instrument: counter
+    unit: "{acquire}"
+    stability: development
+    brief: Connection acquisitions from a store pool, by whether one was free.
+    note: >
+      A query waiting for a connection and a query waiting for PostgreSQL look
+      the same in a query duration. Only the waited outcome tells them apart,
+      and only the first is fixed by a larger pool.
+    annotations:
+      substrate:
+        emitted_by: [ateapi]
+        golden_signals: [saturation]
+        code_anchor: cmd/ateapi/internal/store/atepg/metrics.go
+        cuj: Is the pool, or the database, what a slow query is waiting for?
+    attributes:
+      - ref: ate.store.pool
+        requirement_level: required
+      - ref: ate.pool.acquire.outcome
+        requirement_level: required
+
+  - id: metric.ate.store.pool.acquire.wait
+    type: metric
+    metric_name: ate.store.pool.acquire.wait
+    instrument: counter
+    unit: s
+    stability: development
+    brief: Time spent waiting for a connection from a store pool.
+    note: >
+      Cumulative, so a rate over it is how much of the wall clock the process
+      spends queued for a connection.
+    annotations:
+      substrate:
+        emitted_by: [ateapi]
+        golden_signals: [saturation, latency]
+        code_anchor: cmd/ateapi/internal/store/atepg/metrics.go
+        cuj: How much latency is the pool adding?
+    attributes:
+      - ref: ate.store.pool
         requirement_level: required
 
   - id: metric.ate.scheduler.assignment.duration
