@@ -678,6 +678,31 @@ groups:
         requirement_level:
           conditionally_required: The operation failed. If this key is absent, the operation was correct.
 
+  - id: metric.ate.actor.claim.duration
+    type: metric
+    metric_name: ate.actor.claim.duration
+    instrument: histogram
+    unit: s
+    stability: development
+    brief: The time of the claim of a worker during a resume.
+    note: >
+      A claim is one store call, and claims of one worker are serialized by that
+      worker's row. So this, not the whole resume, is the ceiling of the
+      activation rate of one worker: it is 1/duration. The label is the pool,
+      not the worker, which would be unbounded.
+    annotations:
+      substrate:
+        emitted_by: [ateapi]
+        golden_signals: [latency, saturation]
+        code_anchor: cmd/ateapi/internal/controlapi/metrics.go
+        buckets: [0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5]
+        cuj: What is the highest rate at which one worker can take actors?
+    attributes:
+      - ref: ate.workerpool.namespace
+        requirement_level: required
+      - ref: ate.workerpool.name
+        requirement_level: required
+
   - id: metric.ate.scheduler.assignment.duration
     type: metric
     metric_name: ate.scheduler.assignment.duration

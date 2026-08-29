@@ -32,6 +32,7 @@ const (
 	workerpoolWorkersMetric   = "ate.workerpool.workers"
 	lifecycleOpDurationMetric = "ate.actor.lifecycle.operation.duration"
 	schedulerAssignmentMetric = "ate.scheduler.assignment.duration"
+	claimDurationMetric       = "ate.actor.claim.duration"
 	actorCrashesMetric        = "ate.actor.crashes"
 )
 
@@ -127,6 +128,7 @@ func RegisterWorkerCount(meter metric.Meter, workers func() ([]*ateapipb.Worker,
 type Instruments struct {
 	lifecycleOpDuration         metric.Float64Histogram
 	schedulerAssignmentDuration metric.Float64Histogram
+	claimDuration               metric.Float64Histogram
 }
 
 // NewInstruments builds the two histograms against meter. Assignment buckets are
@@ -153,10 +155,33 @@ func NewInstruments(meter metric.Meter) (*Instruments, error) {
 		return nil, fmt.Errorf("create %s histogram: %w", schedulerAssignmentMetric, err)
 	}
 
+	claimDuration, err := meter.Float64Histogram(
+		claimDurationMetric,
+		metric.WithUnit("s"),
+		metric.WithDescription("Duration of the claim of a worker during actor resume."),
+		metric.WithExplicitBucketBoundaries(0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create %s histogram: %w", claimDurationMetric, err)
+	}
+
 	return &Instruments{
 		lifecycleOpDuration:         lifecycleOpDuration,
 		schedulerAssignmentDuration: schedulerAssignmentDuration,
+		claimDuration:               claimDuration,
 	}, nil
+}
+
+// recordClaim records the claim of a worker: one store call, serialized against
+// other claims of the same worker by that worker's row, so it is the ceiling on
+// how fast one worker takes actors. Reported per pool rather than per worker,
+// which would be unbounded cardinality.
+func (i *Instruments) recordClaim(ctx context.Context, start time.Time, poolNamespace, pool string) {
+	if i == nil || i.claimDuration == nil {
+		return
+	}
+	i.claimDuration.Record(ctx, time.Since(start).Seconds(),
+		metric.WithAttributes(ateattr.WorkerPoolAttributes(poolNamespace, pool)...))
 }
 
 // recordLifecycleOp records op's duration. A non-nil err is classified onto

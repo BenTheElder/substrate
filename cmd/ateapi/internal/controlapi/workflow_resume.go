@@ -538,7 +538,11 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 		}
 		return nil
 	}
-	if err := w.store.BindActorToWorker(ctx, assignedWorker.GetMetadata().GetName(), assignment, admit); err != nil {
+	claimStarted := time.Now()
+	err = w.store.BindActorToWorker(ctx, assignedWorker.GetMetadata().GetName(), assignment, admit)
+	w.instruments.recordClaim(ctx, claimStarted,
+		assignedWorker.GetWorkerNamespace(), assignedWorker.GetWorkerPool())
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			w.workerCache.Forget(assignedWorker.GetMetadata().GetName())
 			return nil, nil, fmt.Errorf("selected worker disappeared before claim: %w", store.ErrVersionConflict)

@@ -186,27 +186,18 @@ func hammer(ctx context.Context, st store.Interface, names []string) result {
 	return result{latencies: latencies, conflicts: conflicts.Load(), failures: failures.Load(), elapsed: time.Since(start)}
 }
 
-// claim is the activation's write path: read the worker, bind at that version,
-// and optionally give it back. Retries a lost version race the way the resume
-// workflow does.
+// claim is the activation's write path: bind, and optionally give it back. The
+// bind needs no read and cannot lose a version race, so only the release below
+// still retries.
 func claim(ctx context.Context, st store.Interface, workerName, actorUID string, conflicts *atomic.Int64) error {
 	const attempts = 50
-	for range attempts {
-		worker, err := st.GetWorker(ctx, workerName)
-		if err != nil {
-			return err
-		}
-		version := worker.GetMetadata().GetVersion()
-		err = st.BindActorToWorker(ctx, workerName, version, &ateapipb.ActorAssignment{
+	{
+		err := st.BindActorToWorker(ctx, workerName, &ateapipb.ActorAssignment{
 			Actor:     &ateapipb.ObjectRef{Atespace: "storehammer", Name: actorUID},
 			ActorUid:  actorUID,
 			Resources: &ateapipb.WorkerCapacity{CpuMilli: 10, MemoryBytes: 1 << 20},
-		})
+		}, nil)
 		if err != nil {
-			if isConflict(err) {
-				conflicts.Add(1)
-				continue
-			}
 			return err
 		}
 		if !*release {
