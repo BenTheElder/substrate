@@ -217,6 +217,10 @@ func (s *AteomService) resolveRuntime(paths map[string]string) resolvedRuntime {
 // bundle rootfs (the overlay RO lower) so the guest gets cluster DNS: ateom drops
 // atelet's resolv.conf bind and sends no CreateSandbox.Dns, so the guest can
 // otherwise reach IPs but not resolve names.
+//
+// The rootfs is untrusted, so the write goes through os.Root and unlinks rather
+// than truncates: an image-planted /etc or /etc/resolv.conf symlink would
+// otherwise be followed and clobber that path on the worker pod as root.
 func writeGuestResolvConf(rootfs string) error {
 	content, err := os.ReadFile("/etc/resolv.conf")
 	if err != nil {
@@ -225,11 +229,26 @@ func writeGuestResolvConf(rootfs string) error {
 	if len(content) == 0 {
 		return fmt.Errorf("host /etc/resolv.conf is empty")
 	}
-	etc := filepath.Join(rootfs, "etc")
-	if err := os.MkdirAll(etc, 0o755); err != nil {
-		return fmt.Errorf("creating %q: %w", etc, err)
+	root, err := os.OpenRoot(rootfs)
+	if err != nil {
+		return fmt.Errorf("opening rootfs %q: %w", rootfs, err)
 	}
-	if err := os.WriteFile(filepath.Join(etc, "resolv.conf"), content, 0o644); err != nil {
+	defer root.Close()
+	if err := root.Mkdir("etc", 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
+		return fmt.Errorf("creating %q: %w", filepath.Join(rootfs, "etc"), err)
+	}
+	if err := root.Remove("etc/resolv.conf"); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("removing existing guest resolv.conf: %w", err)
+	}
+	f, err := root.OpenFile("etc/resolv.conf", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return fmt.Errorf("creating guest resolv.conf: %w", err)
+	}
+	_, err = f.Write(content)
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
 		return fmt.Errorf("writing guest resolv.conf: %w", err)
 	}
 	return nil
