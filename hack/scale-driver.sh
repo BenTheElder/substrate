@@ -31,6 +31,9 @@ cd "${ROOT}"
 COUNT="${1:-500}"
 PARALLEL="${2:-16}"
 MODE="${MODE:-restore}"
+# atelet = measure the sandbox, ateapi = measure the whole system. The gap is
+# the control plane.
+VIA="${VIA:-atelet}"
 NAME_PREFIX="${NAME_PREFIX:-d}"
 # Generous by default: the ateom's 30s scores a queued activation as a failed
 # one, which reads as a ceiling that is not there.
@@ -56,7 +59,7 @@ log() { echo -e "\033[1;36m[driver]: $*\033[0m"; }
 # The golden snapshot's URI lives in ateapi's store, not the Kubernetes API, so
 # resolve it here (once) rather than teaching the driver to speak to ateapi.
 GOLDEN_SNAPSHOT_URI="${GOLDEN_SNAPSHOT_URI:-}"
-if [[ -z "${GOLDEN_SNAPSHOT_URI}" ]]; then
+if [[ -z "${GOLDEN_SNAPSHOT_URI}" && "${VIA}" == "atelet" ]]; then
   golden="$(kubectl "${KCTX[@]}" get actortemplate -n "${TEMPLATE_NS}" "${TEMPLATE_NAME}" \
     -o jsonpath='{.status.goldenSnapshot}')"
   if [[ -z "${golden}" ]]; then
@@ -72,13 +75,14 @@ if [[ -z "${GOLDEN_SNAPSHOT_URI}" ]]; then
 fi
 log "golden snapshot: ${GOLDEN_SNAPSHOT_URI}"
 
-log "mode=${MODE} count=${COUNT} parallel=${PARALLEL} prefix=${NAME_PREFIX}"
+log "via=${VIA} mode=${MODE} count=${COUNT} parallel=${PARALLEL} prefix=${NAME_PREFIX}"
 
 # The pod is restartPolicy: Never, so a previous run's pod is still sitting
 # there Completed and would block the apply.
 kubectl "${KCTX[@]}" delete pod -n "${POOL_NS}" scaledriver --ignore-not-found --wait
 
 sed -e "s|\${MODE}|${MODE}|g" \
+    -e "s|\${VIA}|${VIA}|g" \
     -e "s|\${COUNT}|${COUNT}|g" \
     -e "s|\${PARALLEL}|${PARALLEL}|g" \
     -e "s|\${NAME_PREFIX}|${NAME_PREFIX}|g" \

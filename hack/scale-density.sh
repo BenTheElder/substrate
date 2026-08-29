@@ -144,7 +144,9 @@ try:
     d = json.load(sys.stdin)
 except Exception:
     print(0); raise SystemExit
-items = d if isinstance(d, list) else d.get("items", [])
+# kubectl-ate wraps the page in {"actors": [...]}; reading "items" (the
+# Kubernetes shape) silently finds nothing and reports every run as zero.
+items = d.get("actors") or (d if isinstance(d, list) else d.get("items", []))
 print(sum(1 for a in items if a.get("status", {}).get("state") == "ACTOR_STATE_RUNNING"))
 ' 2>/dev/null || echo 0
 }
