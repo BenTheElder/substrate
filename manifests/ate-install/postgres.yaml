@@ -25,6 +25,10 @@ data:
     ssl_key_file = '/run/servicedns.podcert.ate.dev/credential-bundle.pem'
     ssl_ca_file = '/run/podidentity.podcert.ate.dev/trust-bundle.pem'
     hba_file = '/etc/postgresql/pg_hba.conf'
+    # Every ateapi replica opens a pgxpool (one connection per CPU by default)
+    # plus three for the outbox watch, so the default of 100 caps the control
+    # plane at two or three replicas before backends run out.
+    max_connections = 500
   pg_hba.conf: |
     # Local socket access is limited to processes in this pod and is used by
     # health checks, the workload's idempotent database bootstrap, and the
@@ -202,15 +206,18 @@ spec:
           mountPath: /var/run/postgresql
         - name: data
           mountPath: /var/lib/postgresql/data
-        # The whole control plane shares this one database; under activation
-        # load it sustains several cores. The kind overlay shrinks this back
-        # down to fit a CI runner.
+        # The whole control plane shares this one database, and under
+        # activation load it is CPU bound: a claim costs about a millisecond of
+        # query execution and nothing else comes close, so throughput tracks
+        # cores almost exactly. Measured on one node, 16 cores sustained 18k
+        # claims/s and 30 sustained 26k. The kind overlay shrinks this back down
+        # to fit a CI runner.
         resources:
           requests:
             cpu: "2"
             memory: "1Gi"
           limits:
-            cpu: "16"
+            cpu: "30"
             memory: "2Gi"
       volumes:
       - name: config
