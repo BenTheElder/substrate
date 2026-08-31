@@ -1355,6 +1355,19 @@ message WorkerStatus {
 message WorkerCapacity {
   int64 cpu_milli = 1;    // CPU capacity in millicores (1000 = one core).
   int64 memory_bytes = 2; // Memory capacity in bytes.
+
+  // Devices an Actor takes exclusively, keyed by extended resource name
+  // ("nvidia.com/gpu", "example.com/fpga"). An Actor asks for them the same way,
+  // in its ActorTemplate limits, and the scheduler places it on a Worker with
+  // that many free.
+  //
+  // Only devices that cannot be shared belong here. A Worker that does not list
+  // one has none, which for something indivisible means it hosts no Actor that
+  // wants one -- unlike cpu_milli and memory_bytes, where unset means
+  // unconstrained.
+  //
+  // 3 is left for the Actor count the multi-actor Worker adds.
+  map<string, int64> devices = 4;
 }
 
 // ActorAssignment names the Actor currently bound to a Worker — the inverse of

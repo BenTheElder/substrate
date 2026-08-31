@@ -23,6 +23,7 @@ import (
 	"maps"
 	"time"
 
+	"github.com/agent-substrate/substrate/internal/resources"
 	listersv1alpha1 "github.com/agent-substrate/substrate/pkg/client/listers/api/v1alpha1"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc/codes"
@@ -351,9 +352,10 @@ func workerCapacity(pod *corev1.Pod) *ateapipb.WorkerCapacity {
 		if v := c.Resources.Limits.Memory(); v != nil {
 			capacity.MemoryBytes = v.Value()
 		}
+		capacity.Devices = resources.ExclusiveDevices(c.Resources.Limits)
 		break
 	}
-	if capacity.CpuMilli == 0 && capacity.MemoryBytes == 0 {
+	if capacity.CpuMilli == 0 && capacity.MemoryBytes == 0 && len(capacity.Devices) == 0 {
 		return nil
 	}
 	return &capacity

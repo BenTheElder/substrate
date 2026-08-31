@@ -618,3 +618,40 @@ func TestSchedule_EligibleWorkersMetric(t *testing.T) {
 		}
 	})
 }
+
+// A device is indivisible, so unlike cpu and memory an unknown capacity cannot
+// mean unconstrained: a worker that does not have the device cannot host an
+// actor that asked for one.
+func TestAppliesDevices(t *testing.T) {
+	wantsGPU := Constraints{SandboxClass: "gvisor", Devices: map[string]int64{"nvidia.com/gpu": 1}}
+	s := New(fleet{})
+
+	has := worker("w-gpu", "gvisor", "node-a", nil, withDevices(map[string]int64{"nvidia.com/gpu": 1}))
+	if !s.Applies(has, wantsGPU) {
+		t.Error("Applies() = false for a worker with the device, want true")
+	}
+
+	none := worker("w-plain", "gvisor", "node-a", nil)
+	if s.Applies(none, wantsGPU) {
+		t.Error("Applies() = true for a worker with no device, want false")
+	}
+
+	tooFew := worker("w-one", "gvisor", "node-a", nil, withDevices(map[string]int64{"nvidia.com/gpu": 1}))
+	if s.Applies(tooFew, Constraints{SandboxClass: "gvisor", Devices: map[string]int64{"nvidia.com/gpu": 2}}) {
+		t.Error("Applies() = true for a worker with fewer devices than asked, want false")
+	}
+
+	// An actor that wants no device is placed on a device worker as usual.
+	if !s.Applies(has, Constraints{SandboxClass: "gvisor"}) {
+		t.Error("Applies() = false for a deviceless actor on a device worker, want true")
+	}
+}
+
+func withDevices(d map[string]int64) func(*ateapipb.Worker) {
+	return func(w *ateapipb.Worker) {
+		if w.Capacity == nil {
+			w.Capacity = &ateapipb.WorkerCapacity{}
+		}
+		w.Capacity.Devices = d
+	}
+}

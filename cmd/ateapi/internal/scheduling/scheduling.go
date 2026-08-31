@@ -50,6 +50,11 @@ type Constraints struct {
 	// data (matching the pre-capacity behavior).
 	CPUMilli    int64
 	MemoryBytes int64
+
+	// Devices the actor takes exclusively, by extended resource name. Unlike
+	// CPU and memory an absent worker capacity is not unconstrained: a worker
+	// without the device cannot host the actor at all.
+	Devices map[string]int64
 }
 
 // ErrNoCapacity is returned by Schedule when no free worker satisfies the
@@ -155,6 +160,13 @@ func (s *scheduler) Applies(worker *ateapipb.Worker, constraints Constraints) bo
 	}
 	if constraints.MemoryBytes > 0 && capacity.GetMemoryBytes() > 0 && capacity.GetMemoryBytes() < constraints.MemoryBytes {
 		return false
+	}
+	// Devices are indivisible, so a worker that does not have one cannot host an
+	// actor that wants it however much CPU and memory are free.
+	for name, want := range constraints.Devices {
+		if want > 0 && capacity.GetDevices()[name] < want {
+			return false
+		}
 	}
 
 	return len(constraints.RequiredNodes) == 0 || slices.Contains(constraints.RequiredNodes, worker.GetNodeName())

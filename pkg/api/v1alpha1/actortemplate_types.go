@@ -621,6 +621,13 @@ type ActorTemplateSpec struct {
 	// >= these limits, and the limits are supplied to the sandbox over the actor
 	// RPCs. Because the size is baked into snapshots, it is part of the immutable
 	// spec. Requests and claims are not supported (actors are sized by limits only).
+	//
+	// An extended resource limit ("nvidia.com/gpu") asks for that many devices
+	// instead of sizing anything: the scheduler places the actor on a worker with
+	// that many free, and each actor holds its own. A worker without the device
+	// cannot host the actor at all, which is what separates a device from cpu and
+	// memory, where an unknown capacity is treated as unconstrained.
+	//
 	// A zero or absent limit leaves the sandbox at the runtime default (unlimited
 	// for gVisor, the kata config for the micro-VM).
 	//
