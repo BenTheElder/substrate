@@ -45,7 +45,7 @@ const (
 	// Captures process memory, root filesystem changes, and durable data.
 	SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL SnapshotContentScope = 1
 	// Captures durable data without process memory or root filesystem changes.
-	SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA SnapshotContentScope = 2
+	SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA SnapshotContentScope = 2 // Keep this in sync with the maximums on fields of this type.
 )
 
 // Enum value maps for SnapshotContentScope.
@@ -216,7 +216,7 @@ type SandboxClass int32
 const (
 	SandboxClass_SANDBOX_CLASS_UNSPECIFIED SandboxClass = 0
 	SandboxClass_SANDBOX_CLASS_GVISOR      SandboxClass = 1
-	SandboxClass_SANDBOX_CLASS_MICROVM     SandboxClass = 2
+	SandboxClass_SANDBOX_CLASS_MICROVM     SandboxClass = 2 // Keep this in sync with SandboxConfig.sandbox_class's maximum.
 )
 
 // Enum value maps for SandboxClass.
@@ -271,7 +271,7 @@ const (
 	ResumeSource_RESUME_SOURCE_COLD_BOOT ResumeSource = 1
 	// Restores with the version's golden snapshot and the actor's own
 	// durable data.
-	ResumeSource_RESUME_SOURCE_GOLDEN ResumeSource = 2
+	ResumeSource_RESUME_SOURCE_GOLDEN ResumeSource = 2 // Keep this in sync with OnResumeConfig.from_data's maximum.
 )
 
 // Enum value maps for ResumeSource.
@@ -971,6 +971,7 @@ type EgressPolicy struct {
 	//
 	// +k8s:optional
 	// +k8s:maxItems=256
+	// +k8s:listType=atomic # rule order matters
 	Rules         []*EgressRule `protobuf:"bytes,2,rep,name=rules,proto3" json:"rules,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2003,21 +2004,37 @@ func (x *ObjectRef) GetName() string {
 type ActorTemplate struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Common resource metadata: atespace, name, uid, version, timestamps.
-	// +k8s:opaqueType
+	//
+	// +k8s:required
+	// +k8s:subfield(atespace)=+k8s:required
 	Metadata *ResourceMetadata `protobuf:"bytes,1,opt,name=metadata,proto3" json:"metadata,omitempty"`
 	// worker_selector restricts which worker pools actors from this template
 	// may use.
 	//
-	// +k8s:opaqueType
-	WorkerSelector *Selector    `protobuf:"bytes,2,opt,name=worker_selector,json=workerSelector,proto3" json:"worker_selector,omitempty"`
-	Containers     []*Container `protobuf:"bytes,3,rep,name=containers,proto3" json:"containers,omitempty"`
 	// +k8s:optional
-	Volumes         []*Volume        `protobuf:"bytes,4,rep,name=volumes,proto3" json:"volumes,omitempty"`
+	WorkerSelector *Selector `protobuf:"bytes,2,opt,name=worker_selector,json=workerSelector,proto3" json:"worker_selector,omitempty"`
+	// +k8s:required # at least one container
+	// +k8s:maxItems=10
+	// +k8s:listType=map
+	// +k8s:listMapKey=name
+	Containers []*Container `protobuf:"bytes,3,rep,name=containers,proto3" json:"containers,omitempty"`
+	// +k8s:optional
+	// +k8s:maxItems=32
+	// +k8s:listType=map
+	// +k8s:listMapKey=name
+	Volumes []*Volume `protobuf:"bytes,4,rep,name=volumes,proto3" json:"volumes,omitempty"`
+	// +k8s:required
+	// +k8s:customValidation # on_commit must be a subset of on_pause
 	SnapshotsConfig *SnapshotsConfig `protobuf:"bytes,5,opt,name=snapshots_config,json=snapshotsConfig,proto3" json:"snapshots_config,omitempty"`
 	// sandbox_config selects the sandbox runtime this version's actors run on.
+	//
+	// +k8s:required
 	SandboxConfig *SandboxConfig `protobuf:"bytes,6,opt,name=sandbox_config,json=sandboxConfig,proto3" json:"sandbox_config,omitempty"`
 	// Resource usage configuration.
-	Resources     *Resources           `protobuf:"bytes,7,opt,name=resources,proto3" json:"resources,omitempty"`
+	//
+	// +k8s:optional
+	Resources *Resources `protobuf:"bytes,7,opt,name=resources,proto3" json:"resources,omitempty"`
+	// +k8s:optional
 	Status        *ActorTemplateStatus `protobuf:"bytes,8,opt,name=status,proto3" json:"status,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2110,8 +2127,17 @@ func (x *ActorTemplate) GetStatus() *ActorTemplateStatus {
 }
 
 type Resources struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Limits        []*Limits              `protobuf:"bytes,1,rep,name=limits,proto3" json:"limits,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// limits is the maximum amount of compute resources allowed. Only "cpu"
+	// and "memory" are supported, each at most once, and each quantity must be
+	// greater than zero; the cpu limit must be less than 1000 cores.
+	//
+	// +k8s:optional
+	// +k8s:maxItems=2
+	// +k8s:listType=map
+	// +k8s:listMapKey=name
+	// +k8s:customValidation # names, quantity parse/positivity, cpu bound
+	Limits        []*Limits `protobuf:"bytes,1,rep,name=limits,proto3" json:"limits,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2154,9 +2180,16 @@ func (x *Resources) GetLimits() []*Limits {
 }
 
 type Limits struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Quantity      string                 `protobuf:"bytes,2,opt,name=quantity,proto3" json:"quantity,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// +k8s:required
+	// +k8s:maxLength=16 # the hook on Resources.limits restricts values to cpu/memory
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// quantity is in Kubernetes resource.Quantity string form (e.g. "500m",
+	// "2Gi").
+	//
+	// +k8s:required
+	// +k8s:maxLength=32 # the hook on Resources.limits requires a parseable quantity
+	Quantity      string `protobuf:"bytes,2,opt,name=quantity,proto3" json:"quantity,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2213,8 +2246,7 @@ type GoldenSnapshotStatus struct {
 	// +k8s:opaqueType
 	GoldenSnapshot *ObjectRef `protobuf:"bytes,1,opt,name=golden_snapshot,json=goldenSnapshot,proto3" json:"golden_snapshot,omitempty"`
 	// take_golden_snapshot_at is when the golden-actor warmup ends and the
-	// golden snapshot may be taken. Mirrors the CRD's status.takeGoldenSnapshotAt
-	// cmd/atecontroller/internal/controllers/actortemplate_controller.go
+	// golden snapshot may be taken.
 	TakeGoldenSnapshotAt *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=take_golden_snapshot_at,json=takeGoldenSnapshotAt,proto3" json:"take_golden_snapshot_at,omitempty"`
 	ErrorMessage         string                 `protobuf:"bytes,3,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
 	unknownFields        protoimpl.UnknownFields
@@ -2320,10 +2352,16 @@ func (x *ActorTemplateStatus) GetGoldenSnapshotStatus() *GoldenSnapshotStatus {
 type SandboxConfig struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// sandbox_class selects the sandbox runtime family.
-	// Required; must be specified..
+	//
+	// +k8s:required
+	// +k8s:minimum=1
+	// +k8s:maximum=2 # keep this in sync with the SandboxClass enum
 	SandboxClass SandboxClass `protobuf:"varint,1,opt,name=sandbox_class,json=sandboxClass,proto3,enum=ateapi.SandboxClass" json:"sandbox_class,omitempty"`
 	// config_name names the cluster-scoped SandboxConfig Kubernetes object
 	// supplying the sandbox binaries. Required; must match sandbox_class.
+	//
+	// +k8s:required
+	// +k8s:format=k8s-long-name
 	ConfigName    string `protobuf:"bytes,2,opt,name=config_name,json=configName,proto3" json:"config_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2375,16 +2413,31 @@ func (x *SandboxConfig) GetConfigName() string {
 
 type SnapshotsConfig struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// on_pause selects what is captured during pause actor.
+	// on_pause selects what is captured during pause actor. UNSPECIFIED is
+	// tolerated for compatibility and reads as FULL.
+	//
+	// +k8s:optional
+	// +k8s:minimum=1
+	// +k8s:maximum=2 # keep this in sync with the SnapshotContentScope enum
 	OnPause SnapshotContentScope `protobuf:"varint,1,opt,name=on_pause,json=onPause,proto3,enum=ateapi.SnapshotContentScope" json:"on_pause,omitempty"`
 	// on_commit selects what captures.
 	// Must be a subset of on_pause: FULL allows FULL or DATA, DATA allows DATA.
+	//
+	// +k8s:optional
+	// +k8s:minimum=1
+	// +k8s:maximum=2 # keep this in sync with the SnapshotContentScope enum
 	OnCommit SnapshotContentScope `protobuf:"varint,2,opt,name=on_commit,json=onCommit,proto3,enum=ateapi.SnapshotContentScope" json:"on_commit,omitempty"`
 	// on_resume selects, per snapshot situation, what supplies the guest state
 	// at resume. Unset means the defaults documented on OnResumeConfig.
+	//
+	// +k8s:optional
 	OnResume *OnResumeConfig `protobuf:"bytes,3,opt,name=on_resume,json=onResume,proto3" json:"on_resume,omitempty"`
 	// storage_location is the base object-storage URI snapshots of actors on
 	// this version are stored under. Required.
+	//
+	// +k8s:required
+	// +k8s:maxLength=1024 # bound only; object-storage URI formats vary
+	// TODO: validate that this is a well-formed object-storage URI
 	StorageLocation string `protobuf:"bytes,4,opt,name=storage_location,json=storageLocation,proto3" json:"storage_location,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
@@ -2455,7 +2508,11 @@ func (x *SnapshotsConfig) GetStorageLocation() string {
 type OnResumeConfig struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// from_data applies when the resume uses a DATA-scope snapshot (from
-	// on_pause or on_commit).
+	// on_pause or on_commit). UNSPECIFIED selects the documented default.
+	//
+	// +k8s:optional
+	// +k8s:minimum=1
+	// +k8s:maximum=2 # keep this in sync with the ResumeSource enum
 	FromData      ResumeSource `protobuf:"varint,1,opt,name=from_data,json=fromData,proto3,enum=ateapi.ResumeSource" json:"from_data,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2501,25 +2558,61 @@ func (x *OnResumeConfig) GetFromData() ResumeSource {
 // Container is a single application container of an ActorTemplate.
 type Container struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	Name  string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Image string                 `protobuf:"bytes,2,opt,name=image,proto3" json:"image,omitempty"`
+	// +k8s:required
+	// +k8s:format=k8s-short-name
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// +k8s:required
+	// +k8s:maxLength=512 # matches ImageVolumeSource.reference's bound
+	// TODO: validate that this is a well-formed image reference
+	Image string `protobuf:"bytes,2,opt,name=image,proto3" json:"image,omitempty"`
 	// Entrypoint array; when set, the image's ENTRYPOINT and CMD are both
 	// ignored and the process argv is command + args. Unlike Kubernetes,
 	// $(VAR_NAME) references are NOT expanded.
+	//
+	// +k8s:optional
+	// +k8s:maxItems=64
+	// +k8s:listType=atomic
+	// +k8s:eachVal=+k8s:maxLength=4096 # argv strings; guardrail, not a contract
 	Command []string `protobuf:"bytes,3,rep,name=command,proto3" json:"command,omitempty"`
 	// Arguments to the entrypoint; the image's CMD is used if unset (unless
 	// command is set, which discards the image's CMD).
-	Args []string  `protobuf:"bytes,4,rep,name=args,proto3" json:"args,omitempty"`
-	Env  []*EnvVar `protobuf:"bytes,5,rep,name=env,proto3" json:"env,omitempty"`
+	//
+	// +k8s:optional
+	// +k8s:maxItems=64
+	// +k8s:listType=atomic
+	// +k8s:eachVal=+k8s:maxLength=4096 # argv strings; guardrail, not a contract
+	Args []string `protobuf:"bytes,4,rep,name=args,proto3" json:"args,omitempty"`
+	// +k8s:optional
+	// +k8s:maxItems=32
+	// +k8s:listType=map # each variable is set at most once
+	// +k8s:listMapKey=name
+	Env []*EnvVar `protobuf:"bytes,5,rep,name=env,proto3" json:"env,omitempty"`
 	// readyz is an optional HTTP readiness probe; when set the actor is not
 	// ready until the endpoint returns 200.
-	Readyz       *ContainerReadyz `protobuf:"bytes,6,opt,name=readyz,proto3" json:"readyz,omitempty"`
-	VolumeMounts []*VolumeMount   `protobuf:"bytes,7,rep,name=volume_mounts,json=volumeMounts,proto3" json:"volume_mounts,omitempty"`
+	//
+	// +k8s:optional
+	Readyz *ContainerReadyz `protobuf:"bytes,6,opt,name=readyz,proto3" json:"readyz,omitempty"`
+	// Each volume may be mounted at most once per container.
+	//
+	// TODO: Kubernetes permits mounting a single volume at multiple paths (which
+	// requires keying by mountPath). We restrict it to one mount per volume (keyed
+	// by name). Note that keying by name means DV will not catch
+	// two different volumes mounted to the same path.
+	//
+	// +k8s:optional
+	// +k8s:maxItems=32
+	// +k8s:listType=map
+	// +k8s:listMapKey=name
+	VolumeMounts []*VolumeMount `protobuf:"bytes,7,rep,name=volume_mounts,json=volumeMounts,proto3" json:"volume_mounts,omitempty"`
 	// security_context adjusts the container's security settings. Unset leaves
 	// the default capability set.
+	//
+	// +k8s:optional
 	SecurityContext *SecurityContext `protobuf:"bytes,8,opt,name=security_context,json=securityContext,proto3" json:"security_context,omitempty"`
 	// resources carries this container's compute limits, enforced inside the
 	// actor's sandbox. Only cpu and memory limits are supported.
+	//
+	// +k8s:optional
 	Resources     *Resources `protobuf:"bytes,9,opt,name=resources,proto3" json:"resources,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2623,6 +2716,8 @@ func (x *Container) GetResources() *Resources {
 type SecurityContext struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// capabilities adjusts the Linux capabilities of the container's process.
+	//
+	// +k8s:optional
 	Capabilities  *Capabilities `protobuf:"bytes,1,opt,name=capabilities,proto3" json:"capabilities,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2671,9 +2766,21 @@ func (x *SecurityContext) GetCapabilities() *Capabilities {
 // removes the whole default set.
 type Capabilities struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// add lists capabilities to grant on top of the default set.
+	// add lists capabilities to grant on top of the default set. "ALL" is
+	// rejected: name the individual capabilities the container needs.
+	//
+	// +k8s:optional
+	// +k8s:maxItems=64
+	// +k8s:listType=set
+	// +k8s:customValidation # capability grammar; "ALL" not accepted
 	Add []string `protobuf:"bytes,1,rep,name=add,proto3" json:"add,omitempty"`
-	// drop lists capabilities to remove from the default set.
+	// drop lists capabilities to remove from the default set. "ALL" drops the
+	// whole set, so drop+add expresses an exact set rather than a relative one.
+	//
+	// +k8s:optional
+	// +k8s:maxItems=64
+	// +k8s:listType=set
+	// +k8s:customValidation # capability grammar
 	Drop          []string `protobuf:"bytes,2,rep,name=drop,proto3" json:"drop,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2728,8 +2835,15 @@ func (x *Capabilities) GetDrop() []string {
 type EnvVar struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// name may be any printable ASCII character except '='.
+	//
+	// +k8s:required
+	// +k8s:maxLength=256 # guardrail;
+	// +k8s:customValidation # printable ASCII except '='
 	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	// value is the literal value.
+	//
+	// +k8s:optional
+	// +k8s:maxLength=32768 # guardrail;
 	Value         string `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2783,9 +2897,15 @@ func (x *EnvVar) GetValue() string {
 type ContainerReadyz struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// http_get specifies the HTTP request to perform. Required.
+	//
+	// +k8s:required
 	HttpGet *HTTPGetAction `protobuf:"bytes,1,opt,name=http_get,json=httpGet,proto3" json:"http_get,omitempty"`
 	// timeout_seconds bounds how long to poll http_get before failing the
 	// actor start. 0 means the server-applied default (30s).
+	//
+	// +k8s:optional
+	// +k8s:minimum=1
+	// +k8s:maximum=3600
 	TimeoutSeconds int32 `protobuf:"varint,2,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
@@ -2838,9 +2958,17 @@ func (x *ContainerReadyz) GetTimeoutSeconds() int32 {
 // HTTPGetAction describes an HTTP GET against the container's interior IP.
 type HTTPGetAction struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// path defaults to "/readyz".
-	Path          string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
-	Port          int32  `protobuf:"varint,2,opt,name=port,proto3" json:"port,omitempty"`
+	// path defaults to "/readyz". Must be a URL path starting with "/", using
+	// only RFC 3986 path-segment characters, without query or fragment.
+	//
+	// +k8s:optional
+	// +k8s:maxLength=1024
+	// +k8s:customValidation # RFC 3986 path shape; no regex/pattern tag exists
+	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	// +k8s:required
+	// +k8s:minimum=1
+	// +k8s:maximum=65535
+	Port          int32 `protobuf:"varint,2,opt,name=port,proto3" json:"port,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2892,17 +3020,34 @@ func (x *HTTPGetAction) GetPort() int32 {
 type Volume struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// name of the volume. Must be a DNS label.
+	//
+	// +k8s:required
+	// +k8s:format=k8s-short-name
 	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	// Exactly one of durable_dir / external_volume_template / image /
 	// system_info must be set.
-	DurableDir             *DurableDirVolumeSource `protobuf:"bytes,2,opt,name=durable_dir,json=durableDir,proto3" json:"durable_dir,omitempty"`
+	//
+	// +k8s:optional
+	// +k8s:unionMember
+	DurableDir *DurableDirVolumeSource `protobuf:"bytes,2,opt,name=durable_dir,json=durableDir,proto3" json:"durable_dir,omitempty"`
+	// +k8s:optional
+	// +k8s:unionMember
 	ExternalVolumeTemplate *ExternalVolumeTemplate `protobuf:"bytes,3,opt,name=external_volume_template,json=externalVolumeTemplate,proto3" json:"external_volume_template,omitempty"`
 	// +k8s:optional
+	// +k8s:unionMember
 	SystemInfo *SystemInfoVolumeSource `protobuf:"bytes,5,opt,name=system_info,json=systemInfo,proto3" json:"system_info,omitempty"`
 	// image mounts the contents of an OCI image, read-only.
+	//
+	// +k8s:optional
+	// +k8s:unionMember
 	Image *ImageVolumeSource `protobuf:"bytes,6,opt,name=image,proto3" json:"image,omitempty"`
 	// type discriminates the source union: "DurableDir",
 	// "ExternalVolumeTemplate", "Image" or "SystemInfo".
+	//
+	// +k8s:optional
+	// +k8s:maxLength=63
+	// TODO: enforce that type matches the populated source, either with a
+	// unionDiscriminator tag or in the service layer.
 	Type          string `protobuf:"bytes,4,opt,name=type,proto3" json:"type,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2986,6 +3131,10 @@ func (x *Volume) GetType() string {
 type ImageVolumeSource struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// reference is the OCI image reference, pinned by digest.
+	//
+	// +k8s:required
+	// +k8s:maxLength=512
+	// +k8s:customValidation # must be pinned by digest; no contains tag exists
 	Reference     string `protobuf:"bytes,1,opt,name=reference,proto3" json:"reference,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -3072,9 +3221,15 @@ type ExternalVolumeTemplate struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// capacity of the volume to create, in Kubernetes resource.Quantity string
 	// form (e.g. "10Gi"). Required.
+	//
+	// +k8s:required
+	// +k8s:customValidation # must parse as a resource.Quantity
 	Capacity string `protobuf:"bytes,1,opt,name=capacity,proto3" json:"capacity,omitempty"`
 	// storage_class_name names the cluster-scoped Kubernetes StorageClass to
 	// create the volume from. Required.
+	//
+	// +k8s:required
+	// +k8s:format=k8s-long-name
 	StorageClassName string `protobuf:"bytes,2,opt,name=storage_class_name,json=storageClassName,proto3" json:"storage_class_name,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
@@ -3126,7 +3281,7 @@ func (x *ExternalVolumeTemplate) GetStorageClassName() string {
 
 // SystemInfoVolumeSource is a read-only volume of substrate-generated
 // per-actor files (identity fields, projected trust bundles), regenerated by
-// atelet on every Run/Restore. Mirrors the CRD's systemInfo volume source.
+// atelet on every Run/Restore.
 type SystemInfoVolumeSource struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// data_sources lists the projections to place within the volume. At most
@@ -3135,6 +3290,7 @@ type SystemInfoVolumeSource struct {
 	//
 	// +k8s:optional
 	// +k8s:maxItems=8
+	// +k8s:listType=atomic
 	DataSources   []*SystemInfoDataSource `protobuf:"bytes,1,rep,name=data_sources,json=dataSources,proto3" json:"data_sources,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -3412,8 +3568,17 @@ func (x *TrustBundleDataSource) GetPath() string {
 type VolumeMount struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// name must match the name of a Volume.
+	//
+	// +k8s:required
+	// +k8s:format=k8s-short-name
 	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	// mount_path within the container. Must be a clean absolute Unix path.
+	// mount_path within the container. Must be a clean absolute Unix path:
+	// must start with '/', not be '/', and contain no ':', '..', '.', '//',
+	// trailing '/', or control characters.
+	//
+	// +k8s:required
+	// +k8s:maxLength=4096
+	// +k8s:customValidation # clean-absolute-path shape; no regex/pattern tag exists
 	MountPath     string `protobuf:"bytes,2,opt,name=mount_path,json=mountPath,proto3" json:"mount_path,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -3769,7 +3934,8 @@ func (x *CreateActorTemplateRequest) GetActorTemplate() *ActorTemplate {
 
 type GetActorTemplateRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// +k8s:opaqueType
+	// +k8s:required
+	// +k8s:subfield(atespace)=+k8s:required
 	ActorTemplate *ObjectRef `protobuf:"bytes,1,opt,name=actor_template,json=actorTemplate,proto3" json:"actor_template,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -3816,13 +3982,22 @@ type ListActorTemplatesRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The atespace to list actor templates from. Empty lists across all
 	// atespaces.
+	//
+	// +k8s:optional
+	// +k8s:format=k8s-short-name
 	Atespace string `protobuf:"bytes,1,opt,name=atespace,proto3" json:"atespace,omitempty"`
 	// Requested page size; the server may return fewer, or occasionally
 	// slightly more. If unspecified, defaults to a server-chosen value;
 	// values above 1000 are coerced to 1000.
+	//
+	// +k8s:optional
+	// +k8s:minimum=1
 	PageSize int32 `protobuf:"varint,2,opt,name=page_size,json=pageSize,proto3" json:"page_size,omitempty"`
 	// Pagination token from a previous ListActorTemplates response.
 	// Omit or leave empty for the first request.
+	//
+	// +k8s:optional
+	// +k8s:maxLength=256
 	PageToken     string `protobuf:"bytes,3,opt,name=page_token,json=pageToken,proto3" json:"page_token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -3936,7 +4111,8 @@ func (x *ListActorTemplatesResponse) GetNextPageToken() string {
 
 type DeleteActorTemplateRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// +k8s:opaqueType
+	// +k8s:required
+	// +k8s:subfield(atespace)=+k8s:required
 	ActorTemplate *ObjectRef `protobuf:"bytes,1,opt,name=actor_template,json=actorTemplate,proto3" json:"actor_template,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
