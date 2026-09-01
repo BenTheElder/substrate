@@ -105,10 +105,9 @@ spec:
 
 `atecontroller` propagates the request onto the `ateom` container and mounts the
 host NVIDIA toolkit into the pod. `ateom-gvisor` then generates a CDI spec with
-`nvidia-ctk` and injects the GPU device nodes, driver libraries, and env into
-each actor container's OCI spec, and runs `runsc` with `--nvproxy` so CUDA and NVML
-work inside the sandbox. A worker requesting `nvidia.com/gpu: N` passes all N
-through.
+`nvidia-ctk` and injects the GPU device nodes, driver libraries, and env into the
+OCI spec of each actor container that asked for one, and runs `runsc` with
+`--nvproxy` so CUDA and NVML work inside the sandbox.
 
 #### Asking for a GPU from an actor
 
@@ -144,10 +143,17 @@ Substrate's own `ate.dev/*` resources are not devices in this sense. They are
 shareable pseudo-devices — every micro-VM on a node opens `/dev/kvm` — so they are
 neither counted as worker capacity nor claimable by an actor.
 
-**Not yet enforced at the sandbox.** `ateom-gvisor` still injects the CDI `all`
-device, so every container of a GPU actor sees every GPU the worker holds, whatever
-the per-container limits say. The limits above bound placement; partitioning the
-worker's devices across containers at injection is still to come.
+The actor's own limit is the ceiling the worker enforces. `ateom-gvisor` hands
+out only that many of the worker's GPUs, in container declaration order, so the
+layout is the same on every activation and an actor never reaches a GPU it was
+not placed for — which is what lets one worker hold several GPU actors. Nothing
+is recorded between activations: CDI device names are worker-local and an actor
+can restore onto a different worker, so which physical GPU backs a container is
+resolved fresh each time.
+
+Containers that name no device all get the actor's share. An actor that requests
+no device gets none, whatever its worker holds — including a template written
+before these fields existed, which now has to ask.
 
 The driver library directory is prepended to each container's `LD_LIBRARY_PATH` so an
 image does not have to set it to find `libcuda.so.1`; any existing value is kept after

@@ -103,6 +103,14 @@ message RunRequest {
   // whole host or worker pod). Zero means "unset": keep the runtime default.
   int64 cpu_milli = 10;    // CPU limit in millicores (1000 = one core).
   int64 memory_bytes = 11; // Memory limit in bytes.
+
+  // The devices the Actor holds, keyed by extended resource name
+  // ("nvidia.com/gpu"). This bounds what the sandbox may expose: the Worker was
+  // admitted to hold these, and nothing beyond them reaches the Actor however
+  // many the Worker itself has.
+  //
+  // Empty means the Actor asked for none and gets none.
+  map<string, int64> devices = 12;
 }
 
 // EgressGateway configures tunneled egress for one actor activation.
@@ -441,6 +449,10 @@ message RestoreRequest {
   // means "unset": keep the runtime default.
   int64 cpu_milli = 14;    // CPU limit in millicores (1000 = one core).
   int64 memory_bytes = 15; // Memory limit in bytes.
+
+  // The devices the Actor holds; see RunRequest. Re-resolved on every restore
+  // rather than taken from the snapshot, since device identity is Worker-local.
+  map<string, int64> devices = 16;
 }
 
 message RestoreResponse {

@@ -679,6 +679,11 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 		return nil, fmt.Errorf("while starting pause container: %w", err)
 	}
 
+	gpus, err := planActorGPUs(ctx, req.GetSpec().GetContainers(), req.GetDevices())
+	if err != nil {
+		return nil, fmt.Errorf("while planning GPUs: %w", err)
+	}
+
 	// Create and start each application container, each with its own log pipe so
 	// every line is tagged with the originating container (ate.actor.container.name).
 	for _, ac := range req.GetSpec().GetContainers() {
@@ -691,7 +696,7 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 			return nil, fmt.Errorf("while composing %q rootfs: %w", ac.GetName(), err)
 		}
 		containersToDelete = append(containersToDelete, ac.GetName())
-		if err := maybeInjectGPU(ctx, req.GetActorUid(), ac.GetName()); err != nil {
+		if err := maybeInjectGPU(ctx, req.GetActorUid(), ac.GetName(), gpus); err != nil {
 			return nil, fmt.Errorf("while injecting GPU for %q: %w", ac.GetName(), err)
 		}
 		if err := rcmd.cmdCreate(ctx, pw, ac.GetName(), nil); err != nil {
@@ -961,6 +966,11 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		return nil, fmt.Errorf("unexpected snapshot scope: %v", req.GetScope())
 	}
 
+	gpus, err := planActorGPUs(ctx, req.GetSpec().GetContainers(), req.GetDevices())
+	if err != nil {
+		return nil, fmt.Errorf("while planning GPUs: %w", err)
+	}
+
 	// Create and restore each application container, each with its own log pipe so
 	// every line is tagged with the originating container (ate.actor.container.name).
 	for _, ac := range req.GetSpec().GetContainers() {
@@ -972,7 +982,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		if err := imagecache.SetupBundleRootfs(ateompath.OCIBundlePath(req.GetActorUid(), ac.GetName())); err != nil {
 			return nil, fmt.Errorf("while composing %q rootfs: %w", ac.GetName(), err)
 		}
-		if err := maybeInjectGPU(ctx, req.GetActorUid(), ac.GetName()); err != nil {
+		if err := maybeInjectGPU(ctx, req.GetActorUid(), ac.GetName(), gpus); err != nil {
 			return nil, fmt.Errorf("while injecting GPU for %q: %w", ac.GetName(), err)
 		}
 		switch req.GetScope() {

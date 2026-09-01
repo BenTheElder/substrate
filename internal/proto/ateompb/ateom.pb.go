@@ -416,8 +416,16 @@ type RunWorkloadRequest struct {
 	// sizes the sandbox to these (cgroup caps via the OCI spec, and for the
 	// micro-VM the VM's vCPU count and memory). Zero means "unset": keep the
 	// runtime default (unlimited for gVisor, the kata config for the micro-VM).
-	CpuMilli      int64 `protobuf:"varint,11,opt,name=cpu_milli,json=cpuMilli,proto3" json:"cpu_milli,omitempty"`          // CPU limit in millicores (1000 = one core).
-	MemoryBytes   int64 `protobuf:"varint,12,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"` // Memory limit in bytes.
+	CpuMilli    int64 `protobuf:"varint,11,opt,name=cpu_milli,json=cpuMilli,proto3" json:"cpu_milli,omitempty"`          // CPU limit in millicores (1000 = one core).
+	MemoryBytes int64 `protobuf:"varint,12,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"` // Memory limit in bytes.
+	// The devices the Actor holds, keyed by extended resource name
+	// ("nvidia.com/gpu"). Unlike cpu and memory this does not size anything: it
+	// bounds what the ateom may expose, so an Actor never reaches a device the
+	// Worker did not admit it for. Which of the Worker's devices back the count is
+	// the ateom's to pick.
+	//
+	// Empty means the Actor asked for none and gets none.
+	Devices       map[string]int64 `protobuf:"bytes,13,rep,name=devices,proto3" json:"devices,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -529,6 +537,13 @@ func (x *RunWorkloadRequest) GetMemoryBytes() int64 {
 	return 0
 }
 
+func (x *RunWorkloadRequest) GetDevices() map[string]int64 {
+	if x != nil {
+		return x.Devices
+	}
+	return nil
+}
+
 // EgressGateway configures tunneled egress for one actor activation.
 type EgressGateway struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -636,8 +651,16 @@ type Container struct {
 	SystemInfoVolumeMounts []*SystemInfoVolumeMount `protobuf:"bytes,6,rep,name=system_info_volume_mounts,json=systemInfoVolumeMounts,proto3" json:"system_info_volume_mounts,omitempty"`
 	// image_volume_mounts are the image volumes this container mounts, if any.
 	ImageVolumeMounts []*ImageVolumeMount `protobuf:"bytes,7,rep,name=image_volume_mounts,json=imageVolumeMounts,proto3" json:"image_volume_mounts,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// devices is how many of each device this container gets, keyed by extended
+	// resource name ("nvidia.com/gpu"), resolved by ate-api-server from the
+	// ActorTemplate. Which physical devices back the count is the ateom's to
+	// decide out of what the Worker holds.
+	//
+	// Empty when no container of the Actor asked for a device, which is the
+	// Actor's whole device set going to every container.
+	Devices       map[string]int64 `protobuf:"bytes,8,rep,name=devices,proto3" json:"devices,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Container) Reset() {
@@ -708,6 +731,13 @@ func (x *Container) GetSystemInfoVolumeMounts() []*SystemInfoVolumeMount {
 func (x *Container) GetImageVolumeMounts() []*ImageVolumeMount {
 	if x != nil {
 		return x.ImageVolumeMounts
+	}
+	return nil
+}
+
+func (x *Container) GetDevices() map[string]int64 {
+	if x != nil {
+		return x.Devices
 	}
 	return nil
 }
@@ -1286,8 +1316,12 @@ type RestoreWorkloadRequest struct {
 	// (re)size the sandbox on a DATA-scope restore (fresh guest container). On a
 	// FULL micro-VM restore the size baked into the snapshot is authoritative and
 	// these are ignored. Zero means "unset": keep the runtime default.
-	CpuMilli      int64 `protobuf:"varint,14,opt,name=cpu_milli,json=cpuMilli,proto3" json:"cpu_milli,omitempty"`          // CPU limit in millicores (1000 = one core).
-	MemoryBytes   int64 `protobuf:"varint,15,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"` // Memory limit in bytes.
+	CpuMilli    int64 `protobuf:"varint,14,opt,name=cpu_milli,json=cpuMilli,proto3" json:"cpu_milli,omitempty"`          // CPU limit in millicores (1000 = one core).
+	MemoryBytes int64 `protobuf:"varint,15,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"` // Memory limit in bytes.
+	// The devices the Actor holds; see RunWorkloadRequest (field 13). Re-resolved
+	// on every restore rather than taken from the snapshot: device identity is
+	// Worker-local and an Actor can restore onto a different Worker.
+	Devices       map[string]int64 `protobuf:"bytes,16,rep,name=devices,proto3" json:"devices,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1418,6 +1452,13 @@ func (x *RestoreWorkloadRequest) GetMemoryBytes() int64 {
 		return x.MemoryBytes
 	}
 	return 0
+}
+
+func (x *RestoreWorkloadRequest) GetDevices() map[string]int64 {
+	if x != nil {
+		return x.Devices
+	}
+	return nil
 }
 
 type RestoreWorkloadResponse struct {
@@ -1853,7 +1894,7 @@ const file_ateom_proto_rawDesc = "" +
 	"\n" +
 	"runsc_path\x18\x06 \x01(\tR\trunscPath\x12'\n" +
 	"\x04spec\x18\a \x01(\v2\x13.ateom.WorkloadSpecR\x04spec\"\x1b\n" +
-	"\x19TerminateWorkloadResponse\"\xd9\x04\n" +
+	"\x19TerminateWorkloadResponse\"\xd7\x05\n" +
 	"\x12RunWorkloadRequest\x12\x1a\n" +
 	"\batespace\x18\x01 \x01(\tR\batespace\x12\x1d\n" +
 	"\n" +
@@ -1868,24 +1909,32 @@ const file_ateom_proto_rawDesc = "" +
 	"\x0eegress_gateway\x18\n" +
 	" \x01(\v2\x14.ateom.EgressGatewayH\x00R\regressGateway\x88\x01\x01\x12\x1b\n" +
 	"\tcpu_milli\x18\v \x01(\x03R\bcpuMilli\x12!\n" +
-	"\fmemory_bytes\x18\f \x01(\x03R\vmemoryBytes\x1aD\n" +
+	"\fmemory_bytes\x18\f \x01(\x03R\vmemoryBytes\x12@\n" +
+	"\adevices\x18\r \x03(\v2&.ateom.RunWorkloadRequest.DevicesEntryR\adevices\x1aD\n" +
 	"\x16RuntimeAssetPathsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\x11\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a:\n" +
+	"\fDevicesEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\x03R\x05value:\x028\x01B\x11\n" +
 	"\x0f_egress_gateway\")\n" +
 	"\rEgressGateway\x12\x18\n" +
 	"\aaddress\x18\x01 \x01(\tR\aaddress\"@\n" +
 	"\fWorkloadSpec\x120\n" +
 	"\n" +
 	"containers\x18\x01 \x03(\v2\x10.ateom.ContainerR\n" +
-	"containers\"\x9c\x03\n" +
+	"containers\"\x91\x04\n" +
 	"\tContainer\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12%\n" +
 	"\x06readyz\x18\x02 \x01(\v2\r.ateom.ReadyzR\x06readyz\x12W\n" +
 	"\x19durable_dir_volume_mounts\x18\x04 \x03(\v2\x1c.ateom.DurableDirVolumeMountR\x16durableDirVolumeMounts\x12>\n" +
 	"\x11csi_volume_mounts\x18\x05 \x03(\v2\x12.ateom.VolumeMountR\x0fcsiVolumeMounts\x12W\n" +
 	"\x19system_info_volume_mounts\x18\x06 \x03(\v2\x1c.ateom.SystemInfoVolumeMountR\x16systemInfoVolumeMounts\x12G\n" +
-	"\x13image_volume_mounts\x18\a \x03(\v2\x17.ateom.ImageVolumeMountR\x11imageVolumeMountsJ\x04\b\x03\x10\x04R\x13durable_dir_volumes\"M\n" +
+	"\x13image_volume_mounts\x18\a \x03(\v2\x17.ateom.ImageVolumeMountR\x11imageVolumeMounts\x127\n" +
+	"\adevices\x18\b \x03(\v2\x1d.ateom.Container.DevicesEntryR\adevices\x1a:\n" +
+	"\fDevicesEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\x03R\x05value:\x028\x01J\x04\b\x03\x10\x04R\x13durable_dir_volumes\"M\n" +
 	"\vVolumeMount\x12\x1f\n" +
 	"\vvolume_name\x18\x01 \x01(\tR\n" +
 	"volumeName\x12\x1d\n" +
@@ -1931,7 +1980,7 @@ const file_ateom_proto_rawDesc = "" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"C\n" +
 	"\x1aCheckpointWorkloadResponse\x12%\n" +
-	"\x0esnapshot_files\x18\x01 \x03(\tR\rsnapshotFiles\"\xe0\x05\n" +
+	"\x0esnapshot_files\x18\x01 \x03(\tR\rsnapshotFiles\"\xe2\x06\n" +
 	"\x16RestoreWorkloadRequest\x12\x1a\n" +
 	"\batespace\x18\x01 \x01(\tR\batespace\x12\x1d\n" +
 	"\n" +
@@ -1949,10 +1998,14 @@ const file_ateom_proto_rawDesc = "" +
 	"\x0eegress_gateway\x18\f \x01(\v2\x14.ateom.EgressGatewayH\x00R\regressGateway\x88\x01\x01\x12.\n" +
 	"\x13golden_snapshot_uri\x18\r \x01(\tR\x11goldenSnapshotUri\x12\x1b\n" +
 	"\tcpu_milli\x18\x0e \x01(\x03R\bcpuMilli\x12!\n" +
-	"\fmemory_bytes\x18\x0f \x01(\x03R\vmemoryBytes\x1aD\n" +
+	"\fmemory_bytes\x18\x0f \x01(\x03R\vmemoryBytes\x12D\n" +
+	"\adevices\x18\x10 \x03(\v2*.ateom.RestoreWorkloadRequest.DevicesEntryR\adevices\x1aD\n" +
 	"\x16RuntimeAssetPathsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\x11\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a:\n" +
+	"\fDevicesEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\x03R\x05value:\x028\x01B\x11\n" +
 	"\x0f_egress_gateway\"\x19\n" +
 	"\x17RestoreWorkloadResponse\"6\n" +
 	"\x17GetWorkloadStatsRequest\x12\x1b\n" +
@@ -2017,7 +2070,7 @@ func file_ateom_proto_rawDescGZIP() []byte {
 }
 
 var file_ateom_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_ateom_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
+var file_ateom_proto_msgTypes = make([]protoimpl.MessageInfo, 28)
 var file_ateom_proto_goTypes = []any{
 	(SnapshotScope)(0),                     // 0: ateom.SnapshotScope
 	(SandboxClass)(0),                      // 1: ateom.SandboxClass
@@ -2046,50 +2099,56 @@ var file_ateom_proto_goTypes = []any{
 	(*GetActiveWorkloadStatsRequest)(nil),  // 24: ateom.GetActiveWorkloadStatsRequest
 	(*GetActiveWorkloadStatsResponse)(nil), // 25: ateom.GetActiveWorkloadStatsResponse
 	nil,                                    // 26: ateom.RunWorkloadRequest.RuntimeAssetPathsEntry
-	nil,                                    // 27: ateom.CheckpointWorkloadRequest.RuntimeAssetPathsEntry
-	nil,                                    // 28: ateom.RestoreWorkloadRequest.RuntimeAssetPathsEntry
+	nil,                                    // 27: ateom.RunWorkloadRequest.DevicesEntry
+	nil,                                    // 28: ateom.Container.DevicesEntry
+	nil,                                    // 29: ateom.CheckpointWorkloadRequest.RuntimeAssetPathsEntry
+	nil,                                    // 30: ateom.RestoreWorkloadRequest.RuntimeAssetPathsEntry
+	nil,                                    // 31: ateom.RestoreWorkloadRequest.DevicesEntry
 }
 var file_ateom_proto_depIdxs = []int32{
 	8,  // 0: ateom.TerminateWorkloadRequest.spec:type_name -> ateom.WorkloadSpec
 	8,  // 1: ateom.RunWorkloadRequest.spec:type_name -> ateom.WorkloadSpec
 	26, // 2: ateom.RunWorkloadRequest.runtime_asset_paths:type_name -> ateom.RunWorkloadRequest.RuntimeAssetPathsEntry
 	7,  // 3: ateom.RunWorkloadRequest.egress_gateway:type_name -> ateom.EgressGateway
-	9,  // 4: ateom.WorkloadSpec.containers:type_name -> ateom.Container
-	14, // 5: ateom.Container.readyz:type_name -> ateom.Readyz
-	11, // 6: ateom.Container.durable_dir_volume_mounts:type_name -> ateom.DurableDirVolumeMount
-	10, // 7: ateom.Container.csi_volume_mounts:type_name -> ateom.VolumeMount
-	12, // 8: ateom.Container.system_info_volume_mounts:type_name -> ateom.SystemInfoVolumeMount
-	13, // 9: ateom.Container.image_volume_mounts:type_name -> ateom.ImageVolumeMount
-	15, // 10: ateom.Readyz.http_get:type_name -> ateom.HTTPGetAction
-	8,  // 11: ateom.CheckpointWorkloadRequest.spec:type_name -> ateom.WorkloadSpec
-	27, // 12: ateom.CheckpointWorkloadRequest.runtime_asset_paths:type_name -> ateom.CheckpointWorkloadRequest.RuntimeAssetPathsEntry
-	0,  // 13: ateom.CheckpointWorkloadRequest.scope:type_name -> ateom.SnapshotScope
-	8,  // 14: ateom.RestoreWorkloadRequest.spec:type_name -> ateom.WorkloadSpec
-	28, // 15: ateom.RestoreWorkloadRequest.runtime_asset_paths:type_name -> ateom.RestoreWorkloadRequest.RuntimeAssetPathsEntry
-	0,  // 16: ateom.RestoreWorkloadRequest.scope:type_name -> ateom.SnapshotScope
-	7,  // 17: ateom.RestoreWorkloadRequest.egress_gateway:type_name -> ateom.EgressGateway
-	1,  // 18: ateom.WorkloadStatsSample.sandbox_class:type_name -> ateom.SandboxClass
-	2,  // 19: ateom.WorkloadStatsSample.source:type_name -> ateom.StatsSource
-	22, // 20: ateom.GetWorkloadStatsResponse.sample:type_name -> ateom.WorkloadStatsSample
-	22, // 21: ateom.GetActiveWorkloadStatsResponse.sample:type_name -> ateom.WorkloadStatsSample
-	3,  // 22: ateom.GetActiveWorkloadStatsResponse.no_sample_reason:type_name -> ateom.NoSampleReason
-	6,  // 23: ateom.Ateom.RunWorkload:input_type -> ateom.RunWorkloadRequest
-	17, // 24: ateom.Ateom.CheckpointWorkload:input_type -> ateom.CheckpointWorkloadRequest
-	19, // 25: ateom.Ateom.RestoreWorkload:input_type -> ateom.RestoreWorkloadRequest
-	21, // 26: ateom.Ateom.GetWorkloadStats:input_type -> ateom.GetWorkloadStatsRequest
-	24, // 27: ateom.Ateom.GetActiveWorkloadStats:input_type -> ateom.GetActiveWorkloadStatsRequest
-	4,  // 28: ateom.Ateom.TerminateWorkload:input_type -> ateom.TerminateWorkloadRequest
-	16, // 29: ateom.Ateom.RunWorkload:output_type -> ateom.RunWorkloadResponse
-	18, // 30: ateom.Ateom.CheckpointWorkload:output_type -> ateom.CheckpointWorkloadResponse
-	20, // 31: ateom.Ateom.RestoreWorkload:output_type -> ateom.RestoreWorkloadResponse
-	23, // 32: ateom.Ateom.GetWorkloadStats:output_type -> ateom.GetWorkloadStatsResponse
-	25, // 33: ateom.Ateom.GetActiveWorkloadStats:output_type -> ateom.GetActiveWorkloadStatsResponse
-	5,  // 34: ateom.Ateom.TerminateWorkload:output_type -> ateom.TerminateWorkloadResponse
-	29, // [29:35] is the sub-list for method output_type
-	23, // [23:29] is the sub-list for method input_type
-	23, // [23:23] is the sub-list for extension type_name
-	23, // [23:23] is the sub-list for extension extendee
-	0,  // [0:23] is the sub-list for field type_name
+	27, // 4: ateom.RunWorkloadRequest.devices:type_name -> ateom.RunWorkloadRequest.DevicesEntry
+	9,  // 5: ateom.WorkloadSpec.containers:type_name -> ateom.Container
+	14, // 6: ateom.Container.readyz:type_name -> ateom.Readyz
+	11, // 7: ateom.Container.durable_dir_volume_mounts:type_name -> ateom.DurableDirVolumeMount
+	10, // 8: ateom.Container.csi_volume_mounts:type_name -> ateom.VolumeMount
+	12, // 9: ateom.Container.system_info_volume_mounts:type_name -> ateom.SystemInfoVolumeMount
+	13, // 10: ateom.Container.image_volume_mounts:type_name -> ateom.ImageVolumeMount
+	28, // 11: ateom.Container.devices:type_name -> ateom.Container.DevicesEntry
+	15, // 12: ateom.Readyz.http_get:type_name -> ateom.HTTPGetAction
+	8,  // 13: ateom.CheckpointWorkloadRequest.spec:type_name -> ateom.WorkloadSpec
+	29, // 14: ateom.CheckpointWorkloadRequest.runtime_asset_paths:type_name -> ateom.CheckpointWorkloadRequest.RuntimeAssetPathsEntry
+	0,  // 15: ateom.CheckpointWorkloadRequest.scope:type_name -> ateom.SnapshotScope
+	8,  // 16: ateom.RestoreWorkloadRequest.spec:type_name -> ateom.WorkloadSpec
+	30, // 17: ateom.RestoreWorkloadRequest.runtime_asset_paths:type_name -> ateom.RestoreWorkloadRequest.RuntimeAssetPathsEntry
+	0,  // 18: ateom.RestoreWorkloadRequest.scope:type_name -> ateom.SnapshotScope
+	7,  // 19: ateom.RestoreWorkloadRequest.egress_gateway:type_name -> ateom.EgressGateway
+	31, // 20: ateom.RestoreWorkloadRequest.devices:type_name -> ateom.RestoreWorkloadRequest.DevicesEntry
+	1,  // 21: ateom.WorkloadStatsSample.sandbox_class:type_name -> ateom.SandboxClass
+	2,  // 22: ateom.WorkloadStatsSample.source:type_name -> ateom.StatsSource
+	22, // 23: ateom.GetWorkloadStatsResponse.sample:type_name -> ateom.WorkloadStatsSample
+	22, // 24: ateom.GetActiveWorkloadStatsResponse.sample:type_name -> ateom.WorkloadStatsSample
+	3,  // 25: ateom.GetActiveWorkloadStatsResponse.no_sample_reason:type_name -> ateom.NoSampleReason
+	6,  // 26: ateom.Ateom.RunWorkload:input_type -> ateom.RunWorkloadRequest
+	17, // 27: ateom.Ateom.CheckpointWorkload:input_type -> ateom.CheckpointWorkloadRequest
+	19, // 28: ateom.Ateom.RestoreWorkload:input_type -> ateom.RestoreWorkloadRequest
+	21, // 29: ateom.Ateom.GetWorkloadStats:input_type -> ateom.GetWorkloadStatsRequest
+	24, // 30: ateom.Ateom.GetActiveWorkloadStats:input_type -> ateom.GetActiveWorkloadStatsRequest
+	4,  // 31: ateom.Ateom.TerminateWorkload:input_type -> ateom.TerminateWorkloadRequest
+	16, // 32: ateom.Ateom.RunWorkload:output_type -> ateom.RunWorkloadResponse
+	18, // 33: ateom.Ateom.CheckpointWorkload:output_type -> ateom.CheckpointWorkloadResponse
+	20, // 34: ateom.Ateom.RestoreWorkload:output_type -> ateom.RestoreWorkloadResponse
+	23, // 35: ateom.Ateom.GetWorkloadStats:output_type -> ateom.GetWorkloadStatsResponse
+	25, // 36: ateom.Ateom.GetActiveWorkloadStats:output_type -> ateom.GetActiveWorkloadStatsResponse
+	5,  // 37: ateom.Ateom.TerminateWorkload:output_type -> ateom.TerminateWorkloadResponse
+	32, // [32:38] is the sub-list for method output_type
+	26, // [26:32] is the sub-list for method input_type
+	26, // [26:26] is the sub-list for extension type_name
+	26, // [26:26] is the sub-list for extension extendee
+	0,  // [0:26] is the sub-list for field type_name
 }
 
 func init() { file_ateom_proto_init() }
@@ -2109,7 +2168,7 @@ func file_ateom_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_ateom_proto_rawDesc), len(file_ateom_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   25,
+			NumMessages:   28,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -26,6 +26,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -33,6 +35,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/agent-substrate/substrate/internal/ateompath"
+	"github.com/agent-substrate/substrate/internal/proto/ateompb"
 )
 
 // toolkitDir is where the host's NVIDIA container toolkit (nvidia-ctk,
@@ -153,19 +156,116 @@ func ensureCDISpec(ctx context.Context) error {
 	return nil
 }
 
+// nvidiaGPUResource is the extended resource name an ActorTemplate uses to ask
+// for the GPUs this file injects.
+const nvidiaGPUResource = "nvidia.com/gpu"
+
+// gpuPlan is which CDI devices each of an actor's containers gets.
+//
+// A container absent from byContainer gets no GPU at all — not even the driver
+// libraries — which is the point of asking per container.
+type gpuPlan struct {
+	byContainer map[string][]string
+}
+
+// planGPUs works out which of the worker's GPUs each container of an actor gets.
+//
+// actorGPUs is what the actor was admitted to hold, and is the ceiling: the
+// worker pod may have more, and those belong to the worker, not to this actor.
+// Handing out the pod's whole set instead would give every actor on a worker
+// every GPU on it, which is the accounting the scheduler just did being thrown
+// away at the last step.
+//
+// Within that share, devices go to containers in declaration order, so the same
+// template produces the same layout on every activation. Nothing is remembered
+// between them: CDI device names are worker-local and an actor can restore onto
+// a different worker, so a recorded identity would be wrong the first time it
+// moved.
+//
+// Containers that name no device split the actor's share evenly in the only way
+// that is well defined — they all get it — because an actor that asked for a GPU
+// and said nothing more means its containers to have it.
+func planGPUs(containers []*ateompb.Container, actorGPUs int64, available []string) (gpuPlan, error) {
+	if actorGPUs <= 0 {
+		return gpuPlan{}, nil
+	}
+	if actorGPUs > int64(len(available)) {
+		// The scheduler placed this actor against the worker's declared capacity, so
+		// reaching here means the pod holds fewer GPUs than the worker advertised.
+		return gpuPlan{}, fmt.Errorf("actor holds %d GPUs, but the worker pod has %d", actorGPUs, len(available))
+	}
+	mine := available[:actorGPUs]
+
+	var claimed int64
+	for _, c := range containers {
+		claimed += c.GetDevices()[nvidiaGPUResource]
+	}
+	if claimed > actorGPUs {
+		// Admission checks this, so it only trips if the template outran it.
+		return gpuPlan{}, fmt.Errorf("actor's containers ask for %d GPUs, more than the %d the actor holds", claimed, actorGPUs)
+	}
+
+	plan := gpuPlan{byContainer: make(map[string][]string, len(containers))}
+	if claimed == 0 {
+		for _, c := range containers {
+			plan.byContainer[c.GetName()] = mine
+		}
+		return plan, nil
+	}
+	var next int64
+	for _, c := range containers {
+		n := c.GetDevices()[nvidiaGPUResource]
+		if n <= 0 {
+			continue
+		}
+		plan.byContainer[c.GetName()] = mine[next : next+n]
+		next += n
+	}
+	return plan, nil
+}
+
+// planActorGPUs resolves the actor's GPU layout once, before its containers are
+// created, so every container of one actor is placed against the same view of
+// the pod's devices. A pod with no GPU yields the zero plan, which injects
+// nothing because maybeInjectGPU returns early.
+func planActorGPUs(ctx context.Context, containers []*ateompb.Container, actorDevices map[string]int64) (gpuPlan, error) {
+	if !gpuPresent() || actorDevices[nvidiaGPUResource] <= 0 {
+		return gpuPlan{}, nil
+	}
+	if err := ensureCDISpec(ctx); err != nil {
+		return gpuPlan{}, err
+	}
+	cdiData, err := os.ReadFile(filepath.Join(cdiOutputDir, "nvidia.json"))
+	if err != nil {
+		return gpuPlan{}, fmt.Errorf("reading CDI spec: %w", err)
+	}
+	var cdi cdiSpec
+	if err := json.Unmarshal(cdiData, &cdi); err != nil {
+		return gpuPlan{}, fmt.Errorf("parsing CDI spec: %w", err)
+	}
+	return planGPUs(containers, actorDevices[nvidiaGPUResource], gpuDeviceNames(&cdi))
+}
+
 // maybeInjectGPU is a no-op unless the worker pod has a GPU. When it does, it
-// generates the per-pod CDI spec once and injects the GPU into the actor
-// container's OCI bundle before runsc create.
-func maybeInjectGPU(ctx context.Context, actorUID, containerName string) error {
+// generates the per-pod CDI spec once and injects the GPUs this container was
+// given into its OCI bundle before runsc create.
+func maybeInjectGPU(ctx context.Context, actorUID, containerName string, plan gpuPlan) error {
 	if !gpuPresent() {
 		return nil
 	}
-	slog.InfoContext(ctx, "Injecting GPU into actor container", slog.String("container", containerName))
 	if err := ensureCDISpec(ctx); err != nil {
 		return err
 	}
+	devices := plan.byContainer[containerName]
+	if len(devices) == 0 {
+		// Either the actor holds no GPU, or it does and this container is not one
+		// of the containers it goes to.
+		return nil
+	}
+	slog.InfoContext(ctx, "Injecting GPU into actor container",
+		slog.String("container", containerName), slog.Any("devices", devices))
 	bundleDir := ateompath.OCIBundlePath(actorUID, containerName)
-	if err := injectGPUIntoBundle(ctx, bundleDir, cdiOutputDir); err != nil {
+	if err := injectGPUIntoBundle(ctx, bundleDir, cdiOutputDir, devices); err != nil {
 		return fmt.Errorf("injecting GPU into %q bundle: %w", containerName, err)
 	}
 	return nil
@@ -183,9 +283,29 @@ type cdiSpec struct {
 
 // cdiAllDevice is the CDI device that carries every GPU assigned to the pod.
 // nvidia-ctk also emits per-index ("0") and per-UUID devices that repeat the same
-// nodes, so we apply only this one (plus the spec-level edits) to avoid injecting
-// each device node several times.
+// nodes, so we apply only one of them (plus the spec-level edits) to avoid
+// injecting each device node several times.
 const cdiAllDevice = "all"
+
+// gpuDeviceNames returns the CDI device names for the pod's individual GPUs, in
+// index order. nvidia-ctk names each GPU by its index and repeats it under its
+// UUID and under "all"; the index names are the set that can be handed out one
+// at a time, and sorting them numerically makes the order the pod's own device
+// order rather than the spec's.
+func gpuDeviceNames(cdi *cdiSpec) []string {
+	var indices []int
+	for _, d := range cdi.Devices {
+		if i, err := strconv.Atoi(d.Name); err == nil && i >= 0 {
+			indices = append(indices, i)
+		}
+	}
+	sort.Ints(indices)
+	names := make([]string, 0, len(indices))
+	for _, i := range indices {
+		names = append(names, strconv.Itoa(i))
+	}
+	return names
+}
 
 type cdiEdits struct {
 	Env         []string   `json:"env,omitempty"`
@@ -238,7 +358,10 @@ func resolveDevNumbers(path string, major, minor int64) (int64, int64, error) {
 // SONAME symlinks (libcuda.so.1 -> libcuda.so.580.x) into the actor rootfs, which is
 // what lets the GPU worker keep the plain unprivileged posture (no user namespace, no
 // unmasked /proc). The CDI spec is plain JSON, so no CDI library is needed.
-func injectGPUIntoBundle(ctx context.Context, bundleDir, cdiSpecDir string) error {
+//
+// devices names the CDI devices to apply. Empty means the whole pod's set, via the
+// "all" device.
+func injectGPUIntoBundle(ctx context.Context, bundleDir, cdiSpecDir string, devices []string) error {
 	cdiData, err := os.ReadFile(filepath.Join(cdiSpecDir, "nvidia.json"))
 	if err != nil {
 		return fmt.Errorf("reading CDI spec: %w", err)
@@ -247,23 +370,30 @@ func injectGPUIntoBundle(ctx context.Context, bundleDir, cdiSpecDir string) erro
 	if err := json.Unmarshal(cdiData, &cdi); err != nil {
 		return fmt.Errorf("parsing CDI spec: %w", err)
 	}
-	// Spec-level edits (driver libs, common device nodes, env) plus only the "all"
-	// device's edits — applying every device would inject each GPU node several times
-	// (nvidia-ctk repeats nodes across its per-index, per-UUID, and "all" devices).
-	edits := cdi.ContainerEdits
-	var foundAll bool
-	for _, d := range cdi.Devices {
-		if d.Name != cdiAllDevice {
-			continue
-		}
-		foundAll = true
-		edits.Env = append(edits.Env, d.ContainerEdits.Env...)
-		edits.DeviceNodes = append(edits.DeviceNodes, d.ContainerEdits.DeviceNodes...)
-		edits.Mounts = append(edits.Mounts, d.ContainerEdits.Mounts...)
-		edits.Hooks = append(edits.Hooks, d.ContainerEdits.Hooks...)
+	if len(devices) == 0 {
+		devices = []string{cdiAllDevice}
 	}
-	if !foundAll {
-		return fmt.Errorf("CDI spec in %s has no %q device", cdiSpecDir, cdiAllDevice)
+	// Spec-level edits (driver libs, common device nodes, env) plus the edits of the
+	// named devices only. nvidia-ctk repeats each GPU's nodes across its per-index,
+	// per-UUID and "all" devices, so applying every device in the spec would inject
+	// each node several times — and would hand this container the whole pod.
+	edits := cdi.ContainerEdits
+	for _, want := range devices {
+		var found bool
+		for _, d := range cdi.Devices {
+			if d.Name != want {
+				continue
+			}
+			found = true
+			edits.Env = append(edits.Env, d.ContainerEdits.Env...)
+			edits.DeviceNodes = append(edits.DeviceNodes, d.ContainerEdits.DeviceNodes...)
+			edits.Mounts = append(edits.Mounts, d.ContainerEdits.Mounts...)
+			edits.Hooks = append(edits.Hooks, d.ContainerEdits.Hooks...)
+			break
+		}
+		if !found {
+			return fmt.Errorf("CDI spec in %s has no %q device", cdiSpecDir, want)
+		}
 	}
 	if len(edits.DeviceNodes) == 0 {
 		return fmt.Errorf("CDI spec in %s resolved no devices", cdiSpecDir)

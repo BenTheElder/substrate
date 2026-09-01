@@ -143,6 +143,15 @@ message RunWorkloadRequest {
   // runtime default (unlimited for gVisor, the kata config for the micro-VM).
   int64 cpu_milli = 11;    // CPU limit in millicores (1000 = one core).
   int64 memory_bytes = 12; // Memory limit in bytes.
+
+  // The devices the Actor holds, keyed by extended resource name
+  // ("nvidia.com/gpu"). Unlike cpu and memory this does not size anything: it
+  // bounds what the ateom may expose, so an Actor never reaches a device the
+  // Worker did not admit it for. Which of the Worker's devices back the count is
+  // the ateom's to pick.
+  //
+  // Empty means the Actor asked for none and gets none.
+  map<string, int64> devices = 13;
 }
 
 // EgressGateway configures tunneled egress for one actor activation.
@@ -180,6 +189,15 @@ message Container {
 
   // image_volume_mounts are the image volumes this container mounts, if any.
   repeated ImageVolumeMount image_volume_mounts = 7;
+
+  // devices is how many of each device this container gets, keyed by extended
+  // resource name ("nvidia.com/gpu"), resolved by ate-api-server from the
+  // ActorTemplate. Which physical devices back the count is the ateom's to
+  // decide out of what the Worker holds.
+  //
+  // Empty when no container of the Actor asked for a device, which is the
+  // Actor's whole device set going to every container.
+  map<string, int64> devices = 8;
 }
 
 // VolumeMount is one volume mounted into a container.
@@ -330,6 +348,11 @@ message RestoreWorkloadRequest {
   // these are ignored. Zero means "unset": keep the runtime default.
   int64 cpu_milli = 14;    // CPU limit in millicores (1000 = one core).
   int64 memory_bytes = 15; // Memory limit in bytes.
+
+  // The devices the Actor holds; see RunWorkloadRequest (field 13). Re-resolved
+  // on every restore rather than taken from the snapshot: device identity is
+  // Worker-local and an Actor can restore onto a different Worker.
+  map<string, int64> devices = 16;
 }
 
 message RestoreWorkloadResponse {

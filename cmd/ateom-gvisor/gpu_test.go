@@ -25,6 +25,8 @@ import (
 	"testing"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+
+	"github.com/agent-substrate/substrate/internal/proto/ateompb"
 )
 
 func TestMaybeInjectGPU_NoGPUIsNoop(t *testing.T) {
@@ -32,7 +34,7 @@ func TestMaybeInjectGPU_NoGPUIsNoop(t *testing.T) {
 	old := gpuDeviceGlob
 	gpuDeviceGlob = filepath.Join(dir, "nvidia[0-9]*") // matches nothing
 	defer func() { gpuDeviceGlob = old }()
-	if err := maybeInjectGPU(context.Background(), "actor_uid", "c1"); err != nil {
+	if err := maybeInjectGPU(context.Background(), "actor_uid", "c1", gpuPlan{}); err != nil {
 		t.Fatalf("expected no-op nil when no GPU is present, got %v", err)
 	}
 }
@@ -139,7 +141,7 @@ func TestInjectGPUIntoBundle(t *testing.T) {
 	data, _ := json.Marshal(base)
 	os.WriteFile(filepath.Join(bundle, "config.json"), data, 0o644)
 
-	if err := injectGPUIntoBundle(context.Background(), bundle, specDir); err != nil {
+	if err := injectGPUIntoBundle(context.Background(), bundle, specDir, nil); err != nil {
 		t.Fatalf("inject: %v", err)
 	}
 
@@ -277,14 +279,14 @@ func TestInjectGPUIntoBundle_Idempotent(t *testing.T) {
 		return [4]int{len(s.Linux.Devices), len(s.Mounts), len(s.Process.Env), hooks}
 	}
 
-	if err := injectGPUIntoBundle(context.Background(), bundle, specDir); err != nil {
+	if err := injectGPUIntoBundle(context.Background(), bundle, specDir, nil); err != nil {
 		t.Fatalf("first inject: %v", err)
 	}
 	first := shape()
 	if first[0] == 0 {
 		t.Fatalf("first inject added no devices: %v", first)
 	}
-	if err := injectGPUIntoBundle(context.Background(), bundle, specDir); err != nil {
+	if err := injectGPUIntoBundle(context.Background(), bundle, specDir, nil); err != nil {
 		t.Fatalf("second inject: %v", err)
 	}
 	if second := shape(); second != first {
@@ -368,7 +370,193 @@ func TestInjectGPUIntoBundle_MissingSpecFails(t *testing.T) {
 	// An empty spec dir has no nvidia.json, so injection fails to read the spec.
 	emptyDir := filepath.Join(dir, "cdi-empty")
 	os.MkdirAll(emptyDir, 0o755)
-	if err := injectGPUIntoBundle(context.Background(), bundle, emptyDir); err == nil {
+	if err := injectGPUIntoBundle(context.Background(), bundle, emptyDir, nil); err == nil {
 		t.Fatal("expected error when the CDI spec is missing")
+	}
+}
+
+// twoGPUSpec is a CDI spec shaped like nvidia-ctk's for a two-GPU pod: an "all"
+// device carrying both nodes, a per-index device for each, and a UUID alias that
+// must not be mistaken for a partitionable device.
+const twoGPUSpec = `{
+  "cdiVersion": "0.6.0",
+  "kind": "nvidia.com/gpu",
+  "containerEdits": {"env": ["NVIDIA_COMMON=1"]},
+  "devices": [
+    {"name": "all", "containerEdits": {"deviceNodes": [{"path": "/dev/zero"}, {"path": "/dev/null"}]}},
+    {"name": "0", "containerEdits": {"deviceNodes": [{"path": "/dev/zero"}]}},
+    {"name": "1", "containerEdits": {"deviceNodes": [{"path": "/dev/null"}]}},
+    {"name": "GPU-abcdef", "containerEdits": {"deviceNodes": [{"path": "/dev/zero"}]}}
+  ]
+}`
+
+func TestGPUDeviceNames(t *testing.T) {
+	var cdi cdiSpec
+	if err := json.Unmarshal([]byte(twoGPUSpec), &cdi); err != nil {
+		t.Fatal(err)
+	}
+	got := gpuDeviceNames(&cdi)
+	want := []string{"0", "1"}
+	if len(got) != len(want) {
+		t.Fatalf("gpuDeviceNames() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("gpuDeviceNames() = %v, want %v", got, want)
+		}
+	}
+}
+
+func ctr(name string, gpus int64) *ateompb.Container {
+	c := &ateompb.Container{Name: name}
+	if gpus > 0 {
+		c.Devices = map[string]int64{nvidiaGPUResource: gpus}
+	}
+	return c
+}
+
+func TestPlanGPUs(t *testing.T) {
+	tests := []struct {
+		name       string
+		containers []*ateompb.Container
+		actorGPUs  int64
+		available  []string
+		want       map[string][]string
+		wantErr    bool
+	}{{
+		// An actor that asked for no device gets none, whatever the worker holds.
+		name:       "actor holds nothing",
+		containers: []*ateompb.Container{ctr("main", 0)},
+		actorGPUs:  0,
+		available:  []string{"0", "1"},
+		want:       map[string][]string{},
+	}, {
+		// The actor holds one of the worker's two. Its containers named none, so
+		// they share the actor's share -- and must not reach the worker's other GPU.
+		name:       "containers name none, so they get the actor's share only",
+		containers: []*ateompb.Container{ctr("main", 0), ctr("side", 0)},
+		actorGPUs:  1,
+		available:  []string{"0", "1"},
+		want:       map[string][]string{"main": {"0"}, "side": {"0"}},
+	}, {
+		name:       "one container takes both",
+		containers: []*ateompb.Container{ctr("trainer", 2), ctr("logger", 0)},
+		actorGPUs:  2,
+		available:  []string{"0", "1"},
+		want:       map[string][]string{"trainer": {"0", "1"}},
+	}, {
+		// The point of the whole change: the sidecar gets no device nodes.
+		name:       "a sidecar beside a GPU container gets none",
+		containers: []*ateompb.Container{ctr("trainer", 1), ctr("logger", 0)},
+		actorGPUs:  2,
+		available:  []string{"0", "1"},
+		want:       map[string][]string{"trainer": {"0"}},
+	}, {
+		name:       "containers get a device each, in declaration order",
+		containers: []*ateompb.Container{ctr("shard-a", 1), ctr("shard-b", 1)},
+		actorGPUs:  2,
+		available:  []string{"0", "1"},
+		want:       map[string][]string{"shard-a": {"0"}, "shard-b": {"1"}},
+	}, {
+		name:       "an actor holding more than the pod has fails",
+		containers: []*ateompb.Container{ctr("trainer", 3)},
+		actorGPUs:  3,
+		available:  []string{"0", "1"},
+		wantErr:    true,
+	}, {
+		// Admission catches this, so it only trips if a template outran it.
+		name:       "containers claiming more than the actor holds fails",
+		containers: []*ateompb.Container{ctr("a", 1), ctr("b", 1)},
+		actorGPUs:  1,
+		available:  []string{"0", "1"},
+		wantErr:    true,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := planGPUs(tc.containers, tc.actorGPUs, tc.available)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("planGPUs() = nil error, want one")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("planGPUs() failed: %v", err)
+			}
+			if len(got.byContainer) != len(tc.want) {
+				t.Fatalf("byContainer = %v, want %v", got.byContainer, tc.want)
+			}
+			for name, want := range tc.want {
+				gotDevs := got.byContainer[name]
+				if len(gotDevs) != len(want) {
+					t.Fatalf("byContainer[%q] = %v, want %v", name, gotDevs, want)
+				}
+				for i := range want {
+					if gotDevs[i] != want[i] {
+						t.Fatalf("byContainer[%q] = %v, want %v", name, gotDevs, want)
+					}
+				}
+			}
+		})
+	}
+}
+
+// A container given one GPU of the pod's two must receive that one device node
+// and not the other. This is what the "all" device could never express.
+func TestInjectGPUIntoBundle_OnlyTheNamedDevice(t *testing.T) {
+	dir := t.TempDir()
+	specDir := filepath.Join(dir, "cdi")
+	os.MkdirAll(specDir, 0o755)
+	os.WriteFile(filepath.Join(specDir, "nvidia.json"), []byte(twoGPUSpec), 0o644)
+
+	bundle := filepath.Join(dir, "bundle")
+	os.MkdirAll(filepath.Join(bundle, "rootfs"), 0o755)
+	base := &specs.Spec{Version: "1.0.0", Process: &specs.Process{Args: []string{"true"}}}
+	data, _ := json.Marshal(base)
+	os.WriteFile(filepath.Join(bundle, "config.json"), data, 0o644)
+
+	if err := injectGPUIntoBundle(context.Background(), bundle, specDir, []string{"1"}); err != nil {
+		t.Fatalf("inject: %v", err)
+	}
+
+	out, _ := os.ReadFile(filepath.Join(bundle, "config.json"))
+	var got specs.Spec
+	json.Unmarshal(out, &got)
+
+	var paths []string
+	for _, d := range got.Linux.Devices {
+		paths = append(paths, d.Path)
+	}
+	if len(paths) != 1 || paths[0] != "/dev/null" {
+		t.Fatalf("devices = %v, want just /dev/null (CDI device \"1\")", paths)
+	}
+	// The spec-level edits still apply: the driver env is not per-GPU.
+	var hasCommon bool
+	for _, e := range got.Process.Env {
+		if e == "NVIDIA_COMMON=1" {
+			hasCommon = true
+		}
+	}
+	if !hasCommon {
+		t.Errorf("spec-level env missing, env=%v", got.Process.Env)
+	}
+}
+
+// An unknown CDI device name must fail rather than silently inject nothing.
+func TestInjectGPUIntoBundle_UnknownDeviceFails(t *testing.T) {
+	dir := t.TempDir()
+	specDir := filepath.Join(dir, "cdi")
+	os.MkdirAll(specDir, 0o755)
+	os.WriteFile(filepath.Join(specDir, "nvidia.json"), []byte(twoGPUSpec), 0o644)
+
+	bundle := filepath.Join(dir, "bundle")
+	os.MkdirAll(filepath.Join(bundle, "rootfs"), 0o755)
+	base := &specs.Spec{Version: "1.0.0", Process: &specs.Process{}}
+	data, _ := json.Marshal(base)
+	os.WriteFile(filepath.Join(bundle, "config.json"), data, 0o644)
+
+	if err := injectGPUIntoBundle(context.Background(), bundle, specDir, []string{"7"}); err == nil {
+		t.Fatal("expected an error for a CDI device the spec does not have")
 	}
 }

@@ -682,6 +682,12 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 	if err != nil {
 		return tele, err
 	}
+	// The same limits bound the devices the sandbox may expose, so the actor
+	// reaches only what it was placed for rather than everything the worker holds.
+	devices, err := actorDevices(actorTemplate)
+	if err != nil {
+		return tele, err
+	}
 
 	if local := actor.GetStatus().GetLocalSnapshotInfo(); local != nil {
 		slog.InfoContext(ctx, "Actor has snapshot; Restoring from snapshot")
@@ -698,6 +704,7 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 			EgressGateway:         egressGateway,
 			CpuMilli:              cpuMilli,
 			MemoryBytes:           memBytes,
+			Devices:               devices,
 		}
 		req.Type = ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL
 		req.Config = &ateletpb.RestoreRequest_LocalConfig{
@@ -755,6 +762,7 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 			EgressGateway:     egressGateway,
 			CpuMilli:          cpuMilli,
 			MemoryBytes:       memBytes,
+			Devices:           devices,
 		}
 		_, err = client.Restore(ctx, req)
 		return tele, maybeCrashActor(ctx, w.store, actorRef, err, "while restoring durable snapshot", ateattr.OperationResume)
@@ -782,6 +790,7 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 			EgressGateway:         egressGateway,
 			CpuMilli:              cpuMilli,
 			MemoryBytes:           memBytes,
+			Devices:               devices,
 		}
 		_, err = client.Run(ctx, req)
 		return tele, maybeCrashActor(ctx, w.store, actorRef, err, "while creating workload from spec", ateattr.OperationResume)
