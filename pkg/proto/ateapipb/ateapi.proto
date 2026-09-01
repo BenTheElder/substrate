@@ -126,12 +126,31 @@ service Control {
 }
 
 message LocalSnapshotInfo {
-  // The name of the local checkpoint on each of the nodes below.
+  // The name of the local checkpoint on each of the nodes below. Checkpoint
+  // names are server-generated UUIDs, but any resource name is valid here.
+  //
+  // +k8s:optional
+  // +k8s:format=k8s-short-name
   string snapshot_name = 1;
+
   // Node VMs that have local snapshots for this actor, while it's PAUSED.
+  // Each node appears at most once.
+  //
+  // TODO: revisit this design; a snapshot propagated to every node would
+  // grow this list with the fleet, and the bound below is provisional.
+  //
+  // +k8s:optional
+  // +k8s:maxItems=256
+  // +k8s:listType=set
+  // +k8s:eachVal=+k8s:format=k8s-long-name
   repeated string node_vms_with_local_snapshots = 2;
+
   // Scope the pause checkpoint captured (the template's onPause at pause
-  // time).
+  // time). UNSPECIFIED is tolerated for compatibility and reads as FULL.
+  //
+  // +k8s:optional
+  // +k8s:minimum=1
+  // +k8s:maximum=2 # keep this in sync with the SnapshotContentScope enum
   SnapshotContentScope content_scope = 3;
 }
 
@@ -232,14 +251,39 @@ message ResourceMetadata {
 }
 
 message ExternalVolume {
-  // Name of the volume specified in the actor template.
+  // Name of the volume specified in the actor template. Template volume
+  // names are DNS labels.
+  //
+  // +k8s:required
+  // +k8s:format=k8s-short-name
+  // +k8s:update=NoModify
+  // +k8s:update=NoUnset # set-once; immutable would reject the create
+  // ratchet's nil->set when the final object is validated as an update
   string volume_name = 1;
 
   // The globally unique volume_id returned from the storage system.
-  // This will be initially empty during volume creation
+  // This will be initially empty during volume creation. Its format is the
+  // storage system's own, so it is only bounded and checked for control
+  // characters (U+0000-U+0008, U+000B, U+000C, U+000E-U+001F, U+007F-U+009F).
+  // The CSI spec caps IDs at 128 bytes but does not require it, so allow
+  // some slack. Set once when provisioning completes, then never changed.
+  //
+  // +k8s:optional
+  // +k8s:maxLength=256
+  // +k8s:update=NoModify
+  // +k8s:update=NoUnset
+  // +k8s:customValidation # no control characters
   string storage_volume_id = 2;
 
-  // Internal volume plugin name or CSI driver name.
+  // Internal volume plugin name or CSI driver name, from the StorageClass
+  // provisioner. Must be a DNS subdomain, optionally prefixed with
+  // "substrate.io/" (per the CSI spec's driver-name syntax).
+  //
+  // +k8s:required
+  // +k8s:maxLength=253
+  // +k8s:update=NoModify
+  // +k8s:update=NoUnset # set-once, like volume_name above
+  // +k8s:customValidation
   string volume_type = 3;
 
   enum Status {
@@ -250,10 +294,23 @@ message ExternalVolume {
     STATUS_CREATED = 2;
     // Volume being deleted from the storage system.
     STATUS_DELETING = 3;
+    // Keep this in sync with ExternalVolume.status's maximum.
   }
+
+  // +k8s:optional
+  // +k8s:minimum=1
+  // +k8s:maximum=3 # keep this in sync with the Status enum
   Status status = 4;
+
   // volume_context contains metadata returned by the CSI driver during volume
-  // provisioning, needed by the node plugin for mounting (e.g. attachment info).
+  // provisioning, needed by the node plugin for mounting (e.g. attachment
+  // info). Keys and values are the driver's own, so they are only bounded,
+  // not validated.
+  //
+  // +k8s:optional
+  // +k8s:maxProperties=32
+  // +k8s:eachKey=+k8s:maxLength=128
+  // +k8s:eachVal=+k8s:maxLength=256
   map<string, string> volume_context = 5;
 }
 
@@ -453,33 +510,59 @@ message ActorStatus {
   // +k8s:update=NoModify # can be set and cleared, but not changed in place
   WorkerAssignment worker_assignment = 2;
 
-  // TODO: Add DV (optional, maxLength?)
+  // The name the in-progress durable snapshot will be stored under. Snapshot
+  // names are server-generated UUIDs, but any resource name is valid here.
+  //
+  // +k8s:optional
+  // +k8s:format=k8s-short-name
   string in_progress_snapshot_name = 3;
 
-  // The latest durable snapshot created for this Actor.
-  // +k8s:opaqueType
-  // TODO: Add DV (required?)
+  // The latest durable snapshot created for this Actor. Unset until the first
+  // snapshot exists.
+  //
+  // +k8s:optional
+  // +k8s:subfield(atespace)=+k8s:required
   ObjectRef latest_snapshot = 4;
 
   // Node-local state used only while the Actor is paused.
-  // TODO: Add DV (optional, need to recurse into this type)
+  //
+  // +k8s:optional
   LocalSnapshotInfo local_snapshot_info = 5;
 
   // Actor version captured when the current durable snapshot began.
-  // TODO: Add DV (optional, minimum?)
+  //
+  // +k8s:optional
+  // +k8s:minimum=1
   int64 in_progress_snapshot_source_actor_version = 6;
 
   // Volumes attached to the actor. These volumes only live as long as the actor.
-  // They are deleted when the actor is deleted.
-  // TODO: Add DV (optional, need to recurse into this type, immutable?)
+  // They are deleted when the actor is deleted. Each template volume
+  // appears at most once.
+  //
+  // TODO: consider a literal map keyed by volume_name instead of a list-map.
+  //
+  // +k8s:optional
+  // +k8s:maxItems=32 # matches the template's volumes bound
+  // +k8s:listType=map
+  // +k8s:listMapKey=volume_name
   repeated ExternalVolume actor_volumes = 7;
 
-  // TODO: Add DV (optional, maxLength?)
+  // The name of the in-progress node-local checkpoint. Like durable snapshot
+  // names, these are server-generated UUIDs.
+  //
+  // +k8s:optional
+  // +k8s:format=k8s-short-name
   string in_progress_local_snapshot_name = 8;
 
   // How this Actor was seeded from an ActorSnapshot at CreateActor. Unset if
-  // the Actor was not created from a snapshot.
-  // TODO: Add DV (optional, need to recurse into this type, immutable?)
+  // the Actor was not created from a snapshot. Set once at creation and
+  // never changed afterward.
+  //
+  // +k8s:optional
+  // +k8s:update=NoModify
+  // +k8s:update=NoUnset # together: set once, never changed, never cleared.
+  // Not immutable: create validates the final object against the request
+  // with op=Update, and immutable rejects that nil->set.
   ActorSourceSnapshotStatus source_snapshot = 9;
 }
 
@@ -488,10 +571,15 @@ message ActorStatus {
 message ActorSourceSnapshotStatus {
   // The (atespace, name) of the snapshot the tag resolved to at
   // creation time.
-  // +k8s:opaqueType
+  //
+  // +k8s:required
+  // +k8s:subfield(atespace)=+k8s:required
   ObjectRef snapshot = 1;
 
   // UID of the snapshot resolved at creation time.
+  //
+  // +k8s:required
+  // +k8s:format=k8s-uuid
   string snapshot_uid = 2;
 }
 
@@ -1192,7 +1280,8 @@ message DeleteActorTemplateRequest {
 }
 
 message GetActorRequest {
-  // +k8s:opaqueType
+  // +k8s:required
+  // +k8s:subfield(atespace)=+k8s:required
   ObjectRef actor = 1;
 }
 
@@ -1221,7 +1310,8 @@ message UpdateActorRequest {
 }
 
 message SuspendActorRequest {
-  // +k8s:opaqueType
+  // +k8s:required
+  // +k8s:subfield(atespace)=+k8s:required
   ObjectRef actor = 1;
 }
 
@@ -1230,7 +1320,8 @@ message SuspendActorResponse {
 }
 
 message PauseActorRequest {
-  // +k8s:opaqueType
+  // +k8s:required
+  // +k8s:subfield(atespace)=+k8s:required
   ObjectRef actor = 1;
 }
 
@@ -1239,10 +1330,13 @@ message PauseActorResponse {
 }
 
 message ResumeActorRequest {
-  // +k8s:opaqueType
+  // +k8s:required
+  // +k8s:subfield(atespace)=+k8s:required
   ObjectRef actor = 1;
 
   // If true, skip golden snapshot and boot the workload from scratch.
+  //
+  // +k8s:optional
   bool boot = 2;
 }
 
@@ -1255,8 +1349,13 @@ message ResumeActorResponse {
 }
 
 message DeleteActorRequest {
-  // +k8s:opaqueType
+  // +k8s:required
+  // +k8s:subfield(atespace)=+k8s:required
   ObjectRef actor = 1;
+
+  // If true, delete the actor regardless of its state.
+  //
+  // +k8s:optional
   bool any_state = 2;
 }
 
@@ -1465,15 +1564,24 @@ message DrainWorkerRequest {
 // missed or duplicated if the system state changes during pagination.
 message ListActorsRequest {
   // The atespace to list actors from. Empty lists across all atespaces.
+  //
+  // +k8s:optional
+  // +k8s:format=k8s-short-name
   string atespace = 1;
 
   // Requested page size; the server may return fewer, or occasionally
   // slightly more. If unspecified, defaults to a server-chosen value;
   // values above 1000 are coerced to 1000.
+  //
+  // +k8s:optional
+  // +k8s:minimum=1
   int32 page_size = 2;
 
   // Pagination token from a previous ListActors response.
   // Omit or leave empty for the first request.
+  //
+  // +k8s:optional
+  // +k8s:maxLength=256
   string page_token = 3;
 }
 
