@@ -12,25 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Substrate ActorTemplate resource (protojson-shaped ateapipb.ActorTemplate,
-# NOT the ate.dev/v1alpha1 CRD) for the counter demo. Applied with
+# ActorTemplate (protojson-shaped ateapipb.ActorTemplate) for the
+# autoscaled-workerpool demo. Applied with
 # `kubectl ate create actor-template -f -` after `ko resolve` replaces the
-# ko:// image reference; the ate-demo-counter-substrate atespace must exist.
+# ko:// image reference; the ate-demo-autoscaled-workerpool atespace must
+# exist.
 metadata:
-  atespace: ate-demo-counter-substrate
+  atespace: ate-demo-autoscaled-workerpool
   name: counter
 workerSelector:
   matchLabels:
-    workload: counter-substrate
+    workload: counter-autoscaled
 containers:
 - name: counter
   image: ko://github.com/agent-substrate/substrate/demos/counter
   command:
   - /ko-app/counter
-  # Second listener for atenet-router's arbitrary-port ingress, kept in step
-  # with the CRD variant in counter.yaml.tmpl.
-  - --extra-port=9090
-  - --tcp-port=9091
   readyz:
     httpGet:
       path: /readyz
@@ -38,20 +35,10 @@ containers:
   volumeMounts:
   - name: data
     mountPath: /home/counter
-# Sandbox size: at (or below) the pool's per-worker capacity (see
-# internal/sizing). Quantities are strings in the proto.
-resources:
-  limits:
-  - name: cpu
-    quantity: "1"
-  - name: memory
-    quantity: 512Mi
 snapshotsConfig:
-  # FULL on both triggers so a suspend captures process memory and the
-  # in-memory count continues across suspend/resume.
   onPause: SNAPSHOT_CONTENT_SCOPE_FULL
-  onCommit: SNAPSHOT_CONTENT_SCOPE_FULL
-  storageLocation: gs://${BUCKET_NAME}/ate-demo-counter-substrate/
+  onCommit: SNAPSHOT_CONTENT_SCOPE_DATA
+  storageLocation: gs://${BUCKET_NAME}/ate-demo-autoscaled-workerpool/
 sandboxConfig:
   sandboxClass: SANDBOX_CLASS_GVISOR
   configName: gvisor-default
