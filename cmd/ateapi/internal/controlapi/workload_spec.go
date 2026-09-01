@@ -22,7 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-// toAteletResources resolves a container's declared limits into the scalars
+// toAteletResources resolves a container's declared limits into the numbers
 // atelet and the ateoms consume; everything downstream compares numbers.
 // Returns nil when the container declares no limits, so the OCI spec stays
 // untouched for templates that do not use them.
@@ -40,7 +40,12 @@ func toAteletResources(r *ateapipb.Resources) (*ateletpb.ResourceLimits, error) 
 			out.MemoryBytes = q.Value()
 		}
 	}
-	if out.MemoryBytes == 0 && out.CpuMillis == 0 {
+	devices, err := devicesFromLimits(r.GetLimits(), "container")
+	if err != nil {
+		return nil, err
+	}
+	out.Devices = devices
+	if out.MemoryBytes == 0 && out.CpuMillis == 0 && len(out.Devices) == 0 {
 		return nil, nil
 	}
 	return out, nil

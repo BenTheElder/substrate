@@ -114,6 +114,9 @@ func validateCreateActorTemplateRequest(req *ateapipb.CreateActorTemplateRequest
 			errs = append(errs, field.Required(containersPath.Index(i).Child("image"), ""))
 		}
 	}
+	if err := validateTemplateDevices(template); err != nil {
+		errs = append(errs, field.Invalid(templatePath.Child("resources"), template.GetResources(), err.Error()))
+	}
 
 	snapshotsPath := templatePath.Child("snapshots_config")
 	if snapshots := template.GetSnapshotsConfig(); snapshots == nil {

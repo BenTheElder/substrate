@@ -349,10 +349,16 @@ type Container struct {
 	// +optional
 	SecurityContext *SecurityContext `json:"securityContext,omitempty"`
 
-	// Resources are the compute limits for this container, enforced inside the
-	// actor's sandbox. Only cpu and memory are supported, and only on micro-VM
-	// actors: gVisor applies cgroup limits at the sandbox level, so a
+	// Resources are the limits for this container.
+	//
+	// cpu and memory are enforced inside the actor's sandbox, and only on
+	// micro-VM actors: gVisor applies cgroup limits at the sandbox level, so a
 	// per-container cgroup there is created but stays empty.
+	//
+	// A device limit ("nvidia.com/gpu") instead says this container is one that
+	// gets the device. The actor's spec.resources.limits is what asks for the
+	// device and what the scheduler places on; these subdivide that among the
+	// containers, and a container that names no device is given none.
 	//
 	// +optional
 	Resources *ContainerResources `json:"resources,omitempty"`
@@ -364,13 +370,14 @@ type Container struct {
 // happens at the pod level: the WorkerPool reserves capacity on a node, and
 // per-container limits subdivide a budget that is already held.
 //
-// +kubebuilder:validation:XValidation:rule="!has(self.limits) || self.limits.all(k, k == 'cpu' || k == 'memory')",message="only cpu and memory limits are supported"
+// +kubebuilder:validation:XValidation:rule="!has(self.limits) || self.limits.all(k, k == 'cpu' || k == 'memory' || (k.contains('/') && !k.startsWith('ate.dev/')))",message="only cpu, memory, and device limits are supported; ate.dev/* resources are shareable and are not devices an actor holds"
 // +kubebuilder:validation:XValidation:rule="!has(self.limits) || !('memory' in self.limits) || quantity(string(self.limits['memory'])).isGreaterThan(quantity('0'))",message="memory limit must be greater than zero"
 // +kubebuilder:validation:XValidation:rule="!has(self.limits) || !('cpu' in self.limits) || quantity(string(self.limits['cpu'])).isGreaterThan(quantity('0'))",message="cpu limit must be greater than zero"
 // +kubebuilder:validation:XValidation:rule="!has(self.limits) || !('cpu' in self.limits) || quantity(string(self.limits['cpu'])).isLessThan(quantity('1k'))",message="cpu limit must be less than 1000 cores"
 type ContainerResources struct {
-	// Limits is the maximum amount of compute resources allowed. Only cpu and
-	// memory are supported, and each must be greater than zero.
+	// Limits is the maximum amount of compute resources allowed, plus the
+	// devices this container gets. cpu and memory must each be greater than
+	// zero; a device count must be a whole number greater than zero.
 	//
 	// A cpu limit below 10m is raised to 10m: the kernel rejects a CFS quota
 	// under 1ms, and the quota is expressed against a 100ms period.
@@ -385,7 +392,7 @@ type ContainerResources struct {
 // unbounded map makes the estimator assume the worst case and reject the whole
 // schema.
 //
-// +kubebuilder:validation:MaxProperties=2
+// +kubebuilder:validation:MaxProperties=6
 type ContainerResourceList map[corev1.ResourceName]resource.Quantity
 
 // ContainerReadyz configures the readiness signal for a container.
@@ -564,7 +571,12 @@ type SnapshotsConfig struct {
 // the runtime check. gVisor has no reserve, so this only applies to micro-VM.
 // +kubebuilder:validation:XValidation:rule="!has(self.sandboxClass) || self.sandboxClass != 'microvm' || !has(self.resources) || !has(self.resources.limits) || !('memory' in self.resources.limits) || !quantity(self.resources.limits['memory']).isLessThan(quantity('256Mi'))",message="For sandboxClass 'microvm', spec.resources.limits.memory must be at least 256Mi (128Mi VMM reserve + 128Mi guest minimum); below this the VM cannot boot"
 // +kubebuilder:validation:XValidation:rule="!has(self.containers) || self.containers.all(c, !has(c.volumeMounts) || c.volumeMounts.all(vm, has(self.volumes) && self.volumes.exists(v, v.name == vm.name)))",message="All volume mounts must refer to a volume defined in spec.volumes"
-// +kubebuilder:validation:XValidation:rule="!has(self.containers) || !self.containers.exists(c, has(c.resources)) || (has(self.sandboxClass) && self.sandboxClass == 'microvm')",message="container resources are only supported when sandboxClass is 'microvm'"
+// Per-container cpu and memory bind only on a micro-VM: gVisor's sentry backs
+// every container in the actor, so a per-container cgroup there is created and
+// stays empty. Devices are not a cgroup limit — they say which container an
+// already-held device is exposed to — and GPU passthrough is gVisor-only, so
+// they are allowed on both.
+// +kubebuilder:validation:XValidation:rule="!has(self.containers) || !self.containers.exists(c, has(c.resources) && has(c.resources.limits) && ('cpu' in c.resources.limits || 'memory' in c.resources.limits)) || (has(self.sandboxClass) && self.sandboxClass == 'microvm')",message="container cpu and memory limits are only supported when sandboxClass is 'microvm'"
 type ActorTemplateSpec struct {
 	// Containers is the workload definition.
 	//
@@ -627,6 +639,10 @@ type ActorTemplateSpec struct {
 	// that many free, and each actor holds its own. A worker without the device
 	// cannot host the actor at all, which is what separates a device from cpu and
 	// memory, where an unknown capacity is treated as unconstrained.
+	//
+	// What the actor holds is declared here; which of its containers get it is
+	// declared in each container's resources.limits, and those may not ask for
+	// more than this in total. Containers naming no device get none.
 	//
 	// A zero or absent limit leaves the sandbox at the runtime default (unlimited
 	// for gVisor, the kata config for the micro-VM).

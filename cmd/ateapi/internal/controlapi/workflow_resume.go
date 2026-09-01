@@ -602,30 +602,6 @@ func actorResourceLimits(tmpl *ateapipb.ActorTemplate) (cpuMilli, memBytes int64
 	return cpuMilli, memBytes, nil
 }
 
-// actorDevices is what the template asks for that only places the actor: unlike
-// cpu and memory, a device is not passed to the sandbox to size it.
-func actorDevices(tmpl *ateapipb.ActorTemplate) (map[string]int64, error) {
-	var devices map[string]int64
-	for _, limit := range tmpl.GetResources().GetLimits() {
-		if !resources.IsExclusiveDevice(limit.GetName()) {
-			continue
-		}
-		q, err := resource.ParseQuantity(limit.GetQuantity())
-		if err != nil {
-			return nil, fmt.Errorf("invalid template device limit %s=%q: %w", limit.GetName(), limit.GetQuantity(), err)
-		}
-		count := q.Value()
-		if count <= 0 {
-			continue
-		}
-		if devices == nil {
-			devices = make(map[string]int64, 1)
-		}
-		devices[limit.GetName()] = count
-	}
-	return devices, nil
-}
-
 func schedulingConstraints(actor *ateapipb.Actor, tmpl *ateapipb.ActorTemplate) (scheduling.Constraints, error) {
 	cpuMilli, memBytes, err := actorResourceLimits(tmpl)
 	if err != nil {

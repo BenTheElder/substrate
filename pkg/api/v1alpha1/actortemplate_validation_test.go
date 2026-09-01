@@ -124,15 +124,44 @@ func TestActorTemplateValidation(t *testing.T) {
 			}
 		},
 	}, {
-		name: "unsupported resource key",
+		name: "device limit",
 		mutate: func(at *ActorTemplate) {
 			at.Spec.SandboxClass = SandboxClassMicroVM
+			at.Spec.Resources = &corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")},
+			}
 			at.Spec.Containers[0].Resources = &ContainerResources{
 				Limits: ContainerResourceList{"nvidia.com/gpu": resource.MustParse("1")},
 			}
 		},
+		verify: func(t *testing.T, at *ActorTemplate) {
+			q := at.Spec.Containers[0].Resources.Limits["nvidia.com/gpu"]
+			if q.Value() != 1 {
+				t.Errorf("nvidia.com/gpu limit = %v, want 1", q)
+			}
+		},
+	}, {
+		name: "unsupported resource key",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.SandboxClass = SandboxClassMicroVM
+			at.Spec.Containers[0].Resources = &ContainerResources{
+				Limits: ContainerResourceList{"ephemeral-storage": resource.MustParse("1Gi")},
+			}
+		},
 		wantErr: true,
-		errMsg:  "only cpu and memory limits are supported",
+		errMsg:  "only cpu, memory, and device limits are supported",
+	}, {
+		// ate.dev/* is a shareable grant, not a device an actor holds; counting
+		// one would cap a micro-VM worker at a single actor.
+		name: "shareable ate.dev resource is not a device",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.SandboxClass = SandboxClassMicroVM
+			at.Spec.Containers[0].Resources = &ContainerResources{
+				Limits: ContainerResourceList{"ate.dev/kvm": resource.MustParse("1")},
+			}
+		},
+		wantErr: true,
+		errMsg:  "only cpu, memory, and device limits are supported",
 	}, {
 		name: "negative memory limit",
 		mutate: func(at *ActorTemplate) {
@@ -173,7 +202,41 @@ func TestActorTemplateValidation(t *testing.T) {
 			}
 		},
 		wantErr: true,
-		errMsg:  "container resources are only supported when sandboxClass is 'microvm'",
+		errMsg:  "container cpu and memory limits are only supported when sandboxClass is 'microvm'",
+	}, {
+		// GPU passthrough is gVisor-only, so gating every container resource on
+		// micro-VM would leave per-container device selection unreachable.
+		name: "container device limits on a gvisor template",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.Resources = &corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")},
+			}
+			at.Spec.Containers[0].Resources = &ContainerResources{
+				Limits: ContainerResourceList{"nvidia.com/gpu": resource.MustParse("1")},
+			}
+		},
+		verify: func(t *testing.T, at *ActorTemplate) {
+			q := at.Spec.Containers[0].Resources.Limits["nvidia.com/gpu"]
+			if q.Value() != 1 {
+				t.Errorf("nvidia.com/gpu limit = %v, want 1", q)
+			}
+		},
+	}, {
+		// A device limit does not buy a cpu limit alongside it on gVisor.
+		name: "container mixing a device with cpu on a gvisor template",
+		mutate: func(at *ActorTemplate) {
+			at.Spec.Resources = &corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")},
+			}
+			at.Spec.Containers[0].Resources = &ContainerResources{
+				Limits: ContainerResourceList{
+					"nvidia.com/gpu":   resource.MustParse("1"),
+					corev1.ResourceCPU: resource.MustParse("200m"),
+				},
+			}
+		},
+		wantErr: true,
+		errMsg:  "container cpu and memory limits are only supported when sandboxClass is 'microvm'",
 	}, {
 		name: "container resources on one of several containers still gates the template",
 		mutate: func(at *ActorTemplate) {
@@ -186,7 +249,7 @@ func TestActorTemplateValidation(t *testing.T) {
 			})
 		},
 		wantErr: true,
-		errMsg:  "container resources are only supported when sandboxClass is 'microvm'",
+		errMsg:  "container cpu and memory limits are only supported when sandboxClass is 'microvm'",
 	}, {
 		name: "no container resources is fine on gvisor",
 		mutate: func(at *ActorTemplate) {

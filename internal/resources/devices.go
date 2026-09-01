@@ -15,6 +15,9 @@
 package resources
 
 import (
+	"fmt"
+	"maps"
+	"slices"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -64,4 +67,33 @@ func IsExclusiveDevice(name string) bool {
 		return false // memory, not a device
 	}
 	return !strings.HasPrefix(name, shareablePrefix)
+}
+
+// ValidateDeviceSubdivision checks the per-container device counts of one Actor
+// against what the Actor itself asks for. The Actor's request is what the
+// scheduler places on, so the containers can only divide it up: a container
+// cannot name a device the Actor did not ask for, and together they cannot ask
+// for more of one than the Actor holds.
+//
+// They sum rather than share because a device is handed to one container at a
+// time. Two containers that each want a GPU are an Actor that wants two.
+//
+// Asking for fewer than the Actor holds is allowed: the surplus is simply
+// exposed to no container, the same as declaring no container limits at all.
+func ValidateDeviceSubdivision(actor map[string]int64, containers map[string]map[string]int64) error {
+	claimed := make(map[string]int64, len(actor))
+	for _, name := range slices.Sorted(maps.Keys(containers)) {
+		for device, count := range containers[name] {
+			if _, ok := actor[device]; !ok {
+				return fmt.Errorf("container %q asks for device %s, which the actor does not request", name, device)
+			}
+			claimed[device] += count
+		}
+	}
+	for _, device := range slices.Sorted(maps.Keys(claimed)) {
+		if claimed[device] > actor[device] {
+			return fmt.Errorf("containers ask for %d of device %s, more than the actor's %d", claimed[device], device, actor[device])
+		}
+	}
+	return nil
 }

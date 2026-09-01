@@ -129,6 +129,12 @@ func actorTemplateFromCRD(t *atev1alpha1.ActorTemplate) (*ateapipb.ActorTemplate
 	for i := range t.Spec.Volumes {
 		out.Volumes = append(out.Volumes, volumeFromCRD(&t.Spec.Volumes[i]))
 	}
+	// Summing device claims across containers is beyond CEL, so the CRD's own
+	// validation cannot catch this.
+	if err := validateTemplateDevices(out); err != nil {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"ActorTemplate %s/%s: %v", t.Namespace, t.Name, err)
+	}
 	return out, nil
 }
 

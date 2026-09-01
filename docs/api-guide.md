@@ -70,9 +70,8 @@ spec:
 
 A GPU pool needs two things: (1) scheduling onto GPU nodes, and (2) a
 `nvidia.com/gpu` request in `template.resources`. The request does double duty —
-it makes the device plugin assign a GPU to the worker pod **and** triggers
-Substrate to pass that GPU **through to each actor's sandbox**. No per-actor
-configuration is needed.
+it makes the device plugin assign a GPU to the worker pod **and** tells the
+scheduler the worker has one to give out.
 
 ```yaml
 apiVersion: ate.dev/v1alpha1
@@ -111,12 +110,44 @@ each actor container's OCI spec, and runs `runsc` with `--nvproxy` so CUDA and N
 work inside the sandbox. A worker requesting `nvidia.com/gpu: N` passes all N
 through.
 
-Every container in the actor gets the GPU. An actor's containers share one sandbox
-and the worker's whole device set, and `ActorTemplate` has no per-container resource
-fields, so GPUs are shared at the actor level rather than assigned to one container,
-the same as cpu and memory. This differs from a Kubernetes Pod, where the GPU goes
-only to the container that requests it. If per-container resource limits are added
-later, GPU assignment should follow them.
+#### Asking for a GPU from an actor
+
+An `ActorTemplate` asks for a device the same way, and that request is what the
+scheduler places on: an actor is only put on a worker that has that many devices,
+and a worker that lists none cannot host it at all. This is unlike cpu and memory,
+where an unknown worker capacity is treated as unconstrained — a device cannot be
+oversubscribed, so a second actor taking the same GPU does not run slower, it fails.
+
+`spec.resources.limits` says how many devices the *actor* holds; each container's
+`resources.limits` says which containers get them. Containers do not share a
+device, so their counts sum and may not exceed the actor's; a container that names
+no device is asking for none.
+
+```yaml
+apiVersion: ate.dev/v1alpha1
+kind: ActorTemplate
+spec:
+  resources:
+    limits:
+      nvidia.com/gpu: "1"   # the actor holds one GPU — this is what schedules
+  containers:
+  - name: trainer
+    image: pytorch@sha256:...
+    resources:
+      limits:
+        nvidia.com/gpu: "1" # and this container is the one that gets it
+  - name: logger
+    image: fluentbit@sha256:...
+```
+
+Substrate's own `ate.dev/*` resources are not devices in this sense. They are
+shareable pseudo-devices — every micro-VM on a node opens `/dev/kvm` — so they are
+neither counted as worker capacity nor claimable by an actor.
+
+**Not yet enforced at the sandbox.** `ateom-gvisor` still injects the CDI `all`
+device, so every container of a GPU actor sees every GPU the worker holds, whatever
+the per-container limits say. The limits above bound placement; partitioning the
+worker's devices across containers at injection is still to come.
 
 The driver library directory is prepended to each container's `LD_LIBRARY_PATH` so an
 image does not have to set it to find `libcuda.so.1`; any existing value is kept after

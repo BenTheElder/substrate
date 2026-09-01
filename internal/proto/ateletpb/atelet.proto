@@ -254,13 +254,24 @@ message Capabilities {
   repeated string drop = 2;
 }
 
-// ResourceLimits are the cgroup limits for one container. Scalars rather than a
-// map so each resource.Quantity is parsed exactly once, in ate-api-server.
+// ResourceLimits are the limits for one container. cpu and memory are scalars
+// rather than a map so each resource.Quantity is parsed exactly once, in
+// ate-api-server.
 message ResourceLimits {
   // memory_bytes is the memory limit in bytes. 0 means unset.
   int64 memory_bytes = 1;
   // cpu_millis is the CPU limit in milli-cores (1000 = one core). 0 means unset.
   int64 cpu_millis = 2;
+
+  // devices is how many of each device this container gets, keyed by extended
+  // resource name ("nvidia.com/gpu"). Unlike cpu and memory these are not
+  // cgroup limits: they say which of the Actor's devices the ateom exposes to
+  // this container, and the containers of an Actor do not share one.
+  //
+  // Which physical device backs each count is the Worker's to decide, resolved
+  // at activation: device identity is pod-local and an Actor can restore onto a
+  // different Worker.
+  map<string, int64> devices = 3;
 }
 
 message EnvEntry {

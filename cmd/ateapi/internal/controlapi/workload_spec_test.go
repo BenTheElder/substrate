@@ -674,3 +674,68 @@ func TestWorkloadSpecFromActorTemplatePropagatesResources(t *testing.T) {
 		t.Errorf("unlimited container Resources = %v, want nil", r)
 	}
 }
+
+// Which containers get the actor's devices is decided here and nowhere else, so
+// the counts have to survive the trip into the workload spec atelet receives.
+func TestWorkloadSpecFromActorTemplatePropagatesDevices(t *testing.T) {
+	got, err := workloadSpecFromActorTemplate(mustTemplateFromCRD(&atev1alpha1.ActorTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "tmpl-devices", Namespace: "agent-ns"},
+		Spec: atev1alpha1.ActorTemplateSpec{
+			SandboxClass: atev1alpha1.SandboxClassMicroVM,
+			Resources: &corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("2")},
+			},
+			Containers: []atev1alpha1.Container{
+				{
+					Name:  "trainer",
+					Image: "main",
+					Resources: &atev1alpha1.ContainerResources{
+						Limits: atev1alpha1.ContainerResourceList{
+							"nvidia.com/gpu":      resource.MustParse("2"),
+							corev1.ResourceMemory: resource.MustParse("256Mi"),
+						},
+					},
+				},
+				{
+					Name:  "logger",
+					Image: "side",
+					Resources: &atev1alpha1.ContainerResources{
+						Limits: atev1alpha1.ContainerResourceList{corev1.ResourceMemory: resource.MustParse("64Mi")},
+					},
+				},
+			},
+		},
+	}), nil)
+	if err != nil {
+		t.Fatalf("workloadSpecFromActorTemplate failed: %v", err)
+	}
+	if len(got.GetContainers()) != 2 {
+		t.Fatalf("containers = %d, want 2", len(got.GetContainers()))
+	}
+	if n := got.GetContainers()[0].GetResources().GetDevices()["nvidia.com/gpu"]; n != 2 {
+		t.Errorf("trainer nvidia.com/gpu = %d, want 2", n)
+	}
+	// A sidecar that names no device must not inherit the actor's.
+	if d := got.GetContainers()[1].GetResources().GetDevices(); len(d) != 0 {
+		t.Errorf("logger devices = %v, want none", d)
+	}
+}
+
+// A device limit is not a cgroup limit, so a container that declares only one
+// still has to reach atelet.
+func TestToAteletResourcesDeviceOnly(t *testing.T) {
+	got, err := toAteletResources(&ateapipb.Resources{Limits: []*ateapipb.Limits{
+		{Name: "nvidia.com/gpu", Quantity: "1"},
+		{Name: "ate.dev/kvm", Quantity: "1"},
+	}})
+	if err != nil {
+		t.Fatalf("toAteletResources() failed: %v", err)
+	}
+	if got.GetDevices()["nvidia.com/gpu"] != 1 {
+		t.Errorf("nvidia.com/gpu = %d, want 1", got.GetDevices()["nvidia.com/gpu"])
+	}
+	// ate.dev/* is shareable, not a device the container holds.
+	if _, ok := got.GetDevices()["ate.dev/kvm"]; ok {
+		t.Errorf("devices = %v, want no ate.dev/kvm", got.GetDevices())
+	}
+}

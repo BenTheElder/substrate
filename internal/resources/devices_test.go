@@ -79,3 +79,77 @@ func TestExclusiveDevices(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateDeviceSubdivision(t *testing.T) {
+	tests := []struct {
+		name       string
+		actor      map[string]int64
+		containers map[string]map[string]int64
+		wantErr    string
+	}{
+		{
+			name: "no devices anywhere",
+		},
+		{
+			name:  "the actor holds devices no container names",
+			actor: map[string]int64{"nvidia.com/gpu": 2},
+		},
+		{
+			name:       "one container takes all of them",
+			actor:      map[string]int64{"nvidia.com/gpu": 2},
+			containers: map[string]map[string]int64{"trainer": {"nvidia.com/gpu": 2}},
+		},
+		{
+			name:  "containers split them",
+			actor: map[string]int64{"nvidia.com/gpu": 2},
+			containers: map[string]map[string]int64{
+				"shard-a": {"nvidia.com/gpu": 1},
+				"shard-b": {"nvidia.com/gpu": 1},
+			},
+		},
+		{
+			name:       "a container may take fewer than the actor holds",
+			actor:      map[string]int64{"nvidia.com/gpu": 4},
+			containers: map[string]map[string]int64{"trainer": {"nvidia.com/gpu": 1}},
+		},
+		{
+			name:       "a container cannot exceed the actor",
+			actor:      map[string]int64{"nvidia.com/gpu": 1},
+			containers: map[string]map[string]int64{"trainer": {"nvidia.com/gpu": 2}},
+			wantErr:    "containers ask for 2 of device nvidia.com/gpu, more than the actor's 1",
+		},
+		{
+			name:  "containers do not share a device",
+			actor: map[string]int64{"nvidia.com/gpu": 1},
+			containers: map[string]map[string]int64{
+				"trainer": {"nvidia.com/gpu": 1},
+				"sidecar": {"nvidia.com/gpu": 1},
+			},
+			wantErr: "containers ask for 2 of device nvidia.com/gpu, more than the actor's 1",
+		},
+		{
+			name:       "a container cannot name a device the actor never asked for",
+			actor:      map[string]int64{"nvidia.com/gpu": 1},
+			containers: map[string]map[string]int64{"trainer": {"example.com/fpga": 1}},
+			wantErr:    `container "trainer" asks for device example.com/fpga, which the actor does not request`,
+		},
+		{
+			name:       "a container cannot claim a device when the actor asked for none",
+			containers: map[string]map[string]int64{"trainer": {"nvidia.com/gpu": 1}},
+			wantErr:    `container "trainer" asks for device nvidia.com/gpu, which the actor does not request`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateDeviceSubdivision(tc.actor, tc.containers)
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("ValidateDeviceSubdivision() = %v, want nil", err)
+			case tc.wantErr != "" && err == nil:
+				t.Fatalf("ValidateDeviceSubdivision() = nil, want %q", tc.wantErr)
+			case tc.wantErr != "" && err.Error() != tc.wantErr:
+				t.Errorf("ValidateDeviceSubdivision() = %q, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
