@@ -57,6 +57,9 @@ const (
 	actorDomain      = "actors.resources.substrate.ate.dev"
 	pingPath         = "/ping"
 	writeRAMPath     = "/writeram"
+	readRAMPath      = "/readram"
+	memLoadKey       = "memload"
+	memReadAll       = "all"
 
 	sourceClient = "client"
 	sourceServer = "server"
@@ -113,8 +116,15 @@ func (r *taskRuntime) iterate() {
 	// carries the full working set; glutton keeps the allocations across
 	// suspend/resume, so this runs once per actor (retried if it fails).
 	user.ensureRAMFilled(ctx)
+	// Walk the working set right after resume, before churn dirties it:
+	// under a demand-paged restore every touched page must be paged back
+	// in before the walk returns, so its latency measures the true cost
+	// of reaching the previous snapshot's memory.
+	user.readRAM(ctx)
 	// Re-dirty part of the working set each cycle so repeated suspends
 	// snapshot an actor whose memory is changing, like a live application's.
+	// Rotate mode advances through the array cycle over cycle, so the dirty
+	// window moves instead of re-dirtying the same prefix.
 	user.churnRAM(ctx)
 	user.ping(ctx)
 	user.suspend(ctx)
@@ -358,7 +368,7 @@ func (u *gluttonUser) ensureRAMFilled(ctx context.Context) {
 	defer span.End()
 	start := time.Now()
 
-	err := u.writeRAM(ctx, "memload", target, gluttonpb.WriteMode_WRITE_MODE_TRUNCATE)
+	err := u.writeRAM(ctx, memLoadKey, target, gluttonpb.WriteMode_WRITE_MODE_TRUNCATE)
 	clientLatency := time.Since(start)
 	logSampledTrace(span, "GluttonFillRAM", clientLatency, sourceClient, err)
 	if err != nil {
@@ -369,13 +379,15 @@ func (u *gluttonUser) ensureRAMFilled(ctx context.Context) {
 	bmetrics.RecordSuccess("http", "GluttonFillRAM", userClass, clientLatency, 0)
 }
 
-// churnRAM re-randomizes the first mem_churn bytes of the working set in
-// place (WriteRAM overwrite on the fill's key), so pages arrive dirty at
-// every suspend instead of only the first: a fill-once set is static, and
-// any future incremental snapshotting would make cycles two onward
-// unrepresentative of a live application. Runs once per iteration, only
-// after the fill has succeeded, and reports as its own GluttonChurnRAM
-// stats row.
+// churnRAM re-randomizes mem_churn bytes of the working set in place
+// (WriteRAM rotate on the fill's key), so pages arrive dirty at every
+// suspend instead of only the first: a fill-once set is static, and any
+// future incremental snapshotting would make cycles two onward
+// unrepresentative of a live application. Rotate mode advances glutton's
+// per-key cursor past each write, wrapping at the end, so consecutive
+// cycles dirty a moving window rather than the same prefix. Runs once per
+// iteration, only after the fill has succeeded, and reports as its own
+// GluttonChurnRAM stats row.
 func (u *gluttonUser) churnRAM(ctx context.Context) {
 	churn := u.cfg.Dyn.Load().MemChurn
 	if churn == "" || !u.ramFilled {
@@ -386,7 +398,7 @@ func (u *gluttonUser) churnRAM(ctx context.Context) {
 	defer span.End()
 	start := time.Now()
 
-	err := u.writeRAM(ctx, "memload", churn, gluttonpb.WriteMode_WRITE_MODE_OVERWRITE)
+	err := u.writeRAM(ctx, memLoadKey, churn, gluttonpb.WriteMode_WRITE_MODE_OVERWRITE_ROTATE)
 	clientLatency := time.Since(start)
 	logSampledTrace(span, "GluttonChurnRAM", clientLatency, sourceClient, err)
 	if err != nil {
@@ -396,19 +408,60 @@ func (u *gluttonUser) churnRAM(ctx context.Context) {
 	bmetrics.RecordSuccess("http", "GluttonChurnRAM", userClass, clientLatency, 0)
 }
 
+// readRAM walks mem_read bytes of the working set (memReadAll walks all of
+// it) through the glutton ReadRAM API, one byte per page, and reports the
+// walk as its own GluttonReadRAM stats row. Placed right after resume, the
+// row's latency is the demand-paging cost of the previous snapshot's
+// memory; on an eagerly-restored actor it degenerates to a fast in-memory
+// scan, so the two restore modes are directly comparable.
+func (u *gluttonUser) readRAM(ctx context.Context) {
+	read := u.cfg.Dyn.Load().MemRead
+	if read == "" || !u.ramFilled {
+		return
+	}
+	size := read
+	if read == memReadAll {
+		size = "" // ReadRAM walks the whole array on empty size
+	}
+
+	ctx, span := u.cfg.Tracer.Start(ctx, "GluttonReadRAM")
+	defer span.End()
+	start := time.Now()
+
+	resp := &gluttonpb.ReadRAMResponse{}
+	err := u.postProto(ctx, readRAMPath, &gluttonpb.ReadRAMRequest{Key: memLoadKey, Size: size}, resp)
+	clientLatency := time.Since(start)
+	logSampledTrace(span, "GluttonReadRAM", clientLatency, sourceClient, err)
+	if err != nil {
+		bmetrics.RecordFailure("http", "GluttonReadRAM", userClass, clientLatency, err.Error())
+		return
+	}
+	bmetrics.RecordSuccess("http", "GluttonReadRAM", userClass, clientLatency, resp.GetSize())
+}
+
 // writeRAM POSTs one WriteRAM request to the actor through the router,
 // mirroring ping's wire format (protobuf over HTTP). size is a suffixed
 // string (e.g. "2Gi") passed through verbatim; glutton parses it.
 func (u *gluttonUser) writeRAM(ctx context.Context, key, size string, mode gluttonpb.WriteMode) error {
-	body, err := proto.Marshal(&gluttonpb.WriteRAMRequest{
+	err := u.postProto(ctx, writeRAMPath, &gluttonpb.WriteRAMRequest{
 		Key:       key,
 		Size:      size,
 		WriteMode: mode,
-	})
+	}, &gluttonpb.WriteRAMResponse{})
+	if err != nil {
+		return fmt.Errorf("WriteRAM %s (%s): %w", key, size, err)
+	}
+	return nil
+}
+
+// postProto POSTs one protobuf request to the actor through the router and
+// unmarshals the protobuf response into resp.
+func (u *gluttonUser) postProto(ctx context.Context, path string, req, resp proto.Message) error {
+	body, err := proto.Marshal(req)
 	if err != nil {
 		return err
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, u.cfg.RouterURL+writeRAMPath, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, u.cfg.RouterURL+path, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -416,19 +469,19 @@ func (u *gluttonUser) writeRAM(ctx context.Context, key, size string, mode glutt
 	httpReq.Header.Set("Content-Type", "application/x-protobuf")
 	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(httpReq.Header))
 
-	resp, err := u.cfg.HTTPClient.Do(httpReq)
+	httpResp, err := u.cfg.HTTPClient.Do(httpReq)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	respBody, err := io.ReadAll(resp.Body)
+	defer httpResp.Body.Close()
+	respBody, err := io.ReadAll(httpResp.Body)
 	if err != nil {
 		return err
 	}
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("WriteRAM %s (%s): HTTP %d: %s", key, size, resp.StatusCode, strings.TrimSpace(string(respBody)))
+	if httpResp.StatusCode >= 400 {
+		return fmt.Errorf("%s: HTTP %d: %s", path, httpResp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
-	return nil
+	return proto.Unmarshal(respBody, resp)
 }
 
 // logSampledTrace emits a single structured line per sampled span. Operators
