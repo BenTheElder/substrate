@@ -62,29 +62,36 @@ type Persistence struct {
 
 var _ store.Interface = (*Persistence)(nil)
 
-// Connect opens a pgxpool against dsn, verifies connectivity, and applies the
-// embedded schema. Startup fails if the database cannot be reached. A second,
-// two-connection watch pool (owned by the Persistence, closed by Close) isolates
-// outbox polling and maintenance from write traffic.
-func Connect(ctx context.Context, dsn string) (*Persistence, error) {
+// ErrUnavailable reports that ateapi could not establish the initial
+// PostgreSQL connection. Callers can retry this error before startup.
+var ErrUnavailable = errors.New("PostgreSQL is unavailable")
+
+// Connect opens a pgxpool against dsn, creates schema if necessary, and
+// applies pending schema migrations. A dedicated watch pool isolates outbox
+// polling and maintenance from writes.
+func Connect(ctx context.Context, dsn, schema string) (*Persistence, error) {
+	if schema == "" {
+		return nil, fmt.Errorf("PostgreSQL schema must not be empty")
+	}
 	cfg, err := poolConfig(dsn)
 	if err != nil {
 		return nil, err
 	}
+	cfg.ConnConfig.RuntimeParams["search_path"] = pgx.Identifier{schema}.Sanitize()
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("opening PostgreSQL pool: %w", err)
 	}
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
-		return nil, fmt.Errorf("pinging PostgreSQL: %w", err)
+		return nil, fmt.Errorf("%w: pinging PostgreSQL: %w", ErrUnavailable, err)
+	}
+	if err := createSchema(ctx, pool, schema); err != nil {
+		pool.Close()
+		return nil, err
 	}
 
-	watchCfg, err := poolConfig(dsn)
-	if err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("watch pool: %w", err)
-	}
+	watchCfg := cfg.Copy()
 	watchCfg.MaxConns = watchPoolMaxConns
 	watchCfg.MinConns = watchPoolMinConns
 	watchPool, err := pgxpool.NewWithConfig(ctx, watchCfg)
@@ -101,6 +108,25 @@ func Connect(ctx context.Context, dsn string) (*Persistence, error) {
 	}
 	p.ownsWatchPool = true
 	return p, nil
+}
+
+func createSchema(ctx context.Context, pool *pgxpool.Pool, schema string) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("starting PostgreSQL schema transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // Commit or the returned error decides the outcome.
+
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "agent-substrate:create-schema:"+schema); err != nil {
+		return fmt.Errorf("locking PostgreSQL schema %q: %w", schema, err)
+	}
+	if _, err := tx.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS `+pgx.Identifier{schema}.Sanitize()); err != nil {
+		return fmt.Errorf("creating PostgreSQL schema %q: %w", schema, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing PostgreSQL schema %q: %w", schema, err)
+	}
+	return nil
 }
 
 // poolConfig parses dsn into a pool configuration whose TLS material is read
@@ -137,7 +163,7 @@ func poolConfig(dsn string) (*pgxpool.Config, error) {
 	return cfg, nil
 }
 
-// NewPersistence wraps an already-open pool, applying the idempotent schema.
+// NewPersistence wraps an already-open pool, applying pending migrations.
 // Callers that already hold a pool (e.g. tests using testcontainers) use
 // this directly instead of Connect; outbox watch traffic shares the given pool.
 func NewPersistence(ctx context.Context, pool *pgxpool.Pool) (*Persistence, error) {
@@ -145,7 +171,7 @@ func NewPersistence(ctx context.Context, pool *pgxpool.Pool) (*Persistence, erro
 }
 
 func newPersistence(ctx context.Context, pool, watchPool *pgxpool.Pool) (*Persistence, error) {
-	if err := applySchema(ctx, pool); err != nil {
+	if err := applyMigrations(ctx, pool); err != nil {
 		return nil, err
 	}
 	maintenanceCtx, stopMaintenance := context.WithCancel(context.Background())

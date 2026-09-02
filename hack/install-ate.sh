@@ -100,6 +100,11 @@ function usage() {
   echo "  --create-api-server-env-vars           Create ate-api-server env vars"
   echo "  --create-api-authentication-config     Create the default ate-api-server authentication config"
   echo ""
+  echo "PostgreSQL configuration:"
+  echo ""
+  echo "  ATE_API_POSTGRES_CONNECTION_STRING     Use an external PostgreSQL instance and skip the bundled instance"
+  echo "  ATE_API_POSTGRES_SCHEMA                Select the Substrate schema (default: public)"
+  echo ""
   echo "Benchmarks (see benchmarking/README.md for details and customization):"
   echo ""
   echo "  --deploy-benchmarks                    Deploy workloads + locust load test stack"
@@ -220,6 +225,10 @@ rollout_timeout() {
 
 default_postgres_connection_string() {
   echo "postgresql://postgres@postgres.ate-system.svc:5432/atepg?sslmode=verify-full&sslrootcert=/run/servicedns.podcert.ate.dev/trust-bundle.pem&sslcert=/run/podidentity.podcert.ate.dev/credential-bundle.pem&sslkey=/run/podidentity.podcert.ate.dev/credential-bundle.pem"
+}
+
+use_bundled_postgres() {
+  [[ -z "${ATE_API_POSTGRES_CONNECTION_STRING:-}" ]]
 }
 
 # --- Versioned dataplane rendering ---
@@ -376,6 +385,15 @@ apply_otel_config() {
   fi
 }
 
+apply_postgres() {
+  if [[ "${ATE_INSTALL_KIND:-false}" == "true" ]]; then
+    kubectl kustomize manifests/ate-install/kind/postgres \
+      --load-restrictor LoadRestrictionsNone | run_kubectl apply -f -
+  else
+    run_kubectl apply -f manifests/ate-install/postgres.yaml
+  fi
+}
+
 # --otlp-endpoint sends all control plane telemetry to a different collector for
 # the duration of a measurement. One patch is sufficient: each component reads
 # this ConfigMap through envFrom, and ate-controller copies the values to the
@@ -529,6 +547,7 @@ create_api_server_env_vars() {
     | run_kubectl apply -f -
 
   local postgres_connection_string="${ATE_API_POSTGRES_CONNECTION_STRING:-}"
+  local postgres_schema="${ATE_API_POSTGRES_SCHEMA:-public}"
   if [[ -z "${postgres_connection_string}" ]]; then
     postgres_connection_string="$(default_postgres_connection_string)"
   fi
@@ -537,6 +556,7 @@ create_api_server_env_vars() {
 
   run_kubectl create configmap -n ate-system ate-api-server-envvars \
     --from-literal=ATE_API_POSTGRES_CONNECTION_STRING="${postgres_connection_string}" \
+    --from-literal=ATE_API_POSTGRES_SCHEMA="${postgres_schema}" \
     --dry-run=client -o yaml \
     | run_kubectl apply -f -
 }
@@ -666,6 +686,10 @@ deploy_ate_system() {
     fi
   fi
 
+  if use_bundled_postgres; then
+    apply_postgres
+  fi
+
   local manifests=""
   manifests="$(render_ate_system_manifests)"
   echo "${manifests}" | run_kubectl apply -f -
@@ -677,7 +701,9 @@ deploy_ate_system() {
   apply_atenet_egress
 
   log_step "Waiting for ATE system components to be ready..."
-  run_kubectl rollout status statefulset/postgres -n ate-system --timeout="$(rollout_timeout)"
+  if use_bundled_postgres; then
+    run_kubectl rollout status statefulset/postgres -n ate-system --timeout="$(rollout_timeout)"
+  fi
   run_kubectl rollout status deployment/ate-api-server -n ate-system --timeout="$(rollout_timeout)"
   run_kubectl rollout status deployment/ate-controller -n ate-system --timeout="$(rollout_timeout)"
   run_kubectl rollout status deployment/atenet-router -n ate-system --timeout="$(rollout_timeout)"
