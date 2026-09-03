@@ -283,11 +283,11 @@ func TestSyncer_DoesNotInferCapacityFromThePod(t *testing.T) {
 	}
 
 	// The registry here is a fake, so what it holds is exactly what the syncer
-	// sent. Reifying the ceiling on a Worker that reported none is the API
-	// server's job; see TestCreateWorker_ReifiesActorCeiling.
+	// sent. The syncer writes no capacity: it comes from the Worker's own
+	// report, which is the ateom's to make.
 	got := waitForWorker(t, ctx, api, testPodUID, func(w *ateapipb.Worker) bool { return w != nil })
-	if got.GetStatus().GetCapacity() != nil {
-		t.Errorf("worker capacity = %v, want none", got.GetStatus().GetCapacity())
+	if got.GetStatus().GetAllocation().GetCapacity() != nil {
+		t.Errorf("worker capacity = %v, want none", got.GetStatus().GetAllocation().GetCapacity())
 	}
 }
 

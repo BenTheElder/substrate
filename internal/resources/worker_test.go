@@ -32,7 +32,7 @@ func assignment(uid string, cpu, mem int64) *ateapipb.ActorAssignment {
 }
 
 // mustAdd is AddToAllocated where the fixtures are known to parse.
-func mustAdd(t *testing.T, total *ateapipb.WorkerCapacity, a *ateapipb.ActorAssignment, sign int64) *ateapipb.WorkerCapacity {
+func mustAdd(t *testing.T, total *ateapipb.WorkerResources, a *ateapipb.ActorAssignment, sign int64) *ateapipb.WorkerResources {
 	t.Helper()
 	got, err := AddToAllocated(total, a, sign)
 	if err != nil {
@@ -45,17 +45,17 @@ func mustAdd(t *testing.T, total *ateapipb.WorkerCapacity, a *ateapipb.ActorAssi
 // back to holding nothing carries no allocation at all rather than a zeroed
 // message: emptied and never-filled have to be the same record.
 func TestAddToAllocated(t *testing.T) {
-	var total *ateapipb.WorkerCapacity
+	var total *ateapipb.WorkerResources
 	total = mustAdd(t, total, assignment("a", 1000, 1<<30), +1)
 	total = mustAdd(t, total, assignment("b", 500, 2<<30), +1)
 
-	want := &ateapipb.WorkerCapacity{Actors: 2, Resources: CPUMemory(1500, 3<<30)}
+	want := &ateapipb.WorkerResources{Actors: 2, Resources: CPUMemory(1500, 3<<30)}
 	if diff := cmp.Diff(want, total, protocmp.Transform()); diff != "" {
 		t.Errorf("allocated mismatch (-want +got):\n%s", diff)
 	}
 
 	total = mustAdd(t, total, assignment("b", 500, 2<<30), -1)
-	want = &ateapipb.WorkerCapacity{Actors: 1, Resources: CPUMemory(1000, 1<<30)}
+	want = &ateapipb.WorkerResources{Actors: 1, Resources: CPUMemory(1000, 1<<30)}
 	if diff := cmp.Diff(want, total, protocmp.Transform()); diff != "" {
 		t.Errorf("allocated after release mismatch (-want +got):\n%s", diff)
 	}
@@ -68,7 +68,7 @@ func TestAddToAllocated(t *testing.T) {
 // An Actor that declared no limits reserves nothing but still costs a slot.
 func TestAddToAllocatedCountsAnActorWithoutResources(t *testing.T) {
 	total := mustAdd(t, nil, &ateapipb.ActorAssignment{ActorUid: "a"}, +1)
-	want := &ateapipb.WorkerCapacity{Actors: 1}
+	want := &ateapipb.WorkerResources{Actors: 1}
 	if diff := cmp.Diff(want, total, protocmp.Transform()); diff != "" {
 		t.Errorf("allocated mismatch (-want +got):\n%s", diff)
 	}
@@ -101,7 +101,7 @@ func TestSumAllocated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SumAllocated(): %v", err)
 	}
-	want := &ateapipb.WorkerCapacity{Actors: 2, Resources: CPUMemory(1500, 1<<30)}
+	want := &ateapipb.WorkerResources{Actors: 2, Resources: CPUMemory(1500, 1<<30)}
 	if diff := cmp.Diff(want, got, protocmp.Transform()); diff != "" {
 		t.Errorf("SumAllocated() mismatch (-want +got):\n%s", diff)
 	}

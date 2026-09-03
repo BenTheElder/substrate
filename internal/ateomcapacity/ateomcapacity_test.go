@@ -18,35 +18,38 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/google/go-cmp/cmp"
+	"google.golang.org/protobuf/testing/protocmp"
+
+	"github.com/agent-substrate/substrate/internal/resources"
+	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 )
 
 func TestFromEnv(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
-		cpu        string
-		memory     string
-		wantCPU    int64
-		wantMemory int64
+		name   string
+		cpu    string
+		memory string
+		want   *ateapipb.Resources
 	}{
-		{name: "limits set", cpu: "2000", memory: "4294967296", wantCPU: 2000, wantMemory: 4294967296},
-		{name: "unparseable is none", cpu: "2Gi", memory: "", wantCPU: 0, wantMemory: 0},
-		{name: "negative is none", cpu: "-1", memory: "-1", wantCPU: 0, wantMemory: 0},
+		{name: "limits set", cpu: "2000", memory: "4294967296", want: resources.CPUMemory(2000, 4294967296)},
+		{name: "unparseable is none", cpu: "2Gi", memory: "", want: nil},
+		{name: "negative is none", cpu: "-1", memory: "-1", want: nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(CPULimitEnv, tc.cpu)
 			t.Setenv(MemoryLimitEnv, tc.memory)
 
-			got := FromEnv()
+			got := FromEnv().GetCapacity()
 			if got.GetActors() != actorsPerAteom {
 				t.Errorf("actors = %d, want %d", got.GetActors(), actorsPerAteom)
 			}
-			if got.GetCpuMilli() != tc.wantCPU {
-				t.Errorf("cpu_milli = %d, want %d", got.GetCpuMilli(), tc.wantCPU)
-			}
-			if got.GetMemoryBytes() != tc.wantMemory {
-				t.Errorf("memory_bytes = %d, want %d", got.GetMemoryBytes(), tc.wantMemory)
+			if diff := cmp.Diff(tc.want, got.GetResources(), protocmp.Transform()); diff != "" {
+				t.Errorf("reported resources mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}
@@ -59,9 +62,9 @@ func TestFromEnvUnset(t *testing.T) {
 	os.Unsetenv(CPULimitEnv)
 	os.Unsetenv(MemoryLimitEnv)
 
-	got := FromEnv()
-	if got.GetCpuMilli() != 0 || got.GetMemoryBytes() != 0 {
-		t.Errorf("unset environment reported %v, want no compute", got)
+	got := FromEnv().GetCapacity()
+	if got.GetResources() != nil {
+		t.Errorf("unset environment reported %v, want no compute", got.GetResources())
 	}
 	if got.GetActors() != actorsPerAteom {
 		t.Errorf("actors = %d, want %d", got.GetActors(), actorsPerAteom)
@@ -99,5 +102,25 @@ func TestReportStopsWhenContextEnds(t *testing.T) {
 	}
 	if err := retryReport(ctx, send, time.Millisecond); !errors.Is(err, context.Canceled) {
 		t.Errorf("retryReport() = %v, want context.Canceled", err)
+	}
+}
+
+// A misconfiguration must surface rather than spin in the retry loop: the
+// caller exits on it, and retrying forever would leave the worker idle and
+// silent instead.
+func TestReportFailsFastOnBadCredentials(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err := Report(ctx, ReportConfig{
+		SocketPath:           filepath.Join(t.TempDir(), "atelet.sock"),
+		CredentialBundlePath: filepath.Join(t.TempDir(), "does-not-exist.pem"),
+		TrustBundlePath:      filepath.Join(t.TempDir(), "also-missing.pem"),
+	})
+	if err == nil {
+		t.Fatal("Report() with unreadable credentials succeeded, want an error the caller can exit on")
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Report() retried a permanent failure until the deadline: %v", err)
 	}
 }

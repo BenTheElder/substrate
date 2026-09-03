@@ -139,7 +139,7 @@ var CredentialBroker_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	WorkerCapacity_ReportWorkerCapacity_FullMethodName = "/atelet.WorkerCapacity/ReportWorkerCapacity"
+	WorkerCapacity_SetWorkerCapacity_FullMethodName = "/atelet.WorkerCapacity/SetWorkerCapacity"
 )
 
 // WorkerCapacityClient is the client API for WorkerCapacity service.
@@ -147,10 +147,11 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
 // WorkerCapacity is how a worker tells the node-local atelet what it can
-// supply to the actors it hosts, for atelet to forward to the control plane.
-// The worker is identified by its mTLS certificate, never by the request.
+// supply to the actors it hosts, for atelet to forward to the control plane's
+// WorkerService.SetWorkerCapacity, which this mirrors. The worker is identified
+// by its mTLS certificate, never by the request.
 type WorkerCapacityClient interface {
-	ReportWorkerCapacity(ctx context.Context, in *ReportWorkerCapacityRequest, opts ...grpc.CallOption) (*ReportWorkerCapacityResponse, error)
+	SetWorkerCapacity(ctx context.Context, in *SetWorkerCapacityRequest, opts ...grpc.CallOption) (*SetWorkerCapacityResponse, error)
 }
 
 type workerCapacityClient struct {
@@ -161,10 +162,10 @@ func NewWorkerCapacityClient(cc grpc.ClientConnInterface) WorkerCapacityClient {
 	return &workerCapacityClient{cc}
 }
 
-func (c *workerCapacityClient) ReportWorkerCapacity(ctx context.Context, in *ReportWorkerCapacityRequest, opts ...grpc.CallOption) (*ReportWorkerCapacityResponse, error) {
+func (c *workerCapacityClient) SetWorkerCapacity(ctx context.Context, in *SetWorkerCapacityRequest, opts ...grpc.CallOption) (*SetWorkerCapacityResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ReportWorkerCapacityResponse)
-	err := c.cc.Invoke(ctx, WorkerCapacity_ReportWorkerCapacity_FullMethodName, in, out, cOpts...)
+	out := new(SetWorkerCapacityResponse)
+	err := c.cc.Invoke(ctx, WorkerCapacity_SetWorkerCapacity_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -176,10 +177,11 @@ func (c *workerCapacityClient) ReportWorkerCapacity(ctx context.Context, in *Rep
 // for forward compatibility.
 //
 // WorkerCapacity is how a worker tells the node-local atelet what it can
-// supply to the actors it hosts, for atelet to forward to the control plane.
-// The worker is identified by its mTLS certificate, never by the request.
+// supply to the actors it hosts, for atelet to forward to the control plane's
+// WorkerService.SetWorkerCapacity, which this mirrors. The worker is identified
+// by its mTLS certificate, never by the request.
 type WorkerCapacityServer interface {
-	ReportWorkerCapacity(context.Context, *ReportWorkerCapacityRequest) (*ReportWorkerCapacityResponse, error)
+	SetWorkerCapacity(context.Context, *SetWorkerCapacityRequest) (*SetWorkerCapacityResponse, error)
 	mustEmbedUnimplementedWorkerCapacityServer()
 }
 
@@ -190,8 +192,8 @@ type WorkerCapacityServer interface {
 // pointer dereference when methods are called.
 type UnimplementedWorkerCapacityServer struct{}
 
-func (UnimplementedWorkerCapacityServer) ReportWorkerCapacity(context.Context, *ReportWorkerCapacityRequest) (*ReportWorkerCapacityResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method ReportWorkerCapacity not implemented")
+func (UnimplementedWorkerCapacityServer) SetWorkerCapacity(context.Context, *SetWorkerCapacityRequest) (*SetWorkerCapacityResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetWorkerCapacity not implemented")
 }
 func (UnimplementedWorkerCapacityServer) mustEmbedUnimplementedWorkerCapacityServer() {}
 func (UnimplementedWorkerCapacityServer) testEmbeddedByValue()                        {}
@@ -214,20 +216,20 @@ func RegisterWorkerCapacityServer(s grpc.ServiceRegistrar, srv WorkerCapacitySer
 	s.RegisterService(&WorkerCapacity_ServiceDesc, srv)
 }
 
-func _WorkerCapacity_ReportWorkerCapacity_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ReportWorkerCapacityRequest)
+func _WorkerCapacity_SetWorkerCapacity_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetWorkerCapacityRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(WorkerCapacityServer).ReportWorkerCapacity(ctx, in)
+		return srv.(WorkerCapacityServer).SetWorkerCapacity(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: WorkerCapacity_ReportWorkerCapacity_FullMethodName,
+		FullMethod: WorkerCapacity_SetWorkerCapacity_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(WorkerCapacityServer).ReportWorkerCapacity(ctx, req.(*ReportWorkerCapacityRequest))
+		return srv.(WorkerCapacityServer).SetWorkerCapacity(ctx, req.(*SetWorkerCapacityRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -240,8 +242,8 @@ var WorkerCapacity_ServiceDesc = grpc.ServiceDesc{
 	HandlerType: (*WorkerCapacityServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
-			MethodName: "ReportWorkerCapacity",
-			Handler:    _WorkerCapacity_ReportWorkerCapacity_Handler,
+			MethodName: "SetWorkerCapacity",
+			Handler:    _WorkerCapacity_SetWorkerCapacity_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

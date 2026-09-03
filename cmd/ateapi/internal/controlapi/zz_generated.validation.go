@@ -5443,7 +5443,7 @@ func Validate_SetWorkerCapacityRequest(
 	{ // field ateapipb.SetWorkerCapacityRequest.Capacity
 		fn := func(
 			fldPath *field.Path,
-			obj, oldObj *ateapipb.WorkerCapacity,
+			obj, oldObj *ateapipb.WorkerResources,
 			oldValueCorrelated bool) (errs field.ErrorList) {
 			// don't revalidate unchanged data
 			if oldValueCorrelated && op.Type == operation.Update {
@@ -5461,11 +5461,11 @@ func Validate_SetWorkerCapacityRequest(
 				return // do not proceed
 			}
 			// call the type's validation function
-			errs = append(errs, Validate_WorkerCapacity(ctx, op, fldPath, obj, oldObj)...)
+			errs = append(errs, Validate_WorkerResources(ctx, op, fldPath, obj, oldObj)...)
 			return
 		}
 		oldVal := safe.Field(oldObj,
-			func(oldObj *ateapipb.SetWorkerCapacityRequest) *ateapipb.WorkerCapacity {
+			func(oldObj *ateapipb.SetWorkerCapacityRequest) *ateapipb.WorkerResources {
 				return oldObj.Capacity
 			})
 		errs = append(errs, fn(fldPath.Child("capacity"), obj.Capacity, oldVal, oldObj != nil)...)
@@ -6725,6 +6725,75 @@ func Validate_Worker(
 	return errs
 }
 
+// Validate_WorkerAllocation validates an instance of WorkerAllocation according
+// to declarative validation rules in the API schema.
+func Validate_WorkerAllocation(
+	ctx context.Context, op operation.Operation, fldPath *field.Path,
+	obj, oldObj *ateapipb.WorkerAllocation) (errs field.ErrorList) {
+
+	{ // field ateapipb.WorkerAllocation.Capacity
+		fn := func(
+			fldPath *field.Path,
+			obj, oldObj *ateapipb.WorkerResources,
+			oldValueCorrelated bool) (errs field.ErrorList) {
+			// don't revalidate unchanged data
+			if oldValueCorrelated && op.Type == operation.Update {
+				if ateDeepEqual(obj, oldObj) {
+					return nil
+				}
+			}
+			// call field-attached validations
+			earlyReturn := false
+			if e := validate.OptionalPointer(ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
+				earlyReturn = true
+			}
+			if earlyReturn {
+				return // do not proceed
+			}
+			// call the type's validation function
+			errs = append(errs, Validate_WorkerResources(ctx, op, fldPath, obj, oldObj)...)
+			return
+		}
+		oldVal := safe.Field(oldObj,
+			func(oldObj *ateapipb.WorkerAllocation) *ateapipb.WorkerResources {
+				return oldObj.Capacity
+			})
+		errs = append(errs, fn(fldPath.Child("capacity"), obj.Capacity, oldVal, oldObj != nil)...)
+	}
+
+	{ // field ateapipb.WorkerAllocation.Allocated
+		fn := func(
+			fldPath *field.Path,
+			obj, oldObj *ateapipb.WorkerResources,
+			oldValueCorrelated bool) (errs field.ErrorList) {
+			// don't revalidate unchanged data
+			if oldValueCorrelated && op.Type == operation.Update {
+				if ateDeepEqual(obj, oldObj) {
+					return nil
+				}
+			}
+			// call field-attached validations
+			earlyReturn := false
+			if e := validate.OptionalPointer(ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
+				earlyReturn = true
+			}
+			if earlyReturn {
+				return // do not proceed
+			}
+			// call the type's validation function
+			errs = append(errs, Validate_WorkerResources(ctx, op, fldPath, obj, oldObj)...)
+			return
+		}
+		oldVal := safe.Field(oldObj,
+			func(oldObj *ateapipb.WorkerAllocation) *ateapipb.WorkerResources {
+				return oldObj.Allocated
+			})
+		errs = append(errs, fn(fldPath.Child("allocated"), obj.Allocated, oldVal, oldObj != nil)...)
+	}
+
+	return errs
+}
+
 // Validate_WorkerAssignment validates an instance of WorkerAssignment according
 // to declarative validation rules in the API schema.
 func Validate_WorkerAssignment(
@@ -6945,13 +7014,13 @@ func Validate_WorkerAssignment(
 	return errs
 }
 
-// Validate_WorkerCapacity validates an instance of WorkerCapacity according
+// Validate_WorkerResources validates an instance of WorkerResources according
 // to declarative validation rules in the API schema.
-func Validate_WorkerCapacity(
+func Validate_WorkerResources(
 	ctx context.Context, op operation.Operation, fldPath *field.Path,
-	obj, oldObj *ateapipb.WorkerCapacity) (errs field.ErrorList) {
+	obj, oldObj *ateapipb.WorkerResources) (errs field.ErrorList) {
 
-	{ // field ateapipb.WorkerCapacity.Resources
+	{ // field ateapipb.WorkerResources.Resources
 		fn := func(
 			fldPath *field.Path,
 			obj, oldObj *ateapipb.Resources,
@@ -6975,13 +7044,13 @@ func Validate_WorkerCapacity(
 			return
 		}
 		oldVal := safe.Field(oldObj,
-			func(oldObj *ateapipb.WorkerCapacity) *ateapipb.Resources {
+			func(oldObj *ateapipb.WorkerResources) *ateapipb.Resources {
 				return oldObj.Resources
 			})
 		errs = append(errs, fn(fldPath.Child("resources"), obj.Resources, oldVal, oldObj != nil)...)
 	}
 
-	{ // field ateapipb.WorkerCapacity.Actors
+	{ // field ateapipb.WorkerResources.Actors
 		fn := func(
 			fldPath *field.Path,
 			obj, oldObj *int32,
@@ -7006,7 +7075,7 @@ func Validate_WorkerCapacity(
 			return
 		}
 		oldVal := safe.Field(oldObj,
-			func(oldObj *ateapipb.WorkerCapacity) *int32 {
+			func(oldObj *ateapipb.WorkerResources) *int32 {
 				return &oldObj.Actors
 			})
 		errs = append(errs, fn(fldPath.Child("actors"), &obj.Actors, oldVal, oldObj != nil)...)
@@ -7056,10 +7125,10 @@ func Validate_WorkerStatus(
 		errs = append(errs, fn(fldPath.Child("state"), &obj.State, oldVal, oldObj != nil)...)
 	}
 
-	{ // field ateapipb.WorkerStatus.Capacity
+	{ // field ateapipb.WorkerStatus.Allocation
 		fn := func(
 			fldPath *field.Path,
-			obj, oldObj *ateapipb.WorkerCapacity,
+			obj, oldObj *ateapipb.WorkerAllocation,
 			oldValueCorrelated bool) (errs field.ErrorList) {
 			// don't revalidate unchanged data
 			if oldValueCorrelated && op.Type == operation.Update {
@@ -7076,44 +7145,14 @@ func Validate_WorkerStatus(
 				return // do not proceed
 			}
 			// call the type's validation function
-			errs = append(errs, Validate_WorkerCapacity(ctx, op, fldPath, obj, oldObj)...)
+			errs = append(errs, Validate_WorkerAllocation(ctx, op, fldPath, obj, oldObj)...)
 			return
 		}
 		oldVal := safe.Field(oldObj,
-			func(oldObj *ateapipb.WorkerStatus) *ateapipb.WorkerCapacity {
-				return oldObj.Capacity
+			func(oldObj *ateapipb.WorkerStatus) *ateapipb.WorkerAllocation {
+				return oldObj.Allocation
 			})
-		errs = append(errs, fn(fldPath.Child("capacity"), obj.Capacity, oldVal, oldObj != nil)...)
-	}
-
-	{ // field ateapipb.WorkerStatus.Allocated
-		fn := func(
-			fldPath *field.Path,
-			obj, oldObj *ateapipb.WorkerCapacity,
-			oldValueCorrelated bool) (errs field.ErrorList) {
-			// don't revalidate unchanged data
-			if oldValueCorrelated && op.Type == operation.Update {
-				if ateDeepEqual(obj, oldObj) {
-					return nil
-				}
-			}
-			// call field-attached validations
-			earlyReturn := false
-			if e := validate.OptionalPointer(ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
-				earlyReturn = true
-			}
-			if earlyReturn {
-				return // do not proceed
-			}
-			// call the type's validation function
-			errs = append(errs, Validate_WorkerCapacity(ctx, op, fldPath, obj, oldObj)...)
-			return
-		}
-		oldVal := safe.Field(oldObj,
-			func(oldObj *ateapipb.WorkerStatus) *ateapipb.WorkerCapacity {
-				return oldObj.Allocated
-			})
-		errs = append(errs, fn(fldPath.Child("allocated"), obj.Allocated, oldVal, oldObj != nil)...)
+		errs = append(errs, fn(fldPath.Child("allocation"), obj.Allocation, oldVal, oldObj != nil)...)
 	}
 
 	return errs

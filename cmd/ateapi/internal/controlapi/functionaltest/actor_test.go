@@ -1794,12 +1794,15 @@ func TestResumeActor(t *testing.T) {
 		SandboxClass:    "gvisor",
 		Labels:          map[string]string{poolLabelKey: ns},
 		Status: &ateapipb.WorkerStatus{
-			// Only the ceiling CreateWorker reifies: the ateom has not reported.
-			Capacity: &ateapipb.WorkerCapacity{Actors: 1},
-			// All a listing reports of the assignments. The actor declares no
-			// compute limits, so it registers as one actor and nothing else.
-			Allocated: &ateapipb.WorkerCapacity{Actors: 1},
-			State:     ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+			State: ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+			Allocation: &ateapipb.WorkerAllocation{
+				// Only the ceiling the worker reported.
+				Capacity: &ateapipb.WorkerResources{Actors: 1},
+				// All a listing reports of the assignments. The actor declares
+				// no compute limits, so it registers as one actor and nothing
+				// else.
+				Allocated: &ateapipb.WorkerResources{Actors: 1},
+			},
 		},
 	}
 
@@ -2459,11 +2462,11 @@ func TestResumeActor_ReleasesStaleWorkerWhenPoolBecomesIneligible(t *testing.T) 
 		}
 		switch w.GetWorkerPool() {
 		case "pool-a":
-			if n := w.GetStatus().GetAllocated().GetActors(); n != 0 {
+			if n := w.GetStatus().GetAllocation().GetAllocated().GetActors(); n != 0 {
 				t.Errorf("expected worker-a (now-ineligible pool-a) to be released, still holds %d actors", n)
 			}
 		case "pool-b":
-			if n := w.GetStatus().GetAllocated().GetActors(); n != 0 {
+			if n := w.GetStatus().GetAllocation().GetAllocated().GetActors(); n != 0 {
 				t.Errorf("expected worker-b to stay free (actor crashed, not migrated), holds %d actors", n)
 			}
 		}
@@ -2575,7 +2578,7 @@ func TestResumeActor_CrashesIfAssignedWorkerIsDraining(t *testing.T) {
 			continue
 		}
 		if w.GetWorkerPod() == assignedPod {
-			if n := w.GetStatus().GetAllocated().GetActors(); n != 0 {
+			if n := w.GetStatus().GetAllocation().GetAllocated().GetActors(); n != 0 {
 				t.Errorf("expected draining worker %q to be released, still holds %d actors", assignedPod, n)
 			}
 		}
@@ -3264,7 +3267,7 @@ func TestDeleteActor_ReleasesAnAssignmentTheActorDoesNotReference(t *testing.T) 
 	if err != nil {
 		t.Fatalf("GetWorker failed: %v", err)
 	}
-	if got := worker.GetStatus().GetAllocated().GetActors(); got != 0 {
+	if got := worker.GetStatus().GetAllocation().GetAllocated().GetActors(); got != 0 {
 		t.Errorf("worker still books %d actors after the Actor was deleted, want 0", got)
 	}
 }

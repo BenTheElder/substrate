@@ -26,6 +26,8 @@ import (
 	"time"
 
 	"github.com/agent-substrate/substrate/internal/ateletdial"
+	"github.com/agent-substrate/substrate/internal/resources"
+	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
 )
@@ -55,11 +57,14 @@ const (
 //
 // TODO: read the limits from the ateom's own cgroup instead. The environment is
 // fixed when the pod is created, so it goes stale under in-place pod resize.
-func FromEnv() *ateletpb.ReportWorkerCapacityRequest {
-	return &ateletpb.ReportWorkerCapacityRequest{
-		Actors:      actorsPerAteom,
-		CpuMilli:    readLimit(CPULimitEnv),
-		MemoryBytes: readLimit(MemoryLimitEnv),
+func FromEnv() *ateletpb.SetWorkerCapacityRequest {
+	return &ateletpb.SetWorkerCapacityRequest{
+		Capacity: &ateapipb.WorkerResources{
+			Actors: actorsPerAteom,
+			// A limit read as zero is left out, which the control plane reads
+			// as none of that dimension.
+			Resources: resources.CPUMemory(readLimit(CPULimitEnv), readLimit(MemoryLimitEnv)),
+		},
 	}
 }
 
@@ -102,10 +107,7 @@ func Report(ctx context.Context, cfg ReportConfig) error {
 	if err != nil {
 		return err
 	}
-	slog.InfoContext(ctx, "Reported worker capacity",
-		slog.Int("actors", int(capacity.GetActors())),
-		slog.Int64("cpu_milli", capacity.GetCpuMilli()),
-		slog.Int64("memory_bytes", capacity.GetMemoryBytes()))
+	slog.InfoContext(ctx, "Reported worker capacity", slog.Any("capacity", capacity.GetCapacity()))
 	return nil
 }
 
@@ -127,7 +129,7 @@ func retryReport(ctx context.Context, send func() error, backoff time.Duration) 
 	}
 }
 
-func reportOnce(ctx context.Context, socketPath string, tlsConfig *tls.Config, capacity *ateletpb.ReportWorkerCapacityRequest) error {
+func reportOnce(ctx context.Context, socketPath string, tlsConfig *tls.Config, capacity *ateletpb.SetWorkerCapacityRequest) error {
 	conn, err := ateletdial.Dial(socketPath, tlsConfig)
 	if err != nil {
 		return err
@@ -135,6 +137,6 @@ func reportOnce(ctx context.Context, socketPath string, tlsConfig *tls.Config, c
 	defer conn.Close()
 	callCtx, cancel := context.WithTimeout(ctx, reportTimeout)
 	defer cancel()
-	_, err = ateletpb.NewWorkerCapacityClient(conn).ReportWorkerCapacity(callCtx, capacity)
+	_, err = ateletpb.NewWorkerCapacityClient(conn).SetWorkerCapacity(callCtx, capacity)
 	return err
 }

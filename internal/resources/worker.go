@@ -22,7 +22,7 @@ import (
 
 // AddToAllocated adjusts allocation by an assignment; sign is 1 or -1.
 // It returns nil when allocation reaches zero.
-func AddToAllocated(total *ateapipb.WorkerCapacity, assignment *ateapipb.ActorAssignment, sign int64) (*ateapipb.WorkerCapacity, error) {
+func AddToAllocated(total *ateapipb.WorkerResources, assignment *ateapipb.ActorAssignment, sign int64) (*ateapipb.WorkerResources, error) {
 	held, err := ParseQuantities(total.GetResources())
 	if err != nil {
 		return nil, fmt.Errorf("allocated: %w", err)
@@ -45,13 +45,13 @@ func AddToAllocated(total *ateapipb.WorkerCapacity, assignment *ateapipb.ActorAs
 	if actors == 0 && resources == nil {
 		return nil, nil
 	}
-	return &ateapipb.WorkerCapacity{Actors: actors, Resources: resources}, nil
+	return &ateapipb.WorkerResources{Actors: actors, Resources: resources}, nil
 }
 
 // SumAllocated is what a set of assignments takes from a Worker, or nil for
 // none. Rebuilds the total rather than adjusting it, which is what the checks
 // holding AddToAllocated to the assignments it counts compare against.
-func SumAllocated(assignments []*ateapipb.ActorAssignment) (*ateapipb.WorkerCapacity, error) {
+func SumAllocated(assignments []*ateapipb.ActorAssignment) (*ateapipb.WorkerResources, error) {
 	if len(assignments) == 0 {
 		return nil, nil
 	}
@@ -63,5 +63,18 @@ func SumAllocated(assignments []*ateapipb.ActorAssignment) (*ateapipb.WorkerCapa
 		}
 		total.Add(booked)
 	}
-	return &ateapipb.WorkerCapacity{Actors: int32(len(assignments)), Resources: total.Proto()}, nil
+	return &ateapipb.WorkerResources{Actors: int32(len(assignments)), Resources: total.Proto()}, nil
+}
+
+// Allocation returns a Worker's allocation, creating the status and allocation
+// it hangs from when they are absent. A Worker that has never been placed on
+// nor reported carries neither.
+func Allocation(worker *ateapipb.Worker) *ateapipb.WorkerAllocation {
+	if worker.Status == nil {
+		worker.Status = &ateapipb.WorkerStatus{}
+	}
+	if worker.Status.Allocation == nil {
+		worker.Status.Allocation = &ateapipb.WorkerAllocation{}
+	}
+	return worker.Status.Allocation
 }

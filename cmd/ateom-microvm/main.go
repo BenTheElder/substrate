@@ -287,15 +287,19 @@ func do(ctx context.Context) error {
 		svr.GracefulStop()
 	}()
 
-	// Report what this worker can supply. Nothing else tells the control
-	// plane, which places no actor here until it lands.
+	// Report what this worker can supply. Nothing else tells the control plane,
+	// which places no Actor here until it lands, so a worker that cannot report
+	// is one that will sit idle forever. Report retries every failure it can
+	// outlast, including the window before the Worker record exists; anything
+	// that reaches here is a misconfiguration no restart-in-place will fix.
 	go func() {
-		if err := ateomcapacity.Report(ctx, ateomcapacity.ReportConfig{
+		err := ateomcapacity.Report(ctx, ateomcapacity.ReportConfig{
 			SocketPath:           ateompath.CredentialBrokerSocket,
 			CredentialBundlePath: *workerCredentialBundle,
 			TrustBundlePath:      *podIdentityTrustBundle,
-		}); err != nil {
-			slog.ErrorContext(ctx, "Failed to report worker capacity", slog.Any("err", err))
+		})
+		if err != nil && ctx.Err() == nil {
+			serverboot.Fatal(ctx, "Failed to report worker capacity", err)
 		}
 	}()
 

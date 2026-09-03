@@ -35,10 +35,11 @@ const (
 	capNode       = "node-1"
 )
 
-// seedCapacityWorker registers a Worker on nodeName carrying capacity, the way
-// the syncer does: identity from the pod, and only the ceiling CreateWorker
-// reifies.
-func seedCapacityWorker(t *testing.T, st store.Interface, nodeName string, capacity *ateapipb.WorkerCapacity) *ateapipb.Worker {
+// seedReportedWorker registers a Worker on nodeName that has already reported
+// capacity: identity from the pod, the way the syncer writes it, plus the
+// result of an earlier report. A Worker that has never reported carries none,
+// so what a fresh report replaces is what this seeds.
+func seedReportedWorker(t *testing.T, st store.Interface, nodeName string, capacity *ateapipb.WorkerResources) *ateapipb.Worker {
 	t.Helper()
 	created, err := st.CreateWorker(context.Background(), &ateapipb.Worker{
 		Metadata:        &ateapipb.ResourceMetadata{Name: capWorkerName},
@@ -49,10 +50,7 @@ func seedCapacityWorker(t *testing.T, st store.Interface, nodeName string, capac
 		NodeName:        nodeName,
 		Ip:              "10.1.2.3",
 		SandboxClass:    "gvisor",
-		Status: &ateapipb.WorkerStatus{
-			State:    ateapipb.WorkerState_WORKER_STATE_ACTIVE,
-			Capacity: capacity,
-		},
+		Status:          &ateapipb.WorkerStatus{State: ateapipb.WorkerState_WORKER_STATE_ACTIVE, Allocation: &ateapipb.WorkerAllocation{Capacity: capacity}},
 	})
 	if err != nil {
 		t.Fatalf("seeding worker: %v", err)
@@ -63,29 +61,29 @@ func seedCapacityWorker(t *testing.T, st store.Interface, nodeName string, capac
 func setRequest(actors int32) *ateapipb.SetWorkerCapacityRequest {
 	return &ateapipb.SetWorkerCapacityRequest{
 		Worker:   &ateapipb.ObjectRef{Name: capWorkerName},
-		Capacity: &ateapipb.WorkerCapacity{Actors: actors},
+		Capacity: &ateapipb.WorkerResources{Actors: actors},
 	}
 }
 
-// The point of the whole path: a Worker starts at the ceiling CreateWorker
-// reified and moves to the one its ateom actually reports.
+// The point of the whole path: a Worker moves from what it reported before to
+// what its ateom reports now.
 func TestSetWorkerCapacity(t *testing.T) {
 	st, cleanup := storetest.SetupTestStore(t)
 	defer cleanup()
 	s := New(st)
-	seedCapacityWorker(t, st, capNode, &ateapipb.WorkerCapacity{Actors: 1, Resources: resources.CPUMemory(2000, 0)})
+	seedReportedWorker(t, st, capNode, &ateapipb.WorkerResources{Actors: 1, Resources: resources.CPUMemory(2000, 0)})
 
 	got, err := s.SetWorkerCapacity(ateletauthtest.ContextWith(ateletauthtest.CertOn(t, capNode)), setRequest(4094))
 	if err != nil {
 		t.Fatalf("SetWorkerCapacity() failed: %v", err)
 	}
-	if want := int32(4094); got.GetWorker().GetStatus().GetCapacity().GetActors() != want {
-		t.Errorf("capacity.actors = %d, want %d", got.GetWorker().GetStatus().GetCapacity().GetActors(), want)
+	if want := int32(4094); got.GetWorker().GetStatus().GetAllocation().GetCapacity().GetActors() != want {
+		t.Errorf("capacity.actors = %d, want %d", got.GetWorker().GetStatus().GetAllocation().GetCapacity().GetActors(), want)
 	}
 	// A report replaces what is recorded. The Worker reports everything it has,
 	// so a dimension this one leaves out is one it no longer supplies -- keeping
 	// the old value would advertise compute nothing claims to have.
-	if got := got.GetWorker().GetStatus().GetCapacity().GetResources(); got != nil {
+	if got := got.GetWorker().GetStatus().GetAllocation().GetCapacity().GetResources(); got != nil {
 		t.Errorf("capacity resources = %v, want the report's own (none)", got)
 	}
 }
@@ -97,7 +95,7 @@ func TestSetWorkerCapacity_OtherNodeIsNotFound(t *testing.T) {
 	st, cleanup := storetest.SetupTestStore(t)
 	defer cleanup()
 	s := New(st)
-	seedCapacityWorker(t, st, capNode, &ateapipb.WorkerCapacity{Actors: 1})
+	seedReportedWorker(t, st, capNode, &ateapipb.WorkerResources{Actors: 1})
 
 	_, err := s.SetWorkerCapacity(ateletauthtest.ContextWith(ateletauthtest.CertOn(t, "some-other-node")), setRequest(4094))
 	if got := status.Code(err); got != codes.NotFound {
@@ -109,18 +107,19 @@ func TestSetWorkerCapacity_OtherNodeIsNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetWorker: %v", err)
 	}
-	if got := after.GetStatus().GetCapacity().GetActors(); got != 1 {
+	if got := after.GetStatus().GetAllocation().GetCapacity().GetActors(); got != 1 {
 		t.Errorf("capacity.actors = %d, want 1 unchanged", got)
 	}
 }
 
-// Re-sending the same capacity is not an update: the reporter runs on a timer,
-// so a no-op report must not churn the Worker's version.
+// Re-sending the same capacity is not an update. An ateom reports once, but it
+// retries until accepted and reports again if it restarts, so a repeat must not
+// churn the Worker's version.
 func TestSetWorkerCapacity_UnchangedDoesNotWrite(t *testing.T) {
 	st, cleanup := storetest.SetupTestStore(t)
 	defer cleanup()
 	s := New(st)
-	seeded := seedCapacityWorker(t, st, capNode, &ateapipb.WorkerCapacity{Actors: 4094})
+	seeded := seedReportedWorker(t, st, capNode, &ateapipb.WorkerResources{Actors: 4094})
 
 	for range 3 {
 		if _, err := s.SetWorkerCapacity(ateletauthtest.ContextWith(ateletauthtest.CertOn(t, capNode)), setRequest(4094)); err != nil {
@@ -140,7 +139,7 @@ func TestSetWorkerCapacity_Errors(t *testing.T) {
 	st, cleanup := storetest.SetupTestStore(t)
 	defer cleanup()
 	s := New(st)
-	seedCapacityWorker(t, st, capNode, &ateapipb.WorkerCapacity{Actors: 1})
+	seedReportedWorker(t, st, capNode, &ateapipb.WorkerResources{Actors: 1})
 	authed := ateletauthtest.ContextWith(ateletauthtest.CertOn(t, capNode))
 
 	tests := []struct {
@@ -151,14 +150,14 @@ func TestSetWorkerCapacity_Errors(t *testing.T) {
 	}{
 		{"unauthenticated", ateletauthtest.ContextWith(nil), setRequest(2), codes.Unauthenticated},
 		{"no worker ref", authed, &ateapipb.SetWorkerCapacityRequest{
-			Capacity: &ateapipb.WorkerCapacity{Actors: 2},
+			Capacity: &ateapipb.WorkerResources{Actors: 2},
 		}, codes.InvalidArgument},
 		{"no capacity", authed, &ateapipb.SetWorkerCapacityRequest{
 			Worker: &ateapipb.ObjectRef{Name: capWorkerName},
 		}, codes.InvalidArgument},
 		{"absent worker", authed, &ateapipb.SetWorkerCapacityRequest{
 			Worker:   &ateapipb.ObjectRef{Name: "3b9f1e77-2c4d-4a80-91be-6d5c8f0a7e21"},
-			Capacity: &ateapipb.WorkerCapacity{Actors: 2},
+			Capacity: &ateapipb.WorkerResources{Actors: 2},
 		}, codes.NotFound},
 	}
 	for _, tc := range tests {
@@ -178,17 +177,17 @@ func TestSetWorkerCapacity_RejectsNonsense(t *testing.T) {
 	st, cleanup := storetest.SetupTestStore(t)
 	defer cleanup()
 	s := New(st)
-	seeded := seedCapacityWorker(t, st, capNode, &ateapipb.WorkerCapacity{Actors: 4094})
+	seeded := seedReportedWorker(t, st, capNode, &ateapipb.WorkerResources{Actors: 4094})
 	authed := ateletauthtest.ContextWith(ateletauthtest.CertOn(t, capNode))
 
 	for _, tc := range []struct {
 		name     string
-		capacity *ateapipb.WorkerCapacity
+		capacity *ateapipb.WorkerResources
 	}{
-		{"negative ceiling", &ateapipb.WorkerCapacity{Actors: -1}},
-		{"int32 underflow", &ateapipb.WorkerCapacity{Actors: -2147483648}},
-		{"negative quantity", &ateapipb.WorkerCapacity{Resources: resources.CPUMemory(-1, 0)}},
-		{"unparseable quantity", &ateapipb.WorkerCapacity{
+		{"negative ceiling", &ateapipb.WorkerResources{Actors: -1}},
+		{"int32 underflow", &ateapipb.WorkerResources{Actors: -2147483648}},
+		{"negative quantity", &ateapipb.WorkerResources{Resources: resources.CPUMemory(-1, 0)}},
+		{"unparseable quantity", &ateapipb.WorkerResources{
 			Resources: &ateapipb.Resources{Limits: []*ateapipb.Limits{{Name: "cpu", Quantity: "lots"}}},
 		}},
 	} {
@@ -207,7 +206,7 @@ func TestSetWorkerCapacity_RejectsNonsense(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetWorker: %v", err)
 	}
-	if diff := cmp.Diff(seeded.GetStatus().GetCapacity(), after.GetStatus().GetCapacity(), protocmp.Transform()); diff != "" {
+	if diff := cmp.Diff(seeded.GetStatus().GetAllocation().GetCapacity(), after.GetStatus().GetAllocation().GetCapacity(), protocmp.Transform()); diff != "" {
 		t.Errorf("capacity changed despite every report being refused (-want +got):\n%s", diff)
 	}
 }

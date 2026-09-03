@@ -19,7 +19,6 @@ import (
 	"log/slog"
 
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
-	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 )
 
@@ -32,33 +31,29 @@ type workerCapacityService struct {
 	workers ateapipb.WorkerServiceClient
 }
 
-// ReportWorkerCapacity records what the calling worker says it has.
+// SetWorkerCapacity records what the calling worker says it has.
 //
 // It returns the control plane's error unwrapped so the caller retries: a
 // worker reports once, so an accepted call is the only thing that puts
 // capacity on the Worker, and a Worker record the syncer has not created yet
 // is the ordinary reason for a first attempt to fail.
-func (s *workerCapacityService) ReportWorkerCapacity(ctx context.Context, req *ateletpb.ReportWorkerCapacityRequest) (*ateletpb.ReportWorkerCapacityResponse, error) {
+func (s *workerCapacityService) SetWorkerCapacity(ctx context.Context, req *ateletpb.SetWorkerCapacityRequest) (*ateletpb.SetWorkerCapacityResponse, error) {
 	// Identity comes only from the mTLS certificate, never from the request:
 	// a worker can report its own capacity and no one else's.
 	workerIdentity, err := authenticatedWorkerIdentity(ctx)
 	if err != nil {
 		return nil, err
 	}
-	capacity := &ateapipb.WorkerCapacity{
-		Actors: req.GetActors(),
-		// A dimension the worker could not determine is left out, which the
-		// control plane reads as none of it.
-		Resources: resources.CPUMemory(req.GetCpuMilli(), req.GetMemoryBytes()),
-	}
+	// Forwarded as reported: the worker speaks the vocabulary the control plane
+	// records, so there is nothing to translate.
 	if _, err := s.workers.SetWorkerCapacity(ctx, &ateapipb.SetWorkerCapacityRequest{
 		// Workers are global-scoped and named by their pod UID.
 		Worker:   &ateapipb.ObjectRef{Name: workerIdentity.PodUID},
-		Capacity: capacity,
+		Capacity: req.GetCapacity(),
 	}); err != nil {
 		return nil, err
 	}
 	slog.InfoContext(ctx, "Recorded worker capacity",
-		slog.String("pod_uid", workerIdentity.PodUID), slog.Any("capacity", capacity))
-	return &ateletpb.ReportWorkerCapacityResponse{}, nil
+		slog.String("pod_uid", workerIdentity.PodUID), slog.Any("capacity", req.GetCapacity()))
+	return &ateletpb.SetWorkerCapacityResponse{}, nil
 }

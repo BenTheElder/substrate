@@ -26,6 +26,7 @@ import (
 	"google.golang.org/protobuf/testing/protocmp"
 
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
+	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 )
 
@@ -44,43 +45,39 @@ func (s *fakeWorkerService) SetWorkerCapacity(_ context.Context, in *ateapipb.Se
 	return &ateapipb.SetWorkerCapacityResponse{}, nil
 }
 
-func TestReportWorkerCapacityRecordsWhatTheWorkerSays(t *testing.T) {
+func TestSetWorkerCapacityRecordsWhatTheWorkerSays(t *testing.T) {
 	workers := &fakeWorkerService{}
 	svc := &workerCapacityService{workers: workers}
 
 	ctx := workerContext(t, "pod-a")
-	if _, err := svc.ReportWorkerCapacity(ctx, &ateletpb.ReportWorkerCapacityRequest{
-		Actors: 4, CpuMilli: 2000, MemoryBytes: 4294967296,
+	reported := &ateapipb.WorkerResources{
+		Actors:    4,
+		Resources: resources.CPUMemory(2000, 4294967296),
+	}
+	if _, err := svc.SetWorkerCapacity(ctx, &ateletpb.SetWorkerCapacityRequest{
+		Capacity: reported,
 	}); err != nil {
-		t.Fatalf("ReportWorkerCapacity() failed: %v", err)
+		t.Fatalf("SetWorkerCapacity() failed: %v", err)
 	}
 
 	want := []*ateapipb.SetWorkerCapacityRequest{{
 		// The Worker is named after the worker pod UID, taken from the
 		// certificate rather than the request.
-		Worker: &ateapipb.ObjectRef{Name: "pod-a"},
-		Capacity: &ateapipb.WorkerCapacity{
-			Actors: 4,
-			Resources: &ateapipb.Resources{
-				Limits: []*ateapipb.Limits{
-					{Name: "cpu", Quantity: "2"},
-					{Name: "memory", Quantity: "4Gi"},
-				},
-			},
-		},
+		Worker:   &ateapipb.ObjectRef{Name: "pod-a"},
+		Capacity: reported,
 	}}
 	if diff := cmp.Diff(want, workers.got, protocmp.Transform()); diff != "" {
 		t.Errorf("recorded capacity mismatch (-want +got):\n%s", diff)
 	}
 }
 
-func TestReportWorkerCapacityOmitsUndeterminedCompute(t *testing.T) {
+func TestSetWorkerCapacityOmitsUndeterminedCompute(t *testing.T) {
 	workers := &fakeWorkerService{}
 	svc := &workerCapacityService{workers: workers}
 
 	ctx := workerContext(t, "pod-a")
-	if _, err := svc.ReportWorkerCapacity(ctx, &ateletpb.ReportWorkerCapacityRequest{Actors: 1}); err != nil {
-		t.Fatalf("ReportWorkerCapacity() failed: %v", err)
+	if _, err := svc.SetWorkerCapacity(ctx, &ateletpb.SetWorkerCapacityRequest{Capacity: &ateapipb.WorkerResources{Actors: 1}}); err != nil {
+		t.Fatalf("SetWorkerCapacity() failed: %v", err)
 	}
 
 	if got := workers.got[0].GetCapacity().GetResources(); got != nil {
@@ -88,13 +85,13 @@ func TestReportWorkerCapacityOmitsUndeterminedCompute(t *testing.T) {
 	}
 }
 
-func TestReportWorkerCapacityRequiresACertificate(t *testing.T) {
+func TestSetWorkerCapacityRequiresACertificate(t *testing.T) {
 	workers := &fakeWorkerService{}
 	svc := &workerCapacityService{workers: workers}
 
 	// No peer identity: a worker may report only what its certificate proves
 	// it is, so there is nothing to attribute this to.
-	_, err := svc.ReportWorkerCapacity(context.Background(), &ateletpb.ReportWorkerCapacityRequest{Actors: 1})
+	_, err := svc.SetWorkerCapacity(context.Background(), &ateletpb.SetWorkerCapacityRequest{Capacity: &ateapipb.WorkerResources{Actors: 1}})
 	if status.Code(err) != codes.Unauthenticated {
 		t.Errorf("unauthenticated report returned %v, want Unauthenticated", err)
 	}
@@ -103,7 +100,7 @@ func TestReportWorkerCapacityRequiresACertificate(t *testing.T) {
 	}
 }
 
-func TestReportWorkerCapacitySurfacesRejection(t *testing.T) {
+func TestSetWorkerCapacitySurfacesRejection(t *testing.T) {
 	// The Worker record may not exist yet. The error must reach the worker so
 	// it retries: it reports once, so a swallowed failure leaves the Worker
 	// with no capacity forever.
@@ -111,7 +108,7 @@ func TestReportWorkerCapacitySurfacesRejection(t *testing.T) {
 	svc := &workerCapacityService{workers: workers}
 
 	ctx := workerContext(t, "pod-a")
-	if _, err := svc.ReportWorkerCapacity(ctx, &ateletpb.ReportWorkerCapacityRequest{Actors: 1}); err == nil {
+	if _, err := svc.SetWorkerCapacity(ctx, &ateletpb.SetWorkerCapacityRequest{Capacity: &ateapipb.WorkerResources{Actors: 1}}); err == nil {
 		t.Error("a rejected report returned success, so the worker would not retry")
 	}
 }

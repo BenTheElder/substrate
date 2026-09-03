@@ -1721,10 +1721,18 @@ message WorkerStatus {
   // +k8s:maximum=2 # keep this in sync with the WorkerState enum
   WorkerState state = 1;
 
-  // What this Worker can supply to the Actors it hosts, as the Worker reports
-  // it through WorkerService.SetWorkerCapacity. Observed, not requested: no
-  // client sets this, which is why it sits beside allocated rather than in the
-  // spec.
+  // What this Worker has and what is spoken for. Observed, not requested: no
+  // client sets it, which is why it is status.
+  //
+  // +k8s:optional
+  WorkerAllocation allocation = 2;
+}
+
+// WorkerAllocation is a Worker's total against its committed share, in one
+// message because placement only ever reads the two together.
+message WorkerAllocation {
+  // What the Worker can supply, as it reports through
+  // WorkerService.SetWorkerCapacity.
   //
   // Complete, not partial: a Worker reports every dimension it has, so a name
   // missing here is one it cannot supply at all and no Actor asking for that
@@ -1732,22 +1740,22 @@ message WorkerStatus {
   // evicts nothing.
   //
   // +k8s:optional
-  WorkerCapacity capacity = 4;
+  WorkerResources capacity = 1;
 
   // What the assignments consume of capacity. A running total because placement
   // reads it for every Worker on every decision, and summing the assignments
   // would cost the fleet's actor count each time.
   //
   // +k8s:optional
-  WorkerCapacity allocated = 3;
+  WorkerResources allocated = 2;
 }
 
-// WorkerCapacity is a Worker's total, not what is free. Free is capacity minus
-// WorkerStatus.allocated, which uses this same message, so the two subtract. An
-// Actor is placed only where free covers its limits in every dimension.
+// WorkerResources is a vector of what a Worker has or holds. Capacity and
+// allocated share it so the two subtract: free is capacity minus allocated, and
+// an Actor is placed only where free covers its limits in every dimension.
 //
 // A Worker overcommits by reporting more than it has.
-message WorkerCapacity {
+message WorkerResources {
   // What a Worker supplies, named as an ActorTemplate names what it asks for,
   // so the two are one vocabulary and subtract directly. A name that is absent
   // is none of that resource: an Actor asking for a GPU is not placed on a
@@ -1802,7 +1810,7 @@ message ActorAssignment {
   // they read at placement time. Recorded rather than re-read so release
   // returns exactly what binding consumed, even if the template changed since.
   //
-  // Sorted by name, as WorkerCapacity.resources is.
+  // Sorted by name, as WorkerResources.resources is.
   //
   // +k8s:optional
   Resources resources = 5;
@@ -1863,7 +1871,7 @@ message SetWorkerCapacityRequest {
   // and an Actor asking for that dimension will not be placed here.
   //
   // +k8s:required
-  WorkerCapacity capacity = 2;
+  WorkerResources capacity = 2;
 }
 
 message SetWorkerCapacityResponse {

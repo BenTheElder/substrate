@@ -87,17 +87,14 @@ func (s *Server) SetWorkerCapacity(ctx context.Context, req *ateapipb.SetWorkerC
 		return nil, status.Errorf(codes.NotFound, "Worker %s not found", name)
 	}
 
-	if proto.Equal(worker.GetStatus().GetCapacity(), reported) {
+	if proto.Equal(worker.GetStatus().GetAllocation().GetCapacity(), reported) {
 		return &ateapipb.SetWorkerCapacityResponse{Worker: worker}, nil
 	}
 
 	updated, err := s.store.UpdateWorker(ctx, name, store.PreconditionFrom(worker), func(toUpdate *ateapipb.Worker) error {
-		if toUpdate.Status == nil {
-			toUpdate.Status = &ateapipb.WorkerStatus{}
-		}
 		// Replaces rather than merges: a Worker reports everything it has, so a
 		// dimension this report leaves out is one it no longer supplies.
-		toUpdate.Status.Capacity = reported
+		resources.Allocation(toUpdate).Capacity = reported
 		return nil
 	})
 	switch {
@@ -111,8 +108,8 @@ func (s *Server) SetWorkerCapacity(ctx context.Context, req *ateapipb.SetWorkerC
 	}
 	slog.InfoContext(ctx, "Worker reported its capacity",
 		slog.String("worker", name),
-		slog.String("was", worker.GetStatus().GetCapacity().String()),
-		slog.String("now", updated.GetStatus().GetCapacity().String()))
+		slog.String("was", worker.GetStatus().GetAllocation().GetCapacity().String()),
+		slog.String("now", updated.GetStatus().GetAllocation().GetCapacity().String()))
 	return &ateapipb.SetWorkerCapacityResponse{Worker: updated}, nil
 }
 
@@ -122,7 +119,7 @@ func (s *Server) SetWorkerCapacity(ctx context.Context, req *ateapipb.SetWorkerC
 // A negative one is the costly case: placement asks whether allocated is below
 // capacity, which is false for every Actor, so the Worker silently never takes
 // another one.
-func validateReportedCapacity(reported *ateapipb.WorkerCapacity) error {
+func validateReportedCapacity(reported *ateapipb.WorkerResources) error {
 	if reported.GetActors() < 0 {
 		return fmt.Errorf("actors is %d, must not be negative", reported.GetActors())
 	}
