@@ -1750,16 +1750,10 @@ message WorkerAllocation {
   WorkerResources allocated = 2;
 }
 
-// WorkerResources is a vector of what a Worker has or holds. Capacity and
-// allocated share it so the two subtract: free is capacity minus allocated, and
-// an Actor is placed only where free covers its limits in every dimension.
-//
-// A Worker overcommits by reporting more than it has.
+// WorkerResources represents schedulable resources.
 message WorkerResources {
-  // What a Worker supplies, named as an ActorTemplate names what it asks for,
-  // so the two are one vocabulary and subtract directly. A name that is absent
-  // is none of that resource: an Actor asking for a GPU is not placed on a
-  // Worker that never reported one.
+  // Resources match the actor's definition of resources.
+  // They are matched by name, used for placement.
   //
   // Sorted by name, so equal capacities compare equal.
   //
