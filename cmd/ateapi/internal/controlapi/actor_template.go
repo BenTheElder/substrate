@@ -45,6 +45,12 @@ func (s *RPCService) CreateActorTemplate(ctx context.Context, req *ateapipb.Crea
 		return nil, toGRPCStatusError(errs)
 	}
 
+	// config_name is required; the declarative validation has already
+	// rejected an empty one.
+	if _, err := resolveTemplateSandboxConfig(s.sandboxConfigLister, in.GetSandboxConfig()); err != nil {
+		return nil, err
+	}
+
 	templateRef := resources.ActorTemplateRefFromActorTemplate(in)
 
 	stored, err := s.impl.CreateActorTemplate(ctx, in)
@@ -63,7 +69,6 @@ func (s *RPCService) CreateActorTemplate(ctx context.Context, req *ateapipb.Crea
 
 func (s *ServiceImpl) CreateActorTemplate(ctx context.Context, inTemplate *ateapipb.ActorTemplate) (*ateapipb.ActorTemplate, error) {
 	// Build the stored object: status is server-owned and starts empty.
-	// TODO: check that sandbox_config.config_name matches sandbox_class.
 	outTemplate := proto.Clone(inTemplate).(*ateapipb.ActorTemplate)
 	outTemplate.Status = &ateapipb.ActorTemplateStatus{}
 
