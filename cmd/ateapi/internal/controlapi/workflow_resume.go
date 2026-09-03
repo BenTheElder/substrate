@@ -418,8 +418,7 @@ func (w *ActorWorkflow) validateAssignedWorker(ctx context.Context, actorRef res
 		// worker_selector was updated after the failed attempt), release it back
 		// to the free pool instead of leaving it claimed forever — nothing else
 		// reclaims a healthy worker whose actor moved on to a different pool.
-		if _, err := w.store.ReleaseActorFromWorker(ctx, worker.GetMetadata().GetName(),
-			worker.GetMetadata().GetVersion(), actor.GetMetadata().GetUid()); err != nil {
+		if _, err := w.store.ReleaseActorFromWorker(ctx, worker.GetMetadata().GetName(), actor.GetMetadata().GetUid()); err != nil {
 			return nil, fmt.Errorf("while releasing stale worker assignment: %w", err)
 		}
 		if cerr := crashActor(ctx, w.store, actorRef, ateattr.OperationResume, ateattr.ReasonCorruptedAssignment); cerr != nil {
@@ -460,7 +459,7 @@ func (w *ActorWorkflow) workerHoldingStaleClaim(ctx context.Context, actor *atea
 		return worker, nil
 	}
 
-	_, err = w.store.ReleaseActorFromWorker(ctx, workerName, worker.GetMetadata().GetVersion(), actorUID)
+	_, err = w.store.ReleaseActorFromWorker(ctx, workerName, actorUID)
 	if err != nil {
 		return nil, fmt.Errorf("while releasing stale claim on worker %q: %w", workerName, err)
 	}

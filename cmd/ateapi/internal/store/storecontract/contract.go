@@ -2094,11 +2094,7 @@ func runWorkerAssignmentContractTests(t *testing.T, setup func(t *testing.T) sto
 		bind(t, s, testWorkerName, newTestAssignment("uid-1", 500, 1<<20))
 		bind(t, s, testWorkerName, newTestAssignment("uid-2", 250, 1<<21))
 
-		worker, err := s.GetWorker(ctx, testWorkerName)
-		if err != nil {
-			t.Fatalf("GetWorker failed: %v", err)
-		}
-		released, err := s.ReleaseActorFromWorker(ctx, testWorkerName, worker.GetMetadata().GetVersion(), "uid-1")
+		released, err := s.ReleaseActorFromWorker(ctx, testWorkerName, "uid-1")
 		if err != nil {
 			t.Fatalf("ReleaseActorFromWorker failed: %v", err)
 		}
@@ -2119,7 +2115,7 @@ func runWorkerAssignmentContractTests(t *testing.T, setup func(t *testing.T) sto
 		if _, err := s.GetWorkerAssignment(ctx, testWorkerName, "uid-2"); err != nil {
 			t.Errorf("releasing one actor disturbed another: %v", err)
 		}
-		worker, err = s.GetWorker(ctx, testWorkerName)
+		worker, err := s.GetWorker(ctx, testWorkerName)
 		if err != nil {
 			t.Fatalf("GetWorker failed: %v", err)
 		}
@@ -2142,7 +2138,7 @@ func runWorkerAssignmentContractTests(t *testing.T, setup func(t *testing.T) sto
 		}
 		// Release runs on paths that retry, so a second pass has to converge
 		// rather than fail -- and must not advance the Worker either.
-		released, err := s.ReleaseActorFromWorker(ctx, testWorkerName, worker.GetMetadata().GetVersion(), "uid-1")
+		released, err := s.ReleaseActorFromWorker(ctx, testWorkerName, "uid-1")
 		if err != nil {
 			t.Fatalf("ReleaseActorFromWorker failed: %v", err)
 		}
@@ -2273,11 +2269,7 @@ func runWorkerAssignmentContractTests(t *testing.T, setup func(t *testing.T) sto
 
 		// Released, so nothing hosts it -- the recovery this exists for must
 		// not resurrect a placement that is over.
-		worker, err := s.GetWorker(ctx, testWorkerName)
-		if err != nil {
-			t.Fatalf("GetWorker failed: %v", err)
-		}
-		if _, err := s.ReleaseActorFromWorker(ctx, testWorkerName, worker.GetMetadata().GetVersion(), "uid-1"); err != nil {
+		if _, err := s.ReleaseActorFromWorker(ctx, testWorkerName, "uid-1"); err != nil {
 			t.Fatalf("ReleaseActorFromWorker failed: %v", err)
 		}
 		if _, err := s.FindWorkerHostingActor(ctx, "uid-1"); !errors.Is(err, store.ErrNotFound) {
@@ -2331,11 +2323,6 @@ func runWorkerAssignmentContractTests(t *testing.T, setup func(t *testing.T) sto
 		rng := rand.New(rand.NewPCG(1, 2))
 		for step := range 300 {
 			actorUID := fmt.Sprintf("uid-%d", rng.IntN(12))
-			worker, err := s.GetWorker(ctx, testWorkerName)
-			if err != nil {
-				t.Fatalf("GetWorker failed: %v", err)
-			}
-			version := worker.GetMetadata().GetVersion()
 
 			if rng.IntN(3) < 2 {
 				// Bind, sometimes over an actor already there and at a different
@@ -2344,11 +2331,11 @@ func runWorkerAssignmentContractTests(t *testing.T, setup func(t *testing.T) sto
 				if err := s.BindActorToWorker(ctx, testWorkerName, assignment, nil); err != nil {
 					t.Fatalf("step %d: BindActorToWorker(%s) failed: %v", step, actorUID, err)
 				}
-			} else if _, err := s.ReleaseActorFromWorker(ctx, testWorkerName, version, actorUID); err != nil {
+			} else if _, err := s.ReleaseActorFromWorker(ctx, testWorkerName, actorUID); err != nil {
 				t.Fatalf("step %d: ReleaseActorFromWorker(%s) failed: %v", step, actorUID, err)
 			}
 
-			worker, err = s.GetWorker(ctx, testWorkerName)
+			worker, err := s.GetWorker(ctx, testWorkerName)
 			if err != nil {
 				t.Fatalf("GetWorker failed: %v", err)
 			}
@@ -2374,11 +2361,7 @@ func runWorkerAssignmentContractTests(t *testing.T, setup func(t *testing.T) sto
 		}
 		assignments := assignmentsPage.Items
 		for _, assignment := range assignments {
-			worker, err := s.GetWorker(ctx, testWorkerName)
-			if err != nil {
-				t.Fatalf("GetWorker failed: %v", err)
-			}
-			if _, err := s.ReleaseActorFromWorker(ctx, testWorkerName, worker.GetMetadata().GetVersion(), assignment.GetActorUid()); err != nil {
+			if _, err := s.ReleaseActorFromWorker(ctx, testWorkerName, assignment.GetActorUid()); err != nil {
 				t.Fatalf("ReleaseActorFromWorker failed: %v", err)
 			}
 		}

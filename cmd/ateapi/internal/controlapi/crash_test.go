@@ -525,7 +525,7 @@ type failingReleaseStore struct {
 	err error
 }
 
-func (f failingReleaseStore) ReleaseActorFromWorker(context.Context, string, int64, string) (*ateapipb.Worker, error) {
+func (f failingReleaseStore) ReleaseActorFromWorker(context.Context, string, string) (*ateapipb.Worker, error) {
 	return nil, f.err
 }
 

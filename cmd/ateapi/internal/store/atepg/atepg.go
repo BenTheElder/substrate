@@ -1615,7 +1615,7 @@ func (p *Persistence) BindActorToWorker(ctx context.Context, workerName string, 
 	return err
 }
 
-func (p *Persistence) ReleaseActorFromWorker(ctx context.Context, workerName string, expectedVersion int64, actorUID string) (*ateapipb.Worker, error) {
+func (p *Persistence) ReleaseActorFromWorker(ctx context.Context, workerName string, actorUID string) (*ateapipb.Worker, error) {
 	var released *ateapipb.Worker
 	_, err := p.writeAndAppendEvent(ctx, store.WorkerEventUpdated, func(ctx context.Context, tx pgx.Tx) (*ateapipb.Worker, error) {
 		released = nil

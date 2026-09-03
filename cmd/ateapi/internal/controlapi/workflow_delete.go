@@ -233,8 +233,9 @@ func (w *ActorWorkflow) releaseAssignmentWithoutBacklink(ctx context.Context, ac
 		return fmt.Errorf("while looking for a worker still hosting actor %s: %w", actorUID, err)
 	}
 
-	worker, err := w.store.GetWorker(ctx, workerName)
-	if err != nil {
+	// Read only to learn whether the Worker is still there; the release itself
+	// is guarded by the assignment key.
+	if _, err := w.store.GetWorker(ctx, workerName); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			markSkipped(ctx, "worker already released")
 			return nil
@@ -244,7 +245,7 @@ func (w *ActorWorkflow) releaseAssignmentWithoutBacklink(ctx context.Context, ac
 
 	slog.InfoContext(ctx, "Releasing an assignment the Actor does not reference",
 		slog.String("worker", workerName), slog.String("actor_uid", actorUID))
-	_, err = w.store.ReleaseActorFromWorker(ctx, workerName, worker.GetMetadata().GetVersion(), actorUID)
+	_, err = w.store.ReleaseActorFromWorker(ctx, workerName, actorUID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return nil

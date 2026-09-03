@@ -246,7 +246,7 @@ type Interface interface {
 	// returning the Worker as it now stands so the caller can feed the
 	// watch-fed cache, which until then reports it full. It returns nil if the
 	// assignment was already absent.
-	ReleaseActorFromWorker(ctx context.Context, workerName string, expectedVersion int64, actorUID string) (*ateapipb.Worker, error)
+	ReleaseActorFromWorker(ctx context.Context, workerName string, actorUID string) (*ateapipb.Worker, error)
 
 	// GetWorkerAssignment returns a Worker's assignment for actorUID, or
 	// ErrNotFound when the Worker is not hosting that Actor.

@@ -109,7 +109,7 @@ type crashActorStore interface {
 	GetActor(ctx context.Context, actorRef resources.ActorRef) (*ateapipb.Actor, error)
 	UpdateActor(ctx context.Context, actorRef resources.ActorRef, precondition store.Precondition, mutate func(toUpdate *ateapipb.Actor) error) (*ateapipb.Actor, error)
 	GetWorker(ctx context.Context, name string) (*ateapipb.Worker, error)
-	ReleaseActorFromWorker(ctx context.Context, workerName string, expectedVersion int64, actorUID string) (*ateapipb.Worker, error)
+	ReleaseActorFromWorker(ctx context.Context, workerName string, actorUID string) (*ateapipb.Worker, error)
 }
 
 // releaseWorker clears the worker's assignment if it still points at the given
@@ -138,7 +138,7 @@ func releaseWorker(ctx context.Context, st crashActorStore, actor *ateapipb.Acto
 	// Release only this actor's assignment; the worker may be hosting others,
 	// and they are unaffected by this one crashing. A worker that is no longer
 	// hosting it has already been released.
-	released, err := st.ReleaseActorFromWorker(ctx, workerName, worker.GetMetadata().GetVersion(), actor.GetMetadata().GetUid())
+	released, err := st.ReleaseActorFromWorker(ctx, workerName, actor.GetMetadata().GetUid())
 	if err != nil {
 		return sandboxClass, nil, fmt.Errorf("while releasing worker: %w", err)
 	}

@@ -247,8 +247,8 @@ func (s *ServiceImpl) BindActorToWorker(ctx context.Context, workerName string, 
 	return s.store.BindActorToWorker(ctx, workerName, assignment, admit)
 }
 
-func (s *ServiceImpl) ReleaseActorFromWorker(ctx context.Context, workerName string, expectedVersion int64, actorUID string) (*ateapipb.Worker, error) {
-	return s.store.ReleaseActorFromWorker(ctx, workerName, expectedVersion, actorUID)
+func (s *ServiceImpl) ReleaseActorFromWorker(ctx context.Context, workerName string, actorUID string) (*ateapipb.Worker, error) {
+	return s.store.ReleaseActorFromWorker(ctx, workerName, actorUID)
 }
 
 func (s *ServiceImpl) GetWorkerAssignment(ctx context.Context, workerName, actorUID string) (*ateapipb.ActorAssignment, error) {
