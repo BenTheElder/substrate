@@ -164,10 +164,10 @@ class ControlStub:
                 request_serializer=ateapi__pb2.DrainWorkerRequest.SerializeToString,
                 response_deserializer=ateapi__pb2.Worker.FromString,
                 _registered_method=True)
-        self.ListWorkerAssignments = channel.unary_unary(
-                '/ateapi.Control/ListWorkerAssignments',
-                request_serializer=ateapi__pb2.ListWorkerAssignmentsRequest.SerializeToString,
-                response_deserializer=ateapi__pb2.ListWorkerAssignmentsResponse.FromString,
+        self.ListWorkerActorAssignments = channel.unary_unary(
+                '/ateapi.Control/ListWorkerActorAssignments',
+                request_serializer=ateapi__pb2.ListWorkerActorAssignmentsRequest.SerializeToString,
+                response_deserializer=ateapi__pb2.ListWorkerActorAssignmentsResponse.FromString,
                 _registered_method=True)
         self.ListActors = channel.unary_unary(
                 '/ateapi.Control/ListActors',
@@ -387,7 +387,7 @@ class ControlServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def ListWorkerAssignments(self, request, context):
+    def ListWorkerActorAssignments(self, request, context):
         """List the Actors a Worker hosts. A subresource of Worker rather than a field
         on it, so GetWorker and ListWorkers cost the same whatever the occupancy.
         """
@@ -575,10 +575,10 @@ def add_ControlServicer_to_server(servicer, server):
                     request_deserializer=ateapi__pb2.DrainWorkerRequest.FromString,
                     response_serializer=ateapi__pb2.Worker.SerializeToString,
             ),
-            'ListWorkerAssignments': grpc.unary_unary_rpc_method_handler(
-                    servicer.ListWorkerAssignments,
-                    request_deserializer=ateapi__pb2.ListWorkerAssignmentsRequest.FromString,
-                    response_serializer=ateapi__pb2.ListWorkerAssignmentsResponse.SerializeToString,
+            'ListWorkerActorAssignments': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListWorkerActorAssignments,
+                    request_deserializer=ateapi__pb2.ListWorkerActorAssignmentsRequest.FromString,
+                    response_serializer=ateapi__pb2.ListWorkerActorAssignmentsResponse.SerializeToString,
             ),
             'ListActors': grpc.unary_unary_rpc_method_handler(
                     servicer.ListActors,
@@ -1259,7 +1259,7 @@ class Control:
             _registered_method=True)
 
     @staticmethod
-    def ListWorkerAssignments(request,
+    def ListWorkerActorAssignments(request,
             target,
             options=(),
             channel_credentials=None,
@@ -1272,9 +1272,9 @@ class Control:
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/ateapi.Control/ListWorkerAssignments',
-            ateapi__pb2.ListWorkerAssignmentsRequest.SerializeToString,
-            ateapi__pb2.ListWorkerAssignmentsResponse.FromString,
+            '/ateapi.Control/ListWorkerActorAssignments',
+            ateapi__pb2.ListWorkerActorAssignmentsRequest.SerializeToString,
+            ateapi__pb2.ListWorkerActorAssignmentsResponse.FromString,
             options,
             channel_credentials,
             insecure,

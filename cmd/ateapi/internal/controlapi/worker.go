@@ -30,11 +30,11 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
-// ListWorkerAssignments lists the Actors a Worker hosts. The assignments are a
+// ListWorkerActorAssignments lists the Actors a Worker hosts. The assignments are a
 // subresource rather than a field on Worker, so this is the only way to read
 // them and neither GetWorker nor ListWorkers grows with occupancy.
-func (s *RPCService) ListWorkerAssignments(ctx context.Context, req *ateapipb.ListWorkerAssignmentsRequest) (*ateapipb.ListWorkerAssignmentsResponse, error) {
-	if errs := validateListWorkerAssignmentsRequest(ctx, req); len(errs) > 0 {
+func (s *RPCService) ListWorkerActorAssignments(ctx context.Context, req *ateapipb.ListWorkerActorAssignmentsRequest) (*ateapipb.ListWorkerActorAssignmentsResponse, error) {
+	if errs := validateListWorkerActorAssignmentsRequest(ctx, req); len(errs) > 0 {
 		return nil, toGRPCStatusError(errs)
 	}
 	name := req.GetWorker().GetName()
@@ -54,15 +54,15 @@ func (s *RPCService) ListWorkerAssignments(ctx context.Context, req *ateapipb.Li
 	if err != nil {
 		return nil, mapListError(fmt.Errorf("while listing the assignments of worker %s: %w", name, err))
 	}
-	return &ateapipb.ListWorkerAssignmentsResponse{
-		WorkerAssignments: page.Items,
-		NextPageToken:     page.NextPageToken,
+	return &ateapipb.ListWorkerActorAssignmentsResponse{
+		ActorAssignments: page.Items,
+		NextPageToken:    page.NextPageToken,
 	}, nil
 }
 
-func validateListWorkerAssignmentsRequest(ctx context.Context, req *ateapipb.ListWorkerAssignmentsRequest) field.ErrorList {
+func validateListWorkerActorAssignmentsRequest(ctx context.Context, req *ateapipb.ListWorkerActorAssignmentsRequest) field.ErrorList {
 	op := operation.Operation{Type: operation.Create}
-	return Validate_ListWorkerAssignmentsRequest(ctx, op, nil, req, nil)
+	return Validate_ListWorkerActorAssignmentsRequest(ctx, op, nil, req, nil)
 }
 
 func (s *RPCService) ListWorkers(ctx context.Context, req *ateapipb.ListWorkersRequest) (*ateapipb.ListWorkersResponse, error) {

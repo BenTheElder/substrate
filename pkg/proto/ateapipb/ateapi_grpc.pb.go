@@ -33,39 +33,39 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Control_GetActor_FullMethodName                = "/ateapi.Control/GetActor"
-	Control_CreateActor_FullMethodName             = "/ateapi.Control/CreateActor"
-	Control_UpdateActor_FullMethodName             = "/ateapi.Control/UpdateActor"
-	Control_SuspendActor_FullMethodName            = "/ateapi.Control/SuspendActor"
-	Control_PauseActor_FullMethodName              = "/ateapi.Control/PauseActor"
-	Control_ResumeActor_FullMethodName             = "/ateapi.Control/ResumeActor"
-	Control_DeleteActor_FullMethodName             = "/ateapi.Control/DeleteActor"
-	Control_GetActorEgressPolicy_FullMethodName    = "/ateapi.Control/GetActorEgressPolicy"
-	Control_CreateActorEgressPolicy_FullMethodName = "/ateapi.Control/CreateActorEgressPolicy"
-	Control_UpdateActorEgressPolicy_FullMethodName = "/ateapi.Control/UpdateActorEgressPolicy"
-	Control_DeleteActorEgressPolicy_FullMethodName = "/ateapi.Control/DeleteActorEgressPolicy"
-	Control_GetActorSnapshot_FullMethodName        = "/ateapi.Control/GetActorSnapshot"
-	Control_GetActorSnapshotTag_FullMethodName     = "/ateapi.Control/GetActorSnapshotTag"
-	Control_ListActorSnapshots_FullMethodName      = "/ateapi.Control/ListActorSnapshots"
-	Control_CreateActorSnapshotTag_FullMethodName  = "/ateapi.Control/CreateActorSnapshotTag"
-	Control_UpdateActorSnapshotTag_FullMethodName  = "/ateapi.Control/UpdateActorSnapshotTag"
-	Control_DeleteActorSnapshotTag_FullMethodName  = "/ateapi.Control/DeleteActorSnapshotTag"
-	Control_ListWorkers_FullMethodName             = "/ateapi.Control/ListWorkers"
-	Control_GetWorker_FullMethodName               = "/ateapi.Control/GetWorker"
-	Control_CreateWorker_FullMethodName            = "/ateapi.Control/CreateWorker"
-	Control_UpdateWorker_FullMethodName            = "/ateapi.Control/UpdateWorker"
-	Control_DeleteWorker_FullMethodName            = "/ateapi.Control/DeleteWorker"
-	Control_DrainWorker_FullMethodName             = "/ateapi.Control/DrainWorker"
-	Control_ListWorkerAssignments_FullMethodName   = "/ateapi.Control/ListWorkerAssignments"
-	Control_ListActors_FullMethodName              = "/ateapi.Control/ListActors"
-	Control_CreateAtespace_FullMethodName          = "/ateapi.Control/CreateAtespace"
-	Control_GetAtespace_FullMethodName             = "/ateapi.Control/GetAtespace"
-	Control_ListAtespaces_FullMethodName           = "/ateapi.Control/ListAtespaces"
-	Control_DeleteAtespace_FullMethodName          = "/ateapi.Control/DeleteAtespace"
-	Control_CreateActorTemplate_FullMethodName     = "/ateapi.Control/CreateActorTemplate"
-	Control_GetActorTemplate_FullMethodName        = "/ateapi.Control/GetActorTemplate"
-	Control_ListActorTemplates_FullMethodName      = "/ateapi.Control/ListActorTemplates"
-	Control_DeleteActorTemplate_FullMethodName     = "/ateapi.Control/DeleteActorTemplate"
+	Control_GetActor_FullMethodName                   = "/ateapi.Control/GetActor"
+	Control_CreateActor_FullMethodName                = "/ateapi.Control/CreateActor"
+	Control_UpdateActor_FullMethodName                = "/ateapi.Control/UpdateActor"
+	Control_SuspendActor_FullMethodName               = "/ateapi.Control/SuspendActor"
+	Control_PauseActor_FullMethodName                 = "/ateapi.Control/PauseActor"
+	Control_ResumeActor_FullMethodName                = "/ateapi.Control/ResumeActor"
+	Control_DeleteActor_FullMethodName                = "/ateapi.Control/DeleteActor"
+	Control_GetActorEgressPolicy_FullMethodName       = "/ateapi.Control/GetActorEgressPolicy"
+	Control_CreateActorEgressPolicy_FullMethodName    = "/ateapi.Control/CreateActorEgressPolicy"
+	Control_UpdateActorEgressPolicy_FullMethodName    = "/ateapi.Control/UpdateActorEgressPolicy"
+	Control_DeleteActorEgressPolicy_FullMethodName    = "/ateapi.Control/DeleteActorEgressPolicy"
+	Control_GetActorSnapshot_FullMethodName           = "/ateapi.Control/GetActorSnapshot"
+	Control_GetActorSnapshotTag_FullMethodName        = "/ateapi.Control/GetActorSnapshotTag"
+	Control_ListActorSnapshots_FullMethodName         = "/ateapi.Control/ListActorSnapshots"
+	Control_CreateActorSnapshotTag_FullMethodName     = "/ateapi.Control/CreateActorSnapshotTag"
+	Control_UpdateActorSnapshotTag_FullMethodName     = "/ateapi.Control/UpdateActorSnapshotTag"
+	Control_DeleteActorSnapshotTag_FullMethodName     = "/ateapi.Control/DeleteActorSnapshotTag"
+	Control_ListWorkers_FullMethodName                = "/ateapi.Control/ListWorkers"
+	Control_GetWorker_FullMethodName                  = "/ateapi.Control/GetWorker"
+	Control_CreateWorker_FullMethodName               = "/ateapi.Control/CreateWorker"
+	Control_UpdateWorker_FullMethodName               = "/ateapi.Control/UpdateWorker"
+	Control_DeleteWorker_FullMethodName               = "/ateapi.Control/DeleteWorker"
+	Control_DrainWorker_FullMethodName                = "/ateapi.Control/DrainWorker"
+	Control_ListWorkerActorAssignments_FullMethodName = "/ateapi.Control/ListWorkerActorAssignments"
+	Control_ListActors_FullMethodName                 = "/ateapi.Control/ListActors"
+	Control_CreateAtespace_FullMethodName             = "/ateapi.Control/CreateAtespace"
+	Control_GetAtespace_FullMethodName                = "/ateapi.Control/GetAtespace"
+	Control_ListAtespaces_FullMethodName              = "/ateapi.Control/ListAtespaces"
+	Control_DeleteAtespace_FullMethodName             = "/ateapi.Control/DeleteAtespace"
+	Control_CreateActorTemplate_FullMethodName        = "/ateapi.Control/CreateActorTemplate"
+	Control_GetActorTemplate_FullMethodName           = "/ateapi.Control/GetActorTemplate"
+	Control_ListActorTemplates_FullMethodName         = "/ateapi.Control/ListActorTemplates"
+	Control_DeleteActorTemplate_FullMethodName        = "/ateapi.Control/DeleteActorTemplate"
 )
 
 // ControlClient is the client API for Control service.
@@ -128,7 +128,7 @@ type ControlClient interface {
 	DrainWorker(ctx context.Context, in *DrainWorkerRequest, opts ...grpc.CallOption) (*Worker, error)
 	// List the Actors a Worker hosts. A subresource of Worker rather than a field
 	// on it, so GetWorker and ListWorkers cost the same whatever the occupancy.
-	ListWorkerAssignments(ctx context.Context, in *ListWorkerAssignmentsRequest, opts ...grpc.CallOption) (*ListWorkerAssignmentsResponse, error)
+	ListWorkerActorAssignments(ctx context.Context, in *ListWorkerActorAssignmentsRequest, opts ...grpc.CallOption) (*ListWorkerActorAssignmentsResponse, error)
 	// List Actors.
 	ListActors(ctx context.Context, in *ListActorsRequest, opts ...grpc.CallOption) (*ListActorsResponse, error)
 	// Create a new Atespace. Substrate-native, stored in database.
@@ -386,10 +386,10 @@ func (c *controlClient) DrainWorker(ctx context.Context, in *DrainWorkerRequest,
 	return out, nil
 }
 
-func (c *controlClient) ListWorkerAssignments(ctx context.Context, in *ListWorkerAssignmentsRequest, opts ...grpc.CallOption) (*ListWorkerAssignmentsResponse, error) {
+func (c *controlClient) ListWorkerActorAssignments(ctx context.Context, in *ListWorkerActorAssignmentsRequest, opts ...grpc.CallOption) (*ListWorkerActorAssignmentsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ListWorkerAssignmentsResponse)
-	err := c.cc.Invoke(ctx, Control_ListWorkerAssignments_FullMethodName, in, out, cOpts...)
+	out := new(ListWorkerActorAssignmentsResponse)
+	err := c.cc.Invoke(ctx, Control_ListWorkerActorAssignments_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -546,7 +546,7 @@ type ControlServer interface {
 	DrainWorker(context.Context, *DrainWorkerRequest) (*Worker, error)
 	// List the Actors a Worker hosts. A subresource of Worker rather than a field
 	// on it, so GetWorker and ListWorkers cost the same whatever the occupancy.
-	ListWorkerAssignments(context.Context, *ListWorkerAssignmentsRequest) (*ListWorkerAssignmentsResponse, error)
+	ListWorkerActorAssignments(context.Context, *ListWorkerActorAssignmentsRequest) (*ListWorkerActorAssignmentsResponse, error)
 	// List Actors.
 	ListActors(context.Context, *ListActorsRequest) (*ListActorsResponse, error)
 	// Create a new Atespace. Substrate-native, stored in database.
@@ -643,8 +643,8 @@ func (UnimplementedControlServer) DeleteWorker(context.Context, *DeleteWorkerReq
 func (UnimplementedControlServer) DrainWorker(context.Context, *DrainWorkerRequest) (*Worker, error) {
 	return nil, status.Error(codes.Unimplemented, "method DrainWorker not implemented")
 }
-func (UnimplementedControlServer) ListWorkerAssignments(context.Context, *ListWorkerAssignmentsRequest) (*ListWorkerAssignmentsResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method ListWorkerAssignments not implemented")
+func (UnimplementedControlServer) ListWorkerActorAssignments(context.Context, *ListWorkerActorAssignmentsRequest) (*ListWorkerActorAssignmentsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListWorkerActorAssignments not implemented")
 }
 func (UnimplementedControlServer) ListActors(context.Context, *ListActorsRequest) (*ListActorsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListActors not implemented")
@@ -1108,20 +1108,20 @@ func _Control_DrainWorker_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Control_ListWorkerAssignments_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ListWorkerAssignmentsRequest)
+func _Control_ListWorkerActorAssignments_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListWorkerActorAssignmentsRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ControlServer).ListWorkerAssignments(ctx, in)
+		return srv.(ControlServer).ListWorkerActorAssignments(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Control_ListWorkerAssignments_FullMethodName,
+		FullMethod: Control_ListWorkerActorAssignments_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ControlServer).ListWorkerAssignments(ctx, req.(*ListWorkerAssignmentsRequest))
+		return srv.(ControlServer).ListWorkerActorAssignments(ctx, req.(*ListWorkerActorAssignmentsRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1388,8 +1388,8 @@ var Control_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Control_DrainWorker_Handler,
 		},
 		{
-			MethodName: "ListWorkerAssignments",
-			Handler:    _Control_ListWorkerAssignments_Handler,
+			MethodName: "ListWorkerActorAssignments",
+			Handler:    _Control_ListWorkerActorAssignments_Handler,
 		},
 		{
 			MethodName: "ListActors",

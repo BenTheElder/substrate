@@ -155,12 +155,12 @@ func TestListWorkerAssignments(t *testing.T) {
 	assignAPIWorker(t, ctx, persistence, apiWorkerName, "actor-uid-1")
 	assignAPIWorker(t, ctx, persistence, apiWorkerName, "actor-uid-2")
 
-	page, err := svc.ListWorkerAssignments(ctx, &ateapipb.ListWorkerAssignmentsRequest{Worker: workerRef(apiWorkerName)})
+	page, err := svc.ListWorkerActorAssignments(ctx, &ateapipb.ListWorkerActorAssignmentsRequest{Worker: workerRef(apiWorkerName)})
 	if err != nil {
-		t.Fatalf("ListWorkerAssignments() failed: %v", err)
+		t.Fatalf("ListWorkerActorAssignments() failed: %v", err)
 	}
 	var uids []string
-	for _, a := range page.GetWorkerAssignments() {
+	for _, a := range page.GetActorAssignments() {
 		uids = append(uids, a.GetActorUid())
 		if got := a.GetMetadata().GetName(); got != a.GetActorUid() {
 			t.Errorf("assignment name = %q, want the Actor uid %q", got, a.GetActorUid())
@@ -184,7 +184,7 @@ func TestListWorkerAssignments_AbsentWorker(t *testing.T) {
 	ctx := context.Background()
 	svc, _ := newWorkerAPIService(t)
 
-	_, err := svc.ListWorkerAssignments(ctx, &ateapipb.ListWorkerAssignmentsRequest{
+	_, err := svc.ListWorkerActorAssignments(ctx, &ateapipb.ListWorkerActorAssignmentsRequest{
 		Worker: workerRef("3b9f1e77-2c4d-4a80-91be-6d5c8f0a7e21"),
 	})
 	if got := status.Code(err); got != codes.NotFound {

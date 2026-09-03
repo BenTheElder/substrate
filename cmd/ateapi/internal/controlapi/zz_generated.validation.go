@@ -4066,13 +4066,13 @@ func Validate_ListAtespacesRequest(
 	return errs
 }
 
-// Validate_ListWorkerAssignmentsRequest validates an instance of ListWorkerAssignmentsRequest according
+// Validate_ListWorkerActorAssignmentsRequest validates an instance of ListWorkerActorAssignmentsRequest according
 // to declarative validation rules in the API schema.
-func Validate_ListWorkerAssignmentsRequest(
+func Validate_ListWorkerActorAssignmentsRequest(
 	ctx context.Context, op operation.Operation, fldPath *field.Path,
-	obj, oldObj *ateapipb.ListWorkerAssignmentsRequest) (errs field.ErrorList) {
+	obj, oldObj *ateapipb.ListWorkerActorAssignmentsRequest) (errs field.ErrorList) {
 
-	{ // field ateapipb.ListWorkerAssignmentsRequest.Worker
+	{ // field ateapipb.ListWorkerActorAssignmentsRequest.Worker
 		fn := func(
 			fldPath *field.Path,
 			obj, oldObj *ateapipb.ObjectRef,
@@ -4116,13 +4116,13 @@ func Validate_ListWorkerAssignmentsRequest(
 			return
 		}
 		oldVal := safe.Field(oldObj,
-			func(oldObj *ateapipb.ListWorkerAssignmentsRequest) *ateapipb.ObjectRef {
+			func(oldObj *ateapipb.ListWorkerActorAssignmentsRequest) *ateapipb.ObjectRef {
 				return oldObj.Worker
 			})
 		errs = append(errs, fn(fldPath.Child("worker"), obj.Worker, oldVal, oldObj != nil)...)
 	}
 
-	{ // field ateapipb.ListWorkerAssignmentsRequest.PageSize
+	{ // field ateapipb.ListWorkerActorAssignmentsRequest.PageSize
 		fn := func(
 			fldPath *field.Path,
 			obj, oldObj *int32,
@@ -4147,13 +4147,13 @@ func Validate_ListWorkerAssignmentsRequest(
 			return
 		}
 		oldVal := safe.Field(oldObj,
-			func(oldObj *ateapipb.ListWorkerAssignmentsRequest) *int32 {
+			func(oldObj *ateapipb.ListWorkerActorAssignmentsRequest) *int32 {
 				return &oldObj.PageSize
 			})
 		errs = append(errs, fn(fldPath.Child("page_size"), &obj.PageSize, oldVal, oldObj != nil)...)
 	}
 
-	{ // field ateapipb.ListWorkerAssignmentsRequest.PageToken
+	{ // field ateapipb.ListWorkerActorAssignmentsRequest.PageToken
 		fn := func(
 			fldPath *field.Path,
 			obj, oldObj *string,
@@ -4178,7 +4178,7 @@ func Validate_ListWorkerAssignmentsRequest(
 			return
 		}
 		oldVal := safe.Field(oldObj,
-			func(oldObj *ateapipb.ListWorkerAssignmentsRequest) *string {
+			func(oldObj *ateapipb.ListWorkerActorAssignmentsRequest) *string {
 				return &oldObj.PageToken
 			})
 		errs = append(errs, fn(fldPath.Child("page_token"), &obj.PageToken, oldVal, oldObj != nil)...)

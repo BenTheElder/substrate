@@ -100,7 +100,7 @@ service Control {
 
   // List the Actors a Worker hosts. A subresource of Worker rather than a field
   // on it, so GetWorker and ListWorkers cost the same whatever the occupancy.
-  rpc ListWorkerAssignments(ListWorkerAssignmentsRequest) returns (ListWorkerAssignmentsResponse) {}
+  rpc ListWorkerActorAssignments(ListWorkerActorAssignmentsRequest) returns (ListWorkerActorAssignmentsResponse) {}
 
   // List Actors.
   rpc ListActors(ListActorsRequest) returns (ListActorsResponse) {}
@@ -1484,8 +1484,8 @@ message DeleteOptions {
   string uid = 2;
 }
 
-// ListWorkerAssignmentsRequest asks for a page of the Actors one Worker hosts.
-message ListWorkerAssignmentsRequest {
+// ListWorkerActorAssignmentsRequest asks for a page of the Actors one Worker hosts.
+message ListWorkerActorAssignmentsRequest {
   // The Worker whose Actors to list. atespace is always empty; Workers are
   // global-scoped.
   //
@@ -1500,7 +1500,7 @@ message ListWorkerAssignmentsRequest {
   // +k8s:minimum=1
   int32 page_size = 2;
 
-  // Pagination token from a previous ListWorkerAssignments response.
+  // Pagination token from a previous ListWorkerActorAssignments response.
   // Omit or leave empty for the first request.
   //
   // +k8s:optional
@@ -1508,10 +1508,10 @@ message ListWorkerAssignmentsRequest {
   string page_token = 3;
 }
 
-// ListWorkerAssignmentsResponse is one page of a Worker's Actors.
-message ListWorkerAssignmentsResponse {
+// ListWorkerActorAssignmentsResponse is one page of a Worker's Actors.
+message ListWorkerActorAssignmentsResponse {
   // The Actors this page of the listing covers.
-  repeated ActorAssignment worker_assignments = 1;
+  repeated ActorAssignment actor_assignments = 1;
 
   // Pagination token for the next page. Empty if this is the last page.
   string next_page_token = 2;
