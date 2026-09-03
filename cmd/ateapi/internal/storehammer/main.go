@@ -210,11 +210,7 @@ func claim(ctx context.Context, st store.Interface, workerName, actorUID string,
 		return nil
 	}
 	for range attempts {
-		fresh, err := st.GetWorker(ctx, workerName)
-		if err != nil {
-			return err
-		}
-		if _, err := st.ReleaseActorFromWorker(ctx, workerName, fresh.GetMetadata().GetVersion(), actorUID); err != nil {
+		if _, err := st.ReleaseActorFromWorker(ctx, workerName, actorUID); err != nil {
 			if isConflict(err) {
 				conflicts.Add(1)
 				continue
