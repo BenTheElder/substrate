@@ -27,8 +27,8 @@ import (
 // same type serves all three so they subtract, which is the point of naming
 // Worker capacity the way an ActorTemplate names its limits.
 //
-// An absent name is unconstrained, not zero. Nothing may read a missing
-// dimension as "none available".
+// An absent name is none of that resource. A Worker reports every dimension it
+// has, so a name missing from its capacity is one it cannot supply at all.
 type Quantities map[string]resource.Quantity
 
 // ParseQuantities reads the wire form. It errors on a quantity it cannot parse
@@ -133,14 +133,14 @@ func (q Quantities) Sub(other Quantities) {
 }
 
 // Covers reports whether q leaves room for want in every dimension want names.
-// A dimension q does not name is unconstrained and so always covers; a
-// dimension want does not name asks for nothing.
+//
+// A dimension q does not name is none of it, not any amount of it: a Worker
+// reports everything it has, so silence about GPUs means it has no GPUs and
+// cannot take an Actor asking for one. A dimension want does not name asks for
+// nothing.
 func (q Quantities) Covers(want Quantities) bool {
 	for name, need := range want {
-		have, ok := q[name]
-		if !ok {
-			continue
-		}
+		have := q[name] // absent reads as the zero quantity
 		if have.Cmp(need) < 0 {
 			return false
 		}

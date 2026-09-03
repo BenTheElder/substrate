@@ -147,11 +147,22 @@ func TestSchedule(t *testing.T) {
 			constraints: Constraints{SandboxClass: "gvisor", Limits: resources.CPUMemory(2000, 0)},
 		},
 		{
-			name: "zero worker capacity is treated as unconstrained",
+			// A Worker reports everything it has, so one that has reported no
+			// compute has none: an Actor that asks for some is not placed here.
+			name: "a worker that reported no compute takes no actor that needs some",
 			fleet: fleet{
 				worker("w-unknown", "gvisor", "node-a", tierTwo),
 			},
 			constraints: Constraints{SandboxClass: "gvisor", Limits: resources.CPUMemory(2000, 2<<30)},
+		},
+		{
+			// An Actor that declares nothing still fits: it asks for no
+			// dimension, so there is none the Worker must supply.
+			name: "a worker that reported no compute still takes an actor that needs none",
+			fleet: fleet{
+				worker("w-unknown", "gvisor", "node-a", tierTwo),
+			},
+			constraints: Constraints{SandboxClass: "gvisor"},
 			wantPod:     "w-unknown",
 		},
 		{

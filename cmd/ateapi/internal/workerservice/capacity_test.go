@@ -82,11 +82,11 @@ func TestSetWorkerCapacity(t *testing.T) {
 	if want := int32(4094); got.GetWorker().GetStatus().GetCapacity().GetActors() != want {
 		t.Errorf("capacity.actors = %d, want %d", got.GetWorker().GetStatus().GetCapacity().GetActors(), want)
 	}
-	// A report may speak to some dimensions and not others; the ones it omits
-	// must survive rather than being cleared.
-	want := resources.CPUMemory(2000, 0)
-	if diff := cmp.Diff(want, got.GetWorker().GetStatus().GetCapacity().GetResources(), protocmp.Transform()); diff != "" {
-		t.Errorf("capacity resources mismatch (-want +got):\n%s", diff)
+	// A report replaces what is recorded. The Worker reports everything it has,
+	// so a dimension this one leaves out is one it no longer supplies -- keeping
+	// the old value would advertise compute nothing claims to have.
+	if got := got.GetWorker().GetStatus().GetCapacity().GetResources(); got != nil {
+		t.Errorf("capacity resources = %v, want the report's own (none)", got)
 	}
 }
 

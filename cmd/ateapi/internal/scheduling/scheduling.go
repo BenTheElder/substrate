@@ -174,7 +174,7 @@ func (s *scheduler) HasRoom(worker *ateapipb.Worker, constraints Constraints) bo
 		return false
 	}
 	if free == nil {
-		return true
+		free = resources.Quantities{}
 	}
 	allocated, err := resources.ParseQuantities(used.GetResources())
 	if err != nil {

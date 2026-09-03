@@ -6202,7 +6202,12 @@ type WorkerStatus struct {
 	// What this Worker can supply to the Actors it hosts, as the Worker reports
 	// it through WorkerService.SetWorkerCapacity. Observed, not requested: no
 	// client sets this, which is why it sits beside allocated rather than in the
-	// spec. Shrinking below allocated stops new placements and evicts nothing.
+	// spec.
+	//
+	// Complete, not partial: a Worker reports every dimension it has, so a name
+	// missing here is one it cannot supply at all and no Actor asking for that
+	// name is placed on it. Shrinking below allocated stops new placements and
+	// evicts nothing.
 	//
 	// +k8s:optional
 	Capacity *WorkerCapacity `protobuf:"bytes,4,opt,name=capacity,proto3" json:"capacity,omitempty"`
@@ -6275,9 +6280,9 @@ func (x *WorkerStatus) GetAllocated() *WorkerCapacity {
 type WorkerCapacity struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// What a Worker supplies, named as an ActorTemplate names what it asks for,
-	// so the two are one vocabulary and subtract directly. A name the Worker does
-	// not report is unconstrained rather than absent, so a Worker that has said
-	// nothing is not unschedulable.
+	// so the two are one vocabulary and subtract directly. A name that is absent
+	// is none of that resource: an Actor asking for a GPU is not placed on a
+	// Worker that never reported one.
 	//
 	// Sorted by name, so equal capacities compare equal.
 	//
@@ -6451,9 +6456,9 @@ type SetWorkerCapacityRequest struct {
 	// +k8s:required
 	// +k8s:beta(since: "0.0")=+k8s:subfield(atespace)=+k8s:forbidden # TODO: get rid of beta prefix
 	Worker *ObjectRef `protobuf:"bytes,1,opt,name=worker,proto3" json:"worker,omitempty"`
-	// What the Worker can hold. An unset dimension keeps what is recorded rather
-	// than clearing it, so a reporter that knows only its actor ceiling does not
-	// erase what it does not speak to.
+	// Everything the Worker can hold. This replaces what is recorded rather than
+	// merging into it: a dimension left out is one the Worker no longer supplies,
+	// and an Actor asking for that dimension will not be placed here.
 	//
 	// +k8s:required
 	Capacity      *WorkerCapacity `protobuf:"bytes,2,opt,name=capacity,proto3" json:"capacity,omitempty"`

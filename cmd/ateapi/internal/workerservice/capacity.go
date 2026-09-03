@@ -87,23 +87,17 @@ func (s *Server) SetWorkerCapacity(ctx context.Context, req *ateapipb.SetWorkerC
 		return nil, status.Errorf(codes.NotFound, "Worker %s not found", name)
 	}
 
-	merged, err := mergeReportedCapacity(worker.GetStatus().GetCapacity(), reported)
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "invalid capacity: %v", err)
-	}
-	if proto.Equal(worker.GetStatus().GetCapacity(), merged) {
+	if proto.Equal(worker.GetStatus().GetCapacity(), reported) {
 		return &ateapipb.SetWorkerCapacityResponse{Worker: worker}, nil
 	}
 
 	updated, err := s.store.UpdateWorker(ctx, name, store.PreconditionFrom(worker), func(toUpdate *ateapipb.Worker) error {
-		merged, err := mergeReportedCapacity(toUpdate.GetStatus().GetCapacity(), reported)
-		if err != nil {
-			return err
-		}
 		if toUpdate.Status == nil {
 			toUpdate.Status = &ateapipb.WorkerStatus{}
 		}
-		toUpdate.Status.Capacity = merged
+		// Replaces rather than merges: a Worker reports everything it has, so a
+		// dimension this report leaves out is one it no longer supplies.
+		toUpdate.Status.Capacity = reported
 		return nil
 	})
 	switch {
@@ -142,28 +136,4 @@ func validateReportedCapacity(reported *ateapipb.WorkerCapacity) error {
 		}
 	}
 	return nil
-}
-
-// mergeReportedCapacity preserves dimensions omitted by the reporter. A
-// dimension the report names is replaced outright rather than added to: the
-// report says what the Worker has, not what changed.
-func mergeReportedCapacity(current, reported *ateapipb.WorkerCapacity) (*ateapipb.WorkerCapacity, error) {
-	merged, err := resources.ParseQuantities(current.GetResources())
-	if err != nil {
-		return nil, fmt.Errorf("recorded capacity: %w", err)
-	}
-	named, err := resources.ParseQuantities(reported.GetResources())
-	if err != nil {
-		return nil, fmt.Errorf("reported capacity: %w", err)
-	}
-	if merged == nil {
-		merged = resources.Quantities{}
-	}
-	maps.Copy(merged, named)
-
-	actors := current.GetActors()
-	if reported.GetActors() != 0 {
-		actors = reported.GetActors()
-	}
-	return &ateapipb.WorkerCapacity{Actors: actors, Resources: merged.Proto()}, nil
 }

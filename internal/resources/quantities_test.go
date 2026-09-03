@@ -126,11 +126,19 @@ func TestQuantitiesCovers(t *testing.T) {
 			ok:   false,
 		},
 		{
-			// A Worker that has not reported a dimension is unconstrained in
-			// it, not empty of it: silence must not make it unschedulable.
-			name: "a dimension the worker never reported is unconstrained",
+			// A Worker reports everything it has, so a dimension it never
+			// reported is one it has none of. Asking for a GPU must not land on
+			// a Worker that never said it had one.
+			name: "a dimension the worker never reported is none of it",
 			have: Quantities{"cpu": resource.MustParse("4")},
 			want: Quantities{"cpu": resource.MustParse("2"), "nvidia.com/gpu": resource.MustParse("1")},
+			ok:   false,
+		},
+		{
+			// Asking for zero of something absent is still satisfiable.
+			name: "asking for none of an absent dimension fits",
+			have: Quantities{"cpu": resource.MustParse("4")},
+			want: Quantities{"nvidia.com/gpu": resource.MustParse("0")},
 			ok:   true,
 		},
 		{
