@@ -41,7 +41,6 @@ import (
 	"github.com/agent-substrate/substrate/internal/ateattr"
 	"github.com/agent-substrate/substrate/internal/ateinterceptors"
 	"github.com/agent-substrate/substrate/internal/ateomcapacity"
-	"github.com/agent-substrate/substrate/internal/ateomnet"
 	"github.com/agent-substrate/substrate/internal/ateompath"
 	"github.com/agent-substrate/substrate/internal/ateomstats"
 	"github.com/agent-substrate/substrate/internal/atunnel"
@@ -255,6 +254,7 @@ func do(ctx context.Context) error {
 	// that reaches here is a misconfiguration no restart-in-place will fix.
 	go func() {
 		err := ateomcapacity.Report(ctx, ateomcapacity.ReportConfig{
+			Actors:               int32(podSidePlan.Slots()),
 			SocketPath:           ateompath.CredentialBrokerSocket,
 			CredentialBundlePath: *workerCredentialBundle,
 			TrustBundlePath:      *podIdentityTrustBundle,

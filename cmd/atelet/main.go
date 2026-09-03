@@ -327,12 +327,6 @@ func main() {
 	}
 	defer ateapiConn.Close()
 
-	// The node's workers report what they can hold. Started here rather than
-	// with the other background loops because it needs the ateapi connection
-	// opened above, and it authenticates as this atelet exactly as MintCert
-	// does.
-	startCapacityReporter(ctx, ateapiConn)
-
 	lis, err := net.Listen("tcp", ":"+strconv.Itoa(*port))
 	if err != nil {
 		serverboot.Fatal(ctx, "Failed to listen", err)
