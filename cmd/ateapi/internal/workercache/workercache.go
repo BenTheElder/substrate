@@ -120,6 +120,20 @@ func (c *Cache) Forget(name string) {
 	delete(c.workers, name)
 }
 
+// Observe applies a store result before its watch event arrives.
+//
+// Placement reads this cache, and a release only reaches it when the store's
+// watch catches up. At one Actor per worker that window is rare; at a worker
+// holding thousands, every release is immediately followed by a placement
+// decision that would otherwise count the departed Actor against it.
+// Version guarded, and nil-receiver safe.
+func (c *Cache) Observe(worker *ateapipb.Worker) {
+	if c == nil || worker.GetMetadata().GetName() == "" {
+		return
+	}
+	c.applyEvent(store.WorkerEvent{Type: store.WorkerEventUpdated, Worker: worker})
+}
+
 func (c *Cache) sync(ctx context.Context) (*store.WorkerWatch, error) {
 	watch, err := c.store.WatchWorkers(ctx)
 	if err != nil {
