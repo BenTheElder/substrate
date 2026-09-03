@@ -245,13 +245,14 @@ func (w *ActorWorkflow) releaseAssignmentWithoutBacklink(ctx context.Context, ac
 
 	slog.InfoContext(ctx, "Releasing an assignment the Actor does not reference",
 		slog.String("worker", workerName), slog.String("actor_uid", actorUID))
-	_, err = w.store.ReleaseActorFromWorker(ctx, workerName, actorUID)
+	released, err := w.store.ReleaseActorFromWorker(ctx, workerName, actorUID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return nil
 		}
 		return fmt.Errorf("while releasing worker %s: %w", workerName, err)
 	}
+	w.workerCache.Observe(released)
 	return nil
 }
 
@@ -275,10 +276,11 @@ func (w *ActorWorkflow) ensureWorkerReleased(ctx context.Context, actorRef resou
 	}
 
 	if latestActor.GetStatus().GetWorkerAssignment() != nil {
-		_, _, err := releaseWorker(ctx, w.store, latestActor)
+		_, released, err := releaseWorker(ctx, w.store, latestActor)
 		if err != nil {
 			return nil, err
 		}
+		w.workerCache.Observe(released)
 
 		latestActor, err = w.store.GetActor(ctx, actorRef)
 		if err != nil {
