@@ -113,8 +113,13 @@ func seed(ctx context.Context, st store.Interface, run string) ([]string, error)
 				NodeName:        fmt.Sprintf("node-%d", i),
 				Ip:              "10.0.0.1",
 				SandboxClass:    "gvisor",
-				Capacity:        &ateapipb.WorkerCapacity{Actors: 4094, Resources: resources.CPUMemory(64000, 256<<30)},
-				Status:          &ateapipb.WorkerStatus{State: ateapipb.WorkerState_WORKER_STATE_ACTIVE},
+				Status: &ateapipb.WorkerStatus{
+					State: ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+					// The capacity a reporting ateom would have landed.
+					Allocation: &ateapipb.WorkerAllocation{
+						Capacity: &ateapipb.WorkerResources{Actors: 4094, Resources: resources.CPUMemory(64000, 256<<30)},
+					},
+				},
 			}); err != nil {
 				errs[i] = fmt.Errorf("creating worker %d: %w", i, err)
 				return

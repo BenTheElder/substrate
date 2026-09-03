@@ -106,27 +106,6 @@ service Ateom {
   // TerminateWorkload stops and deletes container workloads and cleans up
   // network and bundle overlays on ateom.
   rpc TerminateWorkload(TerminateWorkloadRequest) returns (TerminateWorkloadResponse) {}
-
-  // GetCapacity reports how many Actors this ateom can host.
-  //
-  // The number is the implementation's, not the control plane's: this process
-  // owns the slot allocator the ceiling comes from, and an ateom that hosts one
-  // Actor answers one however the pool that started it is configured. That is
-  // what lets the API ship before the implementation and lets a fleet run mixed
-  // ateom versions, each admitting what it can actually take.
-  //
-  // A pure read, safe on a timer, and it does not touch the lifecycle mutex.
-  rpc GetCapacity(GetCapacityRequest) returns (GetCapacityResponse) {}
-}
-
-message GetCapacityRequest {
-}
-
-message GetCapacityResponse {
-  // How many Actors this ateom can host at once, counting the ones it already
-  // has. Zero is not "none": it means this ateom does not report a ceiling, and
-  // the caller should leave whatever it already believes alone.
-  int32 actor_slots = 1;
 }
 
 message TerminateWorkloadRequest {

@@ -42,9 +42,6 @@ const (
 	MemoryLimitFile   = "memory_bytes"
 )
 
-// actorsPerAteom is how many actors an ateom hosts at once. One, today.
-const actorsPerAteom = 1
-
 const (
 	reportTimeout        = 10 * time.Second
 	initialReportBackoff = 500 * time.Millisecond
@@ -61,14 +58,14 @@ const (
 // TODO: Watch the projected files and report changes. For now we do not support
 // in-place Pod vertical scaling (IPPR); capacity is read once at startup.
 // NOTE: Please do not implement this yet. IPPR needs more general consideration.
-func FromFiles() *ateletpb.SetWorkerCapacityRequest {
-	return fromDir(CapacityMountPath)
+func FromFiles(actors int32) *ateletpb.SetWorkerCapacityRequest {
+	return fromDir(CapacityMountPath, actors)
 }
 
-func fromDir(dir string) *ateletpb.SetWorkerCapacityRequest {
+func fromDir(dir string, actors int32) *ateletpb.SetWorkerCapacityRequest {
 	return &ateletpb.SetWorkerCapacityRequest{
 		Capacity: &ateapipb.WorkerResources{
-			Actors: actorsPerAteom,
+			Actors: actors,
 			// A limit read as zero is left out, which the control plane reads
 			// as none of that dimension.
 			Resources: resources.CPUMemory(
@@ -96,6 +93,11 @@ func readLimit(path string) int64 {
 
 // ReportConfig is what an ateom needs to reach the atelet on its node.
 type ReportConfig struct {
+	// Actors is how many Actors this ateom will host at once. It comes from the
+	// pod-side address plan, so the ceiling the control plane places against is
+	// the one hostActor will actually admit.
+	Actors int32
+
 	SocketPath           string
 	CredentialBundlePath string
 	TrustBundlePath      string
@@ -113,7 +115,7 @@ func Report(ctx context.Context, cfg ReportConfig) error {
 	if err != nil {
 		return fmt.Errorf("capacity report: %w", err)
 	}
-	capacity := FromFiles()
+	capacity := FromFiles(cfg.Actors)
 	err = retryReport(ctx, func() error {
 		return reportOnce(ctx, cfg.SocketPath, tlsConfig, capacity)
 	}, initialReportBackoff)

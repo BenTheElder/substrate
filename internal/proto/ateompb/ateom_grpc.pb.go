@@ -39,7 +39,6 @@ const (
 	Ateom_GetWorkloadStats_FullMethodName       = "/ateom.Ateom/GetWorkloadStats"
 	Ateom_GetActiveWorkloadStats_FullMethodName = "/ateom.Ateom/GetActiveWorkloadStats"
 	Ateom_TerminateWorkload_FullMethodName      = "/ateom.Ateom/TerminateWorkload"
-	Ateom_GetCapacity_FullMethodName            = "/ateom.Ateom/GetCapacity"
 )
 
 // AteomClient is the client API for Ateom service.
@@ -129,16 +128,6 @@ type AteomClient interface {
 	// TerminateWorkload stops and deletes container workloads and cleans up
 	// network and bundle overlays on ateom.
 	TerminateWorkload(ctx context.Context, in *TerminateWorkloadRequest, opts ...grpc.CallOption) (*TerminateWorkloadResponse, error)
-	// GetCapacity reports how many Actors this ateom can host.
-	//
-	// The number is the implementation's, not the control plane's: this process
-	// owns the slot allocator the ceiling comes from, and an ateom that hosts one
-	// Actor answers one however the pool that started it is configured. That is
-	// what lets the API ship before the implementation and lets a fleet run mixed
-	// ateom versions, each admitting what it can actually take.
-	//
-	// A pure read, safe on a timer, and it does not touch the lifecycle mutex.
-	GetCapacity(ctx context.Context, in *GetCapacityRequest, opts ...grpc.CallOption) (*GetCapacityResponse, error)
 }
 
 type ateomClient struct {
@@ -203,16 +192,6 @@ func (c *ateomClient) TerminateWorkload(ctx context.Context, in *TerminateWorklo
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(TerminateWorkloadResponse)
 	err := c.cc.Invoke(ctx, Ateom_TerminateWorkload_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *ateomClient) GetCapacity(ctx context.Context, in *GetCapacityRequest, opts ...grpc.CallOption) (*GetCapacityResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(GetCapacityResponse)
-	err := c.cc.Invoke(ctx, Ateom_GetCapacity_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -306,16 +285,6 @@ type AteomServer interface {
 	// TerminateWorkload stops and deletes container workloads and cleans up
 	// network and bundle overlays on ateom.
 	TerminateWorkload(context.Context, *TerminateWorkloadRequest) (*TerminateWorkloadResponse, error)
-	// GetCapacity reports how many Actors this ateom can host.
-	//
-	// The number is the implementation's, not the control plane's: this process
-	// owns the slot allocator the ceiling comes from, and an ateom that hosts one
-	// Actor answers one however the pool that started it is configured. That is
-	// what lets the API ship before the implementation and lets a fleet run mixed
-	// ateom versions, each admitting what it can actually take.
-	//
-	// A pure read, safe on a timer, and it does not touch the lifecycle mutex.
-	GetCapacity(context.Context, *GetCapacityRequest) (*GetCapacityResponse, error)
 	mustEmbedUnimplementedAteomServer()
 }
 
@@ -343,9 +312,6 @@ func (UnimplementedAteomServer) GetActiveWorkloadStats(context.Context, *GetActi
 }
 func (UnimplementedAteomServer) TerminateWorkload(context.Context, *TerminateWorkloadRequest) (*TerminateWorkloadResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method TerminateWorkload not implemented")
-}
-func (UnimplementedAteomServer) GetCapacity(context.Context, *GetCapacityRequest) (*GetCapacityResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method GetCapacity not implemented")
 }
 func (UnimplementedAteomServer) mustEmbedUnimplementedAteomServer() {}
 func (UnimplementedAteomServer) testEmbeddedByValue()               {}
@@ -476,24 +442,6 @@ func _Ateom_TerminateWorkload_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Ateom_GetCapacity_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(GetCapacityRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(AteomServer).GetCapacity(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Ateom_GetCapacity_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(AteomServer).GetCapacity(ctx, req.(*GetCapacityRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
 // Ateom_ServiceDesc is the grpc.ServiceDesc for Ateom service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -524,10 +472,6 @@ var Ateom_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "TerminateWorkload",
 			Handler:    _Ateom_TerminateWorkload_Handler,
-		},
-		{
-			MethodName: "GetCapacity",
-			Handler:    _Ateom_GetCapacity_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
