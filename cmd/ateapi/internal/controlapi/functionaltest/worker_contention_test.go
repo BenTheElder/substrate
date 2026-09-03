@@ -135,38 +135,47 @@ func TestResumeActor_ConcurrentOntoOneWorker(t *testing.T) {
 // the scheduler's cache to see it, since placement reads that and not the store.
 func setWorkerActorCapacity(t *testing.T, tc *testContext, pool string, actors int32) {
 	t.Helper()
-	ctx := context.Background()
-	page, err := tc.persistence.ListWorkers(ctx, store.ListOptions{PageSize: 1000})
+	page, err := tc.persistence.ListWorkers(context.Background(), store.ListOptions{PageSize: 1000})
 	if err != nil {
 		t.Fatalf("listing workers: %v", err)
 	}
-	var names []string
+	var reported int
 	for _, w := range page.Items {
 		if w.GetWorkerPool() != pool {
 			continue
 		}
-		name := w.GetMetadata().GetName()
-		if _, err := tc.persistence.UpdateWorker(ctx, name, store.PreconditionFrom(w), func(toUpdate *ateapipb.Worker) error {
-			if toUpdate.Status.Capacity == nil {
-				toUpdate.Status.Capacity = &ateapipb.WorkerCapacity{}
-			}
-			toUpdate.Status.Capacity.Actors = actors
-			return nil
-		}); err != nil {
-			t.Fatalf("setting capacity on worker %s: %v", name, err)
-		}
-		names = append(names, name)
+		reportWorkerCapacity(t, tc, w.GetMetadata().GetName(), actors)
+		reported++
 	}
-	if len(names) == 0 {
+	if reported == 0 {
 		t.Fatalf("no workers in pool %q to give capacity", pool)
 	}
-	for _, name := range names {
-		if err := wait.PollUntilContextTimeout(ctx, 50*time.Millisecond, 5*time.Second, true,
-			func(context.Context) (bool, error) {
-				got, err := tc.workerCache.Worker(name)
-				return err == nil && got.GetStatus().GetCapacity().GetActors() == actors, nil
-			}); err != nil {
-			t.Fatalf("worker %s did not reach capacity.actors=%d in the cache: %v", name, actors, err)
+}
+
+// reportWorkerCapacity stands in for the ateom's capacity report, which atelet
+// forwards to WorkerService in a real cluster. It waits for the worker cache,
+// which placement reads, to catch up.
+func reportWorkerCapacity(t *testing.T, tc *testContext, name string, actors int32) {
+	t.Helper()
+	ctx := context.Background()
+	worker, err := tc.persistence.GetWorker(ctx, name)
+	if err != nil {
+		t.Fatalf("getting worker %s: %v", name, err)
+	}
+	if _, err := tc.persistence.UpdateWorker(ctx, name, store.PreconditionFrom(worker), func(toUpdate *ateapipb.Worker) error {
+		if toUpdate.Status.Capacity == nil {
+			toUpdate.Status.Capacity = &ateapipb.WorkerCapacity{}
 		}
+		toUpdate.Status.Capacity.Actors = actors
+		return nil
+	}); err != nil {
+		t.Fatalf("setting capacity on worker %s: %v", name, err)
+	}
+	if err := wait.PollUntilContextTimeout(ctx, 10*time.Millisecond, 5*time.Second, true,
+		func(context.Context) (bool, error) {
+			got, err := tc.workerCache.Worker(name)
+			return err == nil && got.GetStatus().GetCapacity().GetActors() == actors, nil
+		}); err != nil {
+		t.Fatalf("worker %s did not reach capacity.actors=%d in the cache: %v", name, actors, err)
 	}
 }

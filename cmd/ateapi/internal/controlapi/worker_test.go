@@ -285,10 +285,7 @@ func TestCreateWorker_IgnoresRequestStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateWorker() failed: %v", err)
 	}
-	want := &ateapipb.WorkerStatus{
-		State:    ateapipb.WorkerState_WORKER_STATE_ACTIVE,
-		Capacity: &ateapipb.WorkerCapacity{Actors: 1},
-	}
+	want := &ateapipb.WorkerStatus{State: ateapipb.WorkerState_WORKER_STATE_ACTIVE}
 	if diff := cmp.Diff(want, got.GetStatus(), protocmp.Transform()); diff != "" {
 		t.Errorf("created worker status mismatch (-want +got):\n%s", diff)
 	}
@@ -1053,7 +1050,7 @@ func TestCreateWorker_IgnoresRequestMetadataServerFields(t *testing.T) {
 // Every stored Worker carries an actor ceiling, so no reader has to know a
 // default. A Worker that reports its own keeps it; one that does not is worth
 // one Actor, which is what a Worker was before it could report.
-func TestCreateWorker_ReifiesActorCeiling(t *testing.T) {
+func TestCreateWorker_HoldsNoCapacityUntilReported(t *testing.T) {
 	ctx := context.Background()
 	svc, _ := newWorkerAPIService(t)
 
@@ -1061,19 +1058,19 @@ func TestCreateWorker_ReifiesActorCeiling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateWorker() failed: %v", err)
 	}
-	if got := got.GetStatus().GetCapacity().GetActors(); got != 1 {
-		t.Errorf("created worker actor ceiling = %d, want 1", got)
+	if capacity := got.GetStatus().GetCapacity(); capacity != nil {
+		t.Errorf("created worker capacity = %v, want none until its ateom reports", capacity)
 	}
 
 	// Capacity is status, so a request cannot bring its own: a Worker only
-	// gets a real ceiling by reporting one.
+	// gets one by reporting it.
 	carried := validWorker("11111111-2222-3333-4444-555555555555")
 	carried.Status = &ateapipb.WorkerStatus{Capacity: &ateapipb.WorkerCapacity{Actors: 4094}}
 	got, err = svc.CreateWorker(ctx, &ateapipb.CreateWorkerRequest{Worker: carried})
 	if err != nil {
 		t.Fatalf("CreateWorker() carrying a capacity failed: %v", err)
 	}
-	if got := got.GetStatus().GetCapacity().GetActors(); got != 1 {
-		t.Errorf("a request carrying a ceiling set it to %d, want the reified 1", got)
+	if capacity := got.GetStatus().GetCapacity(); capacity != nil {
+		t.Errorf("a request carrying a ceiling set capacity to %v, want none", capacity)
 	}
 }

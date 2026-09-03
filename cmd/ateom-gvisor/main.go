@@ -37,6 +37,7 @@ import (
 	"github.com/agent-substrate/substrate/cmd/ateom-gvisor/internal/cgroupstats"
 	"github.com/agent-substrate/substrate/internal/actorlog"
 	"github.com/agent-substrate/substrate/internal/ateinterceptors"
+	"github.com/agent-substrate/substrate/internal/ateomcapacity"
 	"github.com/agent-substrate/substrate/internal/ateomnet"
 	"github.com/agent-substrate/substrate/internal/ateompath"
 	"github.com/agent-substrate/substrate/internal/ateomstats"
@@ -234,6 +235,18 @@ func do(ctx context.Context) error {
 		ateomService.gracefulShutdown(context.Background())
 		// Stop the server gracefully. This blocks until all in-flight RPCs have completed.
 		svr.GracefulStop()
+	}()
+
+	// Report what this worker can supply. Nothing else tells the control
+	// plane, which places no actor here until it lands.
+	go func() {
+		if err := ateomcapacity.Report(ctx, ateomcapacity.ReportConfig{
+			SocketPath:           ateompath.CredentialBrokerSocket,
+			CredentialBundlePath: *workerCredentialBundle,
+			TrustBundlePath:      *podIdentityTrustBundle,
+		}); err != nil {
+			slog.ErrorContext(ctx, "Failed to report worker capacity", slog.Any("err", err))
+		}
 	}()
 
 	go serverboot.StartReadinessServer(ctx, *readinessListenAddress, readiness)

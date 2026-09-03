@@ -54,8 +54,9 @@ func TestListWorkers(t *testing.T) {
 	want := []*ateapipb.Worker{
 		{
 			Metadata: &ateapipb.ResourceMetadata{
-				Name:    podUID,
-				Version: 1,
+				Name: podUID,
+				// Two writes: the registration, then the capacity report.
+				Version: 2,
 			},
 			WorkerNamespace: ns,
 			WorkerPool:      "pool1",

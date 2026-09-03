@@ -24,6 +24,7 @@ import (
 	corev1ac "k8s.io/client-go/applyconfigurations/core/v1"
 	metav1ac "k8s.io/client-go/applyconfigurations/meta/v1"
 
+	"github.com/agent-substrate/substrate/internal/ateomcapacity"
 	"github.com/agent-substrate/substrate/internal/ateompath"
 	"github.com/agent-substrate/substrate/internal/deviceplugin"
 	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
@@ -204,6 +205,10 @@ func buildDeploymentApplyConfig(wp *atev1alpha1.WorkerPool, otel ateomOTelSettin
 func ateomContainerEnv(otel ateomOTelSettings) []*corev1ac.EnvVarApplyConfiguration {
 	envs := []*corev1ac.EnvVarApplyConfiguration{
 		fieldRefEnv("POD_UID", "metadata.uid"),
+		// What the ateom reports as its capacity. A container without a limit
+		// gets the node's allocatable, which is what it can in fact use.
+		resourceFieldRefEnv(ateomcapacity.CPULimitEnv, "limits.cpu", milliCores),
+		resourceFieldRefEnv(ateomcapacity.MemoryLimitEnv, "limits.memory", wholeBytes),
 	}
 	if otel.Endpoint == "" {
 		return envs
@@ -236,6 +241,25 @@ func ateomContainerEnv(otel ateomOTelSettings) []*corev1ac.EnvVarApplyConfigurat
 		}
 	}
 	return envs
+}
+
+// Divisors for resourceFieldRefEnv. The downward API reports
+// ceil(limit/divisor), so these are the units the value arrives in; the default
+// divisor of one core would round a fractional CPU limit up to a whole one.
+const (
+	milliCores = "1m"
+	wholeBytes = "1"
+)
+
+// resourceFieldRefEnv reports a container resource in units of divisor.
+func resourceFieldRefEnv(name, resourceName, divisor string) *corev1ac.EnvVarApplyConfiguration {
+	return corev1ac.EnvVar().
+		WithName(name).
+		WithValueFrom(corev1ac.EnvVarSource().
+			WithResourceFieldRef(corev1ac.ResourceFieldSelector().
+				WithContainerName("ateom").
+				WithResource(resourceName).
+				WithDivisor(resource.MustParse(divisor))))
 }
 
 func fieldRefEnv(name, fieldPath string) *corev1ac.EnvVarApplyConfiguration {

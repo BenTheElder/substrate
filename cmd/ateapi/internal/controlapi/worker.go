@@ -145,10 +145,10 @@ func (s *ServiceImpl) CreateWorker(ctx context.Context, inWorker *ateapipb.Worke
 	outWorker := proto.CloneOf(inWorker)
 	outWorker.Status = &ateapipb.WorkerStatus{State: ateapipb.WorkerState_WORKER_STATE_ACTIVE}
 
-	// Reify the actor ceiling so every stored Worker carries one and no reader
-	// has to know a default. A Worker that has not reported is worth one Actor,
-	// which is what a Worker was before it could report.
-	outWorker.Status.Capacity = &ateapipb.WorkerCapacity{Actors: 1}
+	// Capacity is left unset: a Worker holds nothing until its own ateom says
+	// what it has, through WorkerService.SetWorkerCapacity. Nothing is placed
+	// on it in the meantime, which is the point -- the alternative is guessing
+	// on the Worker's behalf and placing against the guess.
 
 	// Verify that the result is properly valid before storing it.
 	if errs := validateWorkerUpdate(ctx, field.NewPath("worker"), outWorker, inWorker, true); len(errs) > 0 {

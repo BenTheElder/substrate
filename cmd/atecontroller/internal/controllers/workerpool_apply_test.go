@@ -28,6 +28,7 @@ import (
 	corev1ac "k8s.io/client-go/applyconfigurations/core/v1"
 	metav1ac "k8s.io/client-go/applyconfigurations/meta/v1"
 
+	"github.com/agent-substrate/substrate/internal/ateomcapacity"
 	"github.com/agent-substrate/substrate/internal/ateompath"
 	"github.com/agent-substrate/substrate/internal/deviceplugin"
 	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
@@ -756,6 +757,8 @@ func expectedDeploymentApplyConfig(mutatePodSpec func(*corev1ac.PodSpecApplyConf
 					WithValueFrom(corev1ac.EnvVarSource().
 						WithFieldRef(corev1ac.ObjectFieldSelector().
 							WithFieldPath("metadata.uid"))),
+				resourceFieldRefEnv(ateomcapacity.CPULimitEnv, "limits.cpu", milliCores),
+				resourceFieldRefEnv(ateomcapacity.MemoryLimitEnv, "limits.memory", wholeBytes),
 			).
 			WithVolumeMounts(
 				corev1ac.VolumeMount().
