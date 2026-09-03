@@ -1698,15 +1698,6 @@ message Worker {
   // +k8s:eachVal=+k8s:format=k8s-label-value
   map<string, string> labels = 9;
 
-  // What this Worker can supply to the Actors it hosts.
-  //
-  // Mutable: a Worker can be resized, and it reports its own actor ceiling.
-  // Clearing is rejected. Shrinking below allocated stops new placements and
-  // evicts nothing.
-  //
-  // +k8s:optional
-  WorkerCapacity capacity = 10;
-
   // Output-only server-managed state. Absent from Create/Update request
   // payloads; whatever a request carries here is ignored. DrainWorker is the
   // only way a client moves state, and the assignments are the scheduler's.
@@ -1725,12 +1716,18 @@ enum WorkerState {
 }
 
 message WorkerStatus {
-  reserved 2; // was assignments, now the ActorAssignment subresource
-
   // +k8s:required
   // +k8s:minimum=1
   // +k8s:maximum=2 # keep this in sync with the WorkerState enum
   WorkerState state = 1;
+
+  // What this Worker can supply to the Actors it hosts, as the Worker reports
+  // it through WorkerService.SetWorkerCapacity. Observed, not requested: no
+  // client sets this, which is why it sits beside allocated rather than in the
+  // spec. Shrinking below allocated stops new placements and evicts nothing.
+  //
+  // +k8s:optional
+  WorkerCapacity capacity = 4;
 
   // What the assignments consume of capacity. A running total because placement
   // reads it for every Worker on every decision, and summing the assignments
@@ -1851,13 +1848,16 @@ service WorkerService {
 message SetWorkerCapacityRequest {
   // The Worker being reported on. atespace is always empty; Workers are
   // global-scoped.
-  // +k8s:opaqueType
+  //
+  // +k8s:required
+  // +k8s:beta(since: "0.0")=+k8s:subfield(atespace)=+k8s:forbidden # TODO: get rid of beta prefix
   ObjectRef worker = 1;
 
   // What the Worker can hold. An unset dimension keeps what is recorded rather
   // than clearing it, so a reporter that knows only its actor ceiling does not
-  // erase the compute capacity taken from the pod's limits.
-  // +k8s:opaqueType
+  // erase what it does not speak to.
+  //
+  // +k8s:required
   WorkerCapacity capacity = 2;
 }
 

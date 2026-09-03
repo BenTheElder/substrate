@@ -85,8 +85,10 @@ func TestTopWorkersRunner_Success(t *testing.T) {
 			WorkerPod:       "counter-worker-pool-7b9f8-x123",
 			SandboxClass:    "gvisor",
 			Labels:          map[string]string{"ate.dev/worker-pool": "counter"},
-			Capacity:        &ateapipb.WorkerCapacity{Actors: 1},
-			Status:          &ateapipb.WorkerStatus{Allocated: &ateapipb.WorkerCapacity{Actors: 1}},
+			Status: &ateapipb.WorkerStatus{
+				Capacity:  &ateapipb.WorkerCapacity{Actors: 1},
+				Allocated: &ateapipb.WorkerCapacity{Actors: 1},
+			},
 		},
 		{
 			WorkerNamespace: "ate-demo-counter",
@@ -195,16 +197,20 @@ func TestTopWorkersRunner_FilterAtespace(t *testing.T) {
 			WorkerPool:      "pool-1",
 			WorkerPod:       "pod-1",
 			SandboxClass:    "microvm",
-			Capacity:        &ateapipb.WorkerCapacity{Actors: 1},
-			Status:          &ateapipb.WorkerStatus{Allocated: &ateapipb.WorkerCapacity{Actors: 1}},
+			Status: &ateapipb.WorkerStatus{
+				Capacity:  &ateapipb.WorkerCapacity{Actors: 1},
+				Allocated: &ateapipb.WorkerCapacity{Actors: 1},
+			},
 		},
 		{
 			Metadata:        &ateapipb.ResourceMetadata{Name: "worker-2"},
 			WorkerNamespace: "ns-1",
 			WorkerPool:      "pool-1",
 			WorkerPod:       "pod-2",
-			Capacity:        &ateapipb.WorkerCapacity{Actors: 1},
-			Status:          &ateapipb.WorkerStatus{Allocated: &ateapipb.WorkerCapacity{Actors: 1}},
+			Status: &ateapipb.WorkerStatus{
+				Capacity:  &ateapipb.WorkerCapacity{Actors: 1},
+				Allocated: &ateapipb.WorkerCapacity{Actors: 1},
+			},
 		},
 	}
 

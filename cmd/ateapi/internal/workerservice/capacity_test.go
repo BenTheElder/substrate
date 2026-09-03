@@ -49,8 +49,10 @@ func seedCapacityWorker(t *testing.T, st store.Interface, nodeName string, capac
 		NodeName:        nodeName,
 		Ip:              "10.1.2.3",
 		SandboxClass:    "gvisor",
-		Capacity:        capacity,
-		Status:          &ateapipb.WorkerStatus{State: ateapipb.WorkerState_WORKER_STATE_ACTIVE},
+		Status: &ateapipb.WorkerStatus{
+			State:    ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+			Capacity: capacity,
+		},
 	})
 	if err != nil {
 		t.Fatalf("seeding worker: %v", err)
@@ -77,13 +79,13 @@ func TestSetWorkerCapacity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SetWorkerCapacity() failed: %v", err)
 	}
-	if want := int32(4094); got.GetWorker().GetCapacity().GetActors() != want {
-		t.Errorf("capacity.actors = %d, want %d", got.GetWorker().GetCapacity().GetActors(), want)
+	if want := int32(4094); got.GetWorker().GetStatus().GetCapacity().GetActors() != want {
+		t.Errorf("capacity.actors = %d, want %d", got.GetWorker().GetStatus().GetCapacity().GetActors(), want)
 	}
 	// A report may speak to some dimensions and not others; the ones it omits
 	// must survive rather than being cleared.
 	want := resources.CPUMemory(2000, 0)
-	if diff := cmp.Diff(want, got.GetWorker().GetCapacity().GetResources(), protocmp.Transform()); diff != "" {
+	if diff := cmp.Diff(want, got.GetWorker().GetStatus().GetCapacity().GetResources(), protocmp.Transform()); diff != "" {
 		t.Errorf("capacity resources mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -107,7 +109,7 @@ func TestSetWorkerCapacity_OtherNodeIsNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetWorker: %v", err)
 	}
-	if got := after.GetCapacity().GetActors(); got != 1 {
+	if got := after.GetStatus().GetCapacity().GetActors(); got != 1 {
 		t.Errorf("capacity.actors = %d, want 1 unchanged", got)
 	}
 }
@@ -205,7 +207,7 @@ func TestSetWorkerCapacity_RejectsNonsense(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetWorker: %v", err)
 	}
-	if diff := cmp.Diff(seeded.GetCapacity(), after.GetCapacity(), protocmp.Transform()); diff != "" {
+	if diff := cmp.Diff(seeded.GetStatus().GetCapacity(), after.GetStatus().GetCapacity(), protocmp.Transform()); diff != "" {
 		t.Errorf("capacity changed despite every report being refused (-want +got):\n%s", diff)
 	}
 }

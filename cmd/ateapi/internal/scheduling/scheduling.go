@@ -156,7 +156,7 @@ func (s *scheduler) Applies(worker *ateapipb.Worker, constraints Constraints) bo
 // having no room: it is the only answer that cannot overcommit a worker whose
 // true occupancy is unreadable.
 func (s *scheduler) HasRoom(worker *ateapipb.Worker, constraints Constraints) bool {
-	capacity := worker.GetCapacity()
+	capacity := worker.GetStatus().GetCapacity()
 	used := worker.GetStatus().GetAllocated()
 
 	// No per-actor size to compare: every assignment costs one, so a worker at

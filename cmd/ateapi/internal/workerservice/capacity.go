@@ -87,20 +87,23 @@ func (s *Server) SetWorkerCapacity(ctx context.Context, req *ateapipb.SetWorkerC
 		return nil, status.Errorf(codes.NotFound, "Worker %s not found", name)
 	}
 
-	merged, err := mergeReportedCapacity(worker.GetCapacity(), reported)
+	merged, err := mergeReportedCapacity(worker.GetStatus().GetCapacity(), reported)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "invalid capacity: %v", err)
 	}
-	if proto.Equal(worker.GetCapacity(), merged) {
+	if proto.Equal(worker.GetStatus().GetCapacity(), merged) {
 		return &ateapipb.SetWorkerCapacityResponse{Worker: worker}, nil
 	}
 
 	updated, err := s.store.UpdateWorker(ctx, name, store.PreconditionFrom(worker), func(toUpdate *ateapipb.Worker) error {
-		merged, err := mergeReportedCapacity(toUpdate.GetCapacity(), reported)
+		merged, err := mergeReportedCapacity(toUpdate.GetStatus().GetCapacity(), reported)
 		if err != nil {
 			return err
 		}
-		toUpdate.Capacity = merged
+		if toUpdate.Status == nil {
+			toUpdate.Status = &ateapipb.WorkerStatus{}
+		}
+		toUpdate.Status.Capacity = merged
 		return nil
 	})
 	switch {
@@ -114,8 +117,8 @@ func (s *Server) SetWorkerCapacity(ctx context.Context, req *ateapipb.SetWorkerC
 	}
 	slog.InfoContext(ctx, "Worker reported its capacity",
 		slog.String("worker", name),
-		slog.String("was", worker.GetCapacity().String()),
-		slog.String("now", updated.GetCapacity().String()))
+		slog.String("was", worker.GetStatus().GetCapacity().String()),
+		slog.String("now", updated.GetStatus().GetCapacity().String()))
 	return &ateapipb.SetWorkerCapacityResponse{Worker: updated}, nil
 }
 

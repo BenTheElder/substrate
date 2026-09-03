@@ -147,10 +147,10 @@ func setWorkerActorCapacity(t *testing.T, tc *testContext, pool string, actors i
 		}
 		name := w.GetMetadata().GetName()
 		if _, err := tc.persistence.UpdateWorker(ctx, name, store.PreconditionFrom(w), func(toUpdate *ateapipb.Worker) error {
-			if toUpdate.Capacity == nil {
-				toUpdate.Capacity = &ateapipb.WorkerCapacity{}
+			if toUpdate.Status.Capacity == nil {
+				toUpdate.Status.Capacity = &ateapipb.WorkerCapacity{}
 			}
-			toUpdate.Capacity.Actors = actors
+			toUpdate.Status.Capacity.Actors = actors
 			return nil
 		}); err != nil {
 			t.Fatalf("setting capacity on worker %s: %v", name, err)
@@ -164,7 +164,7 @@ func setWorkerActorCapacity(t *testing.T, tc *testContext, pool string, actors i
 		if err := wait.PollUntilContextTimeout(ctx, 50*time.Millisecond, 5*time.Second, true,
 			func(context.Context) (bool, error) {
 				got, err := tc.workerCache.Worker(name)
-				return err == nil && got.GetCapacity().GetActors() == actors, nil
+				return err == nil && got.GetStatus().GetCapacity().GetActors() == actors, nil
 			}); err != nil {
 			t.Fatalf("worker %s did not reach capacity.actors=%d in the cache: %v", name, actors, err)
 		}

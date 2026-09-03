@@ -111,8 +111,9 @@ func newTestWorker(name, pod string) *ateapipb.Worker {
 		WorkerPool:      "pool-1",
 		WorkerPod:       pod,
 		WorkerPodUid:    testWorkerPodUID,
-		Capacity:        &ateapipb.WorkerCapacity{Resources: resources.CPUMemory(2000, 4<<30)},
-		Status:          &ateapipb.WorkerStatus{},
+		Status: &ateapipb.WorkerStatus{
+			Capacity: &ateapipb.WorkerCapacity{Resources: resources.CPUMemory(2000, 4<<30)},
+		},
 	}
 }
 
@@ -2891,7 +2892,7 @@ func runUnknownFieldContractTests(t *testing.T, setup func(t *testing.T) store.I
 
 		worker := withUnknownField(newTestWorker(testWorkerName, "pod-1"))
 		withUnknownField(worker.Metadata)
-		withUnknownField(worker.Capacity)
+		withUnknownField(worker.Status.Capacity)
 		created, err := s.CreateWorker(ctx, worker)
 		if err != nil {
 			t.Fatalf("CreateWorker failed: %v", err)

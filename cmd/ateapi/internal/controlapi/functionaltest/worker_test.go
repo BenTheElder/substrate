@@ -65,9 +65,9 @@ func TestListWorkers(t *testing.T) {
 			Ip:              "127.0.0.1",
 			SandboxClass:    "gvisor",
 			Labels:          map[string]string{"foo": "bar"},
-			Capacity:        &ateapipb.WorkerCapacity{Actors: 1},
 			Status: &ateapipb.WorkerStatus{
-				State: ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+				State:    ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+				Capacity: &ateapipb.WorkerCapacity{Actors: 1},
 			},
 		},
 	}

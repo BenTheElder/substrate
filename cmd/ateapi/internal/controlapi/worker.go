@@ -145,15 +145,10 @@ func (s *ServiceImpl) CreateWorker(ctx context.Context, inWorker *ateapipb.Worke
 	outWorker := proto.CloneOf(inWorker)
 	outWorker.Status = &ateapipb.WorkerStatus{State: ateapipb.WorkerState_WORKER_STATE_ACTIVE}
 
-	// Reify the actor ceiling now so every stored Worker carries one and no
-	// reader has to know a default. A Worker that has not reported its own is
-	// worth one Actor, which is what a Worker was before it could report.
-	if outWorker.GetCapacity().GetActors() == 0 {
-		if outWorker.Capacity == nil {
-			outWorker.Capacity = &ateapipb.WorkerCapacity{}
-		}
-		outWorker.Capacity.Actors = 1
-	}
+	// Reify the actor ceiling so every stored Worker carries one and no reader
+	// has to know a default. A Worker that has not reported is worth one Actor,
+	// which is what a Worker was before it could report.
+	outWorker.Status.Capacity = &ateapipb.WorkerCapacity{Actors: 1}
 
 	// Verify that the result is properly valid before storing it.
 	if errs := validateWorkerUpdate(ctx, field.NewPath("worker"), outWorker, inWorker, true); len(errs) > 0 {
@@ -372,7 +367,6 @@ func validateWorkerUpdate(ctx context.Context, fldPath *field.Path, newVal, oldV
 	// Call the generated validation.
 	op := operation.Operation{Type: operation.Update}
 	errs := Validate_Worker(ctx, op, fldPath, newVal, oldVal)
-	errs = append(errs, validateWorkerCapacity(ctx, fldPath, newVal, oldVal)...)
 	if requireStatus {
 		// Status is optional in the schema, but is actually required to be set
 		// by the server.  If it was specified, it was already validated above,
@@ -380,18 +374,6 @@ func validateWorkerUpdate(ctx context.Context, fldPath *field.Path, newVal, oldV
 		errs = append(errs, validate.RequiredPointer(ctx, op, fldPath.Child("status"), newVal.GetStatus(), nil)...)
 	}
 	return errs
-}
-
-// validateWorkerCapacity covers the one capacity rule declarative validation
-// cannot state: an update may move capacity but not take it away. An update
-// replaces the Worker, so a request that omits capacity is asking to clear it.
-// The quantities themselves are checked by the hook on Resources.limits.
-func validateWorkerCapacity(ctx context.Context, fldPath *field.Path, newVal, oldVal *ateapipb.Worker) field.ErrorList {
-	if oldVal.GetCapacity() == nil || newVal.GetCapacity() != nil {
-		return nil
-	}
-	return validate.RequiredPointer(ctx, operation.Operation{Type: operation.Update},
-		fldPath.Child("capacity"), newVal.GetCapacity(), oldVal.GetCapacity())
 }
 
 func (s *ServiceImpl) WatchWorkers(ctx context.Context) (*store.WorkerWatch, error) {

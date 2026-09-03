@@ -188,8 +188,10 @@ func TestAssignWorkerAttempt_StampsSubstrateTemplateRef(t *testing.T) {
 		WorkerPod:       "pod-free",
 		WorkerPodUid:    testWorkerUID("pod-free"),
 		SandboxClass:    "gvisor",
-		Capacity:        &ateapipb.WorkerCapacity{Actors: 1},
-		Status:          &ateapipb.WorkerStatus{State: ateapipb.WorkerState_WORKER_STATE_ACTIVE},
+		Status: &ateapipb.WorkerStatus{
+			State:    ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+			Capacity: &ateapipb.WorkerCapacity{Actors: 1},
+		},
 	}
 	if _, err := persistence.CreateWorker(ctx, worker); err != nil {
 		t.Fatalf("CreateWorker: %v", err)
@@ -240,8 +242,10 @@ func TestAssignWorkerAttempt_SkipsWorkerAssignedInOtherAtespace(t *testing.T) {
 		WorkerPod:       "pod-1",
 		WorkerPodUid:    testWorkerUID("pod-1"),
 		SandboxClass:    "gvisor",
-		Capacity:        &ateapipb.WorkerCapacity{Actors: 1},
-		Status:          &ateapipb.WorkerStatus{State: ateapipb.WorkerState_WORKER_STATE_ACTIVE},
+		Status: &ateapipb.WorkerStatus{
+			State:    ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+			Capacity: &ateapipb.WorkerCapacity{Actors: 1},
+		},
 	}
 	if _, err := persistence.CreateWorker(ctx, worker); err != nil {
 		t.Fatalf("CreateWorker: %v", err)
@@ -301,8 +305,10 @@ func TestAssignWorkerAttempt_ReleasesIneligibleStaleWorker(t *testing.T) {
 		WorkerPod:       "stale-pod",
 		WorkerPodUid:    testWorkerUID("stale-pod"),
 		SandboxClass:    "microvm",
-		Capacity:        &ateapipb.WorkerCapacity{Actors: 1},
-		Status:          &ateapipb.WorkerStatus{State: ateapipb.WorkerState_WORKER_STATE_ACTIVE},
+		Status: &ateapipb.WorkerStatus{
+			State:    ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+			Capacity: &ateapipb.WorkerCapacity{Actors: 1},
+		},
 	}
 	free := &ateapipb.Worker{
 		Metadata:        &ateapipb.ResourceMetadata{Name: testWorkerUID("free-pod")},
@@ -311,9 +317,9 @@ func TestAssignWorkerAttempt_ReleasesIneligibleStaleWorker(t *testing.T) {
 		WorkerPod:       "free-pod",
 		WorkerPodUid:    testWorkerUID("free-pod"),
 		SandboxClass:    "gvisor",
-		Capacity:        &ateapipb.WorkerCapacity{Actors: 1},
 		Status: &ateapipb.WorkerStatus{
-			State: ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+			State:    ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+			Capacity: &ateapipb.WorkerCapacity{Actors: 1},
 		},
 	}
 	for _, w := range []*ateapipb.Worker{stale, free} {
@@ -369,9 +375,9 @@ func TestAssignWorkerAttempt_RetryAfterConflictPicksFreshWorker(t *testing.T) {
 		WorkerPod:       "contested-pod",
 		WorkerPodUid:    testWorkerUID("contested-pod"),
 		SandboxClass:    "gvisor",
-		Capacity:        &ateapipb.WorkerCapacity{Actors: 1},
 		Status: &ateapipb.WorkerStatus{
-			State: ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+			State:    ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+			Capacity: &ateapipb.WorkerCapacity{Actors: 1},
 		},
 	}
 	fallback := &ateapipb.Worker{
@@ -381,9 +387,9 @@ func TestAssignWorkerAttempt_RetryAfterConflictPicksFreshWorker(t *testing.T) {
 		WorkerPod:       "fallback-pod",
 		WorkerPodUid:    testWorkerUID("fallback-pod"),
 		SandboxClass:    "gvisor",
-		Capacity:        &ateapipb.WorkerCapacity{Actors: 1},
 		Status: &ateapipb.WorkerStatus{
-			State: ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+			State:    ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+			Capacity: &ateapipb.WorkerCapacity{Actors: 1},
 		},
 	}
 	for _, w := range []*ateapipb.Worker{contested, fallback} {
@@ -474,9 +480,9 @@ func seedAssignFixture(t *testing.T, ctx context.Context, persistence store.Inte
 		WorkerPod:       "pod-1",
 		WorkerPodUid:    testWorkerUID("pod-1"),
 		SandboxClass:    "gvisor",
-		Capacity:        &ateapipb.WorkerCapacity{Actors: 1},
 		Status: &ateapipb.WorkerStatus{
-			State: ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+			State:    ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+			Capacity: &ateapipb.WorkerCapacity{Actors: 1},
 		},
 	}); err != nil {
 		t.Fatalf("CreateWorker: %v", err)
@@ -850,8 +856,10 @@ func TestValidateAssignedWorker_WorkerOwnership(t *testing.T) {
 				WorkerPod:       "pod-1",
 				WorkerPodUid:    testWorkerUID("pod-1"),
 				SandboxClass:    tt.sandboxClass,
-				Capacity:        &ateapipb.WorkerCapacity{Actors: 1},
-				Status:          &ateapipb.WorkerStatus{State: ateapipb.WorkerState_WORKER_STATE_ACTIVE},
+				Status: &ateapipb.WorkerStatus{
+					State:    ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+					Capacity: &ateapipb.WorkerCapacity{Actors: 1},
+				},
 			}); err != nil {
 				t.Fatalf("CreateWorker: %v", err)
 			}

@@ -1793,10 +1793,9 @@ func TestResumeActor(t *testing.T) {
 		NodeName:        "node1",
 		SandboxClass:    "gvisor",
 		Labels:          map[string]string{poolLabelKey: ns},
-		// The pod sets no compute limits, so only the ceiling is set, and it is
-		// the one CreateWorker reifies: the ateom has not reported its own.
-		Capacity: &ateapipb.WorkerCapacity{Actors: 1},
 		Status: &ateapipb.WorkerStatus{
+			// Only the ceiling CreateWorker reifies: the ateom has not reported.
+			Capacity: &ateapipb.WorkerCapacity{Actors: 1},
 			// All a listing reports of the assignments. The actor declares no
 			// compute limits, so it registers as one actor and nothing else.
 			Allocated: &ateapipb.WorkerCapacity{Actors: 1},

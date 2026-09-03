@@ -23,7 +23,6 @@ import (
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store/storetest"
-	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/grpc/codes"
@@ -51,7 +50,6 @@ func validWorker(name string, mods ...func(*ateapipb.Worker)) *ateapipb.Worker {
 		NodeName:        "node-1",
 		Ip:              "10.1.2.3",
 		SandboxClass:    "gvisor",
-		Capacity:        &ateapipb.WorkerCapacity{Resources: resources.CPUMemory(2000, 4<<30)},
 	}
 	for _, m := range mods {
 		m(w)
@@ -193,21 +191,25 @@ func TestListWorkerAssignments_AbsentWorker(t *testing.T) {
 	}
 }
 
-// Capacity is the Worker's own and may move over its lifetime; only clearing it
-// is refused (see TestUpdateWorker_Errors/capacity_omitted).
-func TestUpdateWorker_CapacityChanges(t *testing.T) {
+// Capacity is reported by the Worker, so it lives in status and a client
+// cannot move it. An update that tries is ignored rather than refused, as it is
+// for anything else a request carries in status.
+func TestUpdateWorker_CannotChangeCapacity(t *testing.T) {
 	ctx := context.Background()
 	svc, persistence := newWorkerAPIService(t)
 	seeded := seedAPIWorker(t, ctx, persistence, validWorker(apiWorkerName))
+	before := seeded.GetStatus().GetCapacity()
 
 	got, err := svc.UpdateWorker(ctx, &ateapipb.UpdateWorkerRequest{
-		Worker: updateFrom(seeded, func(w *ateapipb.Worker) { w.Capacity.Actors = 4094 }),
+		Worker: updateFrom(seeded, func(w *ateapipb.Worker) {
+			w.Status.Capacity = &ateapipb.WorkerCapacity{Actors: 4094}
+		}),
 	})
 	if err != nil {
-		t.Fatalf("UpdateWorker() raising the actor ceiling failed: %v", err)
+		t.Fatalf("UpdateWorker() failed: %v", err)
 	}
-	if got.GetCapacity().GetActors() != 4094 {
-		t.Errorf("capacity.actors = %d, want 4094", got.GetCapacity().GetActors())
+	if diff := cmp.Diff(before, got.GetStatus().GetCapacity(), protocmp.Transform()); diff != "" {
+		t.Errorf("a client update moved capacity (-want +got):\n%s", diff)
 	}
 }
 
@@ -283,7 +285,10 @@ func TestCreateWorker_IgnoresRequestStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateWorker() failed: %v", err)
 	}
-	want := &ateapipb.WorkerStatus{State: ateapipb.WorkerState_WORKER_STATE_ACTIVE}
+	want := &ateapipb.WorkerStatus{
+		State:    ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+		Capacity: &ateapipb.WorkerCapacity{Actors: 1},
+	}
 	if diff := cmp.Diff(want, got.GetStatus(), protocmp.Transform()); diff != "" {
 		t.Errorf("created worker status mismatch (-want +got):\n%s", diff)
 	}
@@ -494,7 +499,6 @@ func TestUpdateWorker_Errors(t *testing.T) {
 		// And immutable fields dropped, which a replacement update reads as a
 		// request to clear them. Rejected rather than silently applied.
 		{"ip omitted", func(w *ateapipb.Worker) { w.Ip = "" }, codes.InvalidArgument},
-		{"capacity omitted", func(w *ateapipb.Worker) { w.Capacity = nil }, codes.InvalidArgument},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -819,30 +823,6 @@ func TestValidateCreateWorkerRequest(t *testing.T) {
 		req:  validReq(validWorker(apiWorkerName, func(w *ateapipb.Worker) { w.Labels = map[string]string{"tier": "not valid!"} })),
 		want: field.ErrorList{field.Invalid(field.NewPath("worker", "labels").Key("tier"), "not valid!", "").WithOrigin("format=k8s-label-value")},
 	}, {
-		name: "absent capacity is allowed",
-		req:  validReq(validWorker(apiWorkerName, func(w *ateapipb.Worker) { w.Capacity = nil })),
-	}, {
-		name: "valid capacity",
-		req: validReq(validWorker(apiWorkerName, func(w *ateapipb.Worker) {
-			w.Capacity = &ateapipb.WorkerCapacity{Resources: resources.CPUMemory(2000, 4<<30)}
-		})),
-	}, {
-		name: "negative capacity quantity",
-		req: validReq(validWorker(apiWorkerName, func(w *ateapipb.Worker) {
-			w.Capacity = &ateapipb.WorkerCapacity{Resources: resources.CPUMemory(-1, 4<<30)}
-		})),
-		want: field.ErrorList{field.Invalid(field.NewPath("worker", "capacity", "resources", "limits").Index(0).Child("quantity"), nil, "")},
-	}, {
-		// A quantity is a string on the wire, so a Worker can report one that
-		// is not a quantity at all.
-		name: "unparseable capacity quantity",
-		req: validReq(validWorker(apiWorkerName, func(w *ateapipb.Worker) {
-			w.Capacity = &ateapipb.WorkerCapacity{
-				Resources: &ateapipb.Resources{Limits: []*ateapipb.Limits{{Name: "cpu", Quantity: "lots"}}},
-			}
-		})),
-		want: field.ErrorList{field.Invalid(field.NewPath("worker", "capacity", "resources", "limits").Index(0).Child("quantity"), nil, "")},
-	}, {
 		name: "status needs a state",
 		req:  validReq(validWorker(apiWorkerName, withStatus(func(s *ateapipb.WorkerStatus) { s.State = 0 }))),
 		want: field.ErrorList{field.Required(field.NewPath("worker", "status", "state"), "")},
@@ -887,12 +867,8 @@ func TestServiceImplUpdateWorker_ImmutableFields(t *testing.T) {
 		{"worker_pod_uid", "worker_pod_uid", func(w *ateapipb.Worker) { w.WorkerPodUid = apiOtherWorkerName }},
 		{"node_name", "node_name", func(w *ateapipb.Worker) { w.NodeName = "other-node" }},
 		{"ip", "ip", func(w *ateapipb.Worker) { w.Ip = "10.0.0.9" }},
-		// capacity is absent: it MAY change, since a Worker can be resized and
-		// reports its own ceiling. See TestUpdateWorker_CapacityChanges.
-		//
-		// An update replaces the worker, so a caller that leaves capacity
-		// out is asking to clear it. That is still rejected.
-		{"capacity_cleared", "capacity", func(w *ateapipb.Worker) { w.Capacity = nil }},
+		// capacity is absent: it is reported into status, which a client
+		// cannot write. See TestUpdateWorker_CannotChangeCapacity.
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := impl.UpdateWorker(ctx, apiWorkerName, store.PreconditionFrom(created), func(toUpdate *ateapipb.Worker) error {
@@ -1085,17 +1061,19 @@ func TestCreateWorker_ReifiesActorCeiling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateWorker() failed: %v", err)
 	}
-	if got := got.GetCapacity().GetActors(); got != 1 {
+	if got := got.GetStatus().GetCapacity().GetActors(); got != 1 {
 		t.Errorf("created worker actor ceiling = %d, want 1", got)
 	}
 
-	reported := validWorker("11111111-2222-3333-4444-555555555555")
-	reported.Capacity = &ateapipb.WorkerCapacity{Actors: 4094}
-	got, err = svc.CreateWorker(ctx, &ateapipb.CreateWorkerRequest{Worker: reported})
+	// Capacity is status, so a request cannot bring its own: a Worker only
+	// gets a real ceiling by reporting one.
+	carried := validWorker("11111111-2222-3333-4444-555555555555")
+	carried.Status = &ateapipb.WorkerStatus{Capacity: &ateapipb.WorkerCapacity{Actors: 4094}}
+	got, err = svc.CreateWorker(ctx, &ateapipb.CreateWorkerRequest{Worker: carried})
 	if err != nil {
-		t.Fatalf("CreateWorker() with a reported ceiling failed: %v", err)
+		t.Fatalf("CreateWorker() carrying a capacity failed: %v", err)
 	}
-	if got := got.GetCapacity().GetActors(); got != 4094 {
-		t.Errorf("reported ceiling = %d, want it kept at 4094", got)
+	if got := got.GetStatus().GetCapacity().GetActors(); got != 1 {
+		t.Errorf("a request carrying a ceiling set it to %d, want the reified 1", got)
 	}
 }

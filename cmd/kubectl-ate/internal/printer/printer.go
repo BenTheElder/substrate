@@ -110,7 +110,7 @@ func WorkerOccupancy(worker *ateapipb.Worker) string {
 	if hosted == 0 {
 		return "FREE"
 	}
-	return fmt.Sprintf("ASSIGNED(%d/%d)", hosted, worker.GetCapacity().GetActors())
+	return fmt.Sprintf("ASSIGNED(%d/%d)", hosted, worker.GetStatus().GetCapacity().GetActors())
 }
 
 func sortWorkers(workers []*ateapipb.Worker) {

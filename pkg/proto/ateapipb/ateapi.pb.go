@@ -6083,14 +6083,6 @@ type Worker struct {
 	// +k8s:eachKey=+k8s:format=k8s-label-key
 	// +k8s:eachVal=+k8s:format=k8s-label-value
 	Labels map[string]string `protobuf:"bytes,9,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	// What this Worker can supply to the Actors it hosts.
-	//
-	// Mutable: a Worker can be resized, and it reports its own actor ceiling.
-	// Clearing is rejected. Shrinking below allocated stops new placements and
-	// evicts nothing.
-	//
-	// +k8s:optional
-	Capacity *WorkerCapacity `protobuf:"bytes,10,opt,name=capacity,proto3" json:"capacity,omitempty"`
 	// Output-only server-managed state. Absent from Create/Update request
 	// payloads; whatever a request carries here is ignored. DrainWorker is the
 	// only way a client moves state, and the assignments are the scheduler's.
@@ -6194,13 +6186,6 @@ func (x *Worker) GetLabels() map[string]string {
 	return nil
 }
 
-func (x *Worker) GetCapacity() *WorkerCapacity {
-	if x != nil {
-		return x.Capacity
-	}
-	return nil
-}
-
 func (x *Worker) GetStatus() *WorkerStatus {
 	if x != nil {
 		return x.Status
@@ -6214,6 +6199,13 @@ type WorkerStatus struct {
 	// +k8s:minimum=1
 	// +k8s:maximum=2 # keep this in sync with the WorkerState enum
 	State WorkerState `protobuf:"varint,1,opt,name=state,proto3,enum=ateapi.WorkerState" json:"state,omitempty"`
+	// What this Worker can supply to the Actors it hosts, as the Worker reports
+	// it through WorkerService.SetWorkerCapacity. Observed, not requested: no
+	// client sets this, which is why it sits beside allocated rather than in the
+	// spec. Shrinking below allocated stops new placements and evicts nothing.
+	//
+	// +k8s:optional
+	Capacity *WorkerCapacity `protobuf:"bytes,4,opt,name=capacity,proto3" json:"capacity,omitempty"`
 	// What the assignments consume of capacity. A running total because placement
 	// reads it for every Worker on every decision, and summing the assignments
 	// would cost the fleet's actor count each time.
@@ -6259,6 +6251,13 @@ func (x *WorkerStatus) GetState() WorkerState {
 		return x.State
 	}
 	return WorkerState_WORKER_STATE_UNSPECIFIED
+}
+
+func (x *WorkerStatus) GetCapacity() *WorkerCapacity {
+	if x != nil {
+		return x.Capacity
+	}
+	return nil
 }
 
 func (x *WorkerStatus) GetAllocated() *WorkerCapacity {
@@ -6448,12 +6447,15 @@ type SetWorkerCapacityRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The Worker being reported on. atespace is always empty; Workers are
 	// global-scoped.
-	// +k8s:opaqueType
+	//
+	// +k8s:required
+	// +k8s:beta(since: "0.0")=+k8s:subfield(atespace)=+k8s:forbidden # TODO: get rid of beta prefix
 	Worker *ObjectRef `protobuf:"bytes,1,opt,name=worker,proto3" json:"worker,omitempty"`
 	// What the Worker can hold. An unset dimension keeps what is recorded rather
 	// than clearing it, so a reporter that knows only its actor ceiling does not
-	// erase the compute capacity taken from the pod's limits.
-	// +k8s:opaqueType
+	// erase what it does not speak to.
+	//
+	// +k8s:required
 	Capacity      *WorkerCapacity `protobuf:"bytes,2,opt,name=capacity,proto3" json:"capacity,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -7143,7 +7145,7 @@ const file_ateapi_proto_rawDesc = "" +
 	"page_token\x18\x03 \x01(\tR\tpageToken\"c\n" +
 	"\x12ListActorsResponse\x12%\n" +
 	"\x06actors\x18\x01 \x03(\v2\r.ateapi.ActorR\x06actors\x12&\n" +
-	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"\xf2\x03\n" +
+	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"\xbe\x03\n" +
 	"\x06Worker\x124\n" +
 	"\bmetadata\x18\x01 \x01(\v2\x18.ateapi.ResourceMetadataR\bmetadata\x12)\n" +
 	"\x10worker_namespace\x18\x02 \x01(\tR\x0fworkerNamespace\x12\x1f\n" +
@@ -7155,16 +7157,15 @@ const file_ateapi_proto_rawDesc = "" +
 	"\tnode_name\x18\x06 \x01(\tR\bnodeName\x12\x0e\n" +
 	"\x02ip\x18\a \x01(\tR\x02ip\x12#\n" +
 	"\rsandbox_class\x18\b \x01(\tR\fsandboxClass\x122\n" +
-	"\x06labels\x18\t \x03(\v2\x1a.ateapi.Worker.LabelsEntryR\x06labels\x122\n" +
-	"\bcapacity\x18\n" +
-	" \x01(\v2\x16.ateapi.WorkerCapacityR\bcapacity\x12,\n" +
+	"\x06labels\x18\t \x03(\v2\x1a.ateapi.Worker.LabelsEntryR\x06labels\x12,\n" +
 	"\x06status\x18\v \x01(\v2\x14.ateapi.WorkerStatusR\x06status\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"u\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa3\x01\n" +
 	"\fWorkerStatus\x12)\n" +
-	"\x05state\x18\x01 \x01(\x0e2\x13.ateapi.WorkerStateR\x05state\x124\n" +
-	"\tallocated\x18\x03 \x01(\v2\x16.ateapi.WorkerCapacityR\tallocatedJ\x04\b\x02\x10\x03\"Y\n" +
+	"\x05state\x18\x01 \x01(\x0e2\x13.ateapi.WorkerStateR\x05state\x122\n" +
+	"\bcapacity\x18\x04 \x01(\v2\x16.ateapi.WorkerCapacityR\bcapacity\x124\n" +
+	"\tallocated\x18\x03 \x01(\v2\x16.ateapi.WorkerCapacityR\tallocated\"Y\n" +
 	"\x0eWorkerCapacity\x12/\n" +
 	"\tresources\x18\x01 \x01(\v2\x11.ateapi.ResourcesR\tresources\x12\x16\n" +
 	"\x06actors\x18\x02 \x01(\x05R\x06actors\"\xff\x01\n" +
@@ -7513,9 +7514,9 @@ var file_ateapi_proto_depIdxs = []int32{
 	13,  // 108: ateapi.ListActorsResponse.actors:type_name -> ateapi.Actor
 	11,  // 109: ateapi.Worker.metadata:type_name -> ateapi.ResourceMetadata
 	107, // 110: ateapi.Worker.labels:type_name -> ateapi.Worker.LabelsEntry
-	97,  // 111: ateapi.Worker.capacity:type_name -> ateapi.WorkerCapacity
-	96,  // 112: ateapi.Worker.status:type_name -> ateapi.WorkerStatus
-	6,   // 113: ateapi.WorkerStatus.state:type_name -> ateapi.WorkerState
+	96,  // 111: ateapi.Worker.status:type_name -> ateapi.WorkerStatus
+	6,   // 112: ateapi.WorkerStatus.state:type_name -> ateapi.WorkerState
+	97,  // 113: ateapi.WorkerStatus.capacity:type_name -> ateapi.WorkerCapacity
 	97,  // 114: ateapi.WorkerStatus.allocated:type_name -> ateapi.WorkerCapacity
 	29,  // 115: ateapi.WorkerCapacity.resources:type_name -> ateapi.Resources
 	11,  // 116: ateapi.ActorAssignment.metadata:type_name -> ateapi.ResourceMetadata

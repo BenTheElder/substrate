@@ -241,8 +241,8 @@ func TestPrintWorkersTo_Table(t *testing.T) {
 			WorkerPool:      "pool-1",
 			WorkerPod:       "pod-1",
 			SandboxClass:    "gvisor",
-			Capacity:        &ateapipb.WorkerCapacity{Actors: 1},
 			Status: &ateapipb.WorkerStatus{
+				Capacity:  &ateapipb.WorkerCapacity{Actors: 1},
 				Allocated: &ateapipb.WorkerCapacity{Actors: 1},
 			},
 		},

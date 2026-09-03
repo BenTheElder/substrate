@@ -286,8 +286,8 @@ func TestSyncer_DoesNotInferCapacityFromThePod(t *testing.T) {
 	// sent. Reifying the ceiling on a Worker that reported none is the API
 	// server's job; see TestCreateWorker_ReifiesActorCeiling.
 	got := waitForWorker(t, ctx, api, testPodUID, func(w *ateapipb.Worker) bool { return w != nil })
-	if got.GetCapacity() != nil {
-		t.Errorf("worker capacity = %v, want none", got.GetCapacity())
+	if got.GetStatus().GetCapacity() != nil {
+		t.Errorf("worker capacity = %v, want none", got.GetStatus().GetCapacity())
 	}
 }
 
