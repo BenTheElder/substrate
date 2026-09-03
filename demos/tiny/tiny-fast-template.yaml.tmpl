@@ -1,0 +1,55 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The same actor with 4x the CPU, to separate "a restore is expensive" from "a
+# restore is being throttled".
+#
+# Measured on a full worker: an actor's own cgroup stalls on its quota for 2.28s
+# of an ~11.8s activation, and 30.8% of its scheduling periods are throttled --
+# while the node itself sits at 5-16% of 32 cores. So the limit, not the
+# machine, is what the restore is waiting for. A restore is ~0.85 core-seconds
+# of real work, which at 500m cannot finish in under 1.7s however idle the node
+# is.
+#
+# A separate template rather than an edit, because an ActorTemplate spec is
+# immutable -- the size is baked into its snapshots -- and because having both
+# side by side is what makes the comparison a comparison.
+
+metadata:
+  atespace: ate-scale-tiny
+  name: tiny-fast
+# The same pool as tiny: the point is to change one thing.
+workerSelector:
+  matchLabels:
+    workload: tiny
+containers:
+- name: tiny
+  image: ko://github.com/agent-substrate/substrate/demos/tiny
+  command: ["/ko-app/tiny"]
+  readyz:
+    httpGet:
+      path: /readyz
+      port: 80
+resources:
+  limits:
+  - name: cpu
+    quantity: "2"
+  - name: memory
+    quantity: 56Mi
+snapshotsConfig:
+  onPause: SNAPSHOT_CONTENT_SCOPE_FULL
+  storageLocation: gs://${BUCKET_NAME}/ate-scale-tiny-fast/
+sandboxConfig:
+  sandboxClass: SANDBOX_CLASS_GVISOR
+  configName: gvisor-default

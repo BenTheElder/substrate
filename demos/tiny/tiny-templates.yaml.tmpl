@@ -1,0 +1,66 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# ActorTemplates for the density fixture.
+#
+# Separate from tiny.yaml.tmpl because these are ateapi resources, not
+# Kubernetes ones: apply them with `kubectl-ate create actor-template -f`,
+# one document at a time, rather than with kubectl. The Namespace and
+# WorkerPool next door are still Kubernetes objects.
+
+metadata:
+  atespace: ate-scale-tiny
+  name: tiny
+workerSelector:
+  matchLabels:
+    workload: tiny
+containers:
+- name: tiny
+  image: ko://github.com/agent-substrate/substrate/demos/tiny
+  command: ["/ko-app/tiny"]
+  readyz:
+    httpGet:
+      path: /readyz
+      port: 80
+
+# The denominator, set from MEASUREMENT rather than guesswork: an idle Actor
+# of this template costs ~30MB of real RSS, so 56Mi is a realistic declaration
+# with headroom. It is what decides where the run stops, because admission is
+# per dimension: 220Gi / 56Mi = ~4022, just under the 4094 the pod-side /20 can
+# number. Whichever of the two says no first is the finding.
+#
+# CPU is the ACTIVATION dial, not a steady-state cost: an idle Actor draws
+# nothing, but a restore is ~0.85 core-seconds of real work, so the limit
+# divides straight into activation latency -- 100m means ~8.5s per restore,
+# 500m means ~1.7s. (10m is the cgroup floor and is NOT usable: readyz times
+# out and even runsc delete gets killed.) Density does not pay for the higher
+# limit, because the worker's CPU limit is a declaration and 4094 x 500m is
+# only ever real if they all restore at once -- concurrency, not occupancy, is
+# what spends it.
+resources:
+  limits:
+  - name: cpu
+    quantity: 500m
+  - name: memory
+    quantity: 56Mi
+
+# No durable volume and no data snapshot: this measures the floor, and a
+# per-Actor volume would add storage to what is meant to be a memory and
+# namespace measurement.
+snapshotsConfig:
+  onPause: SNAPSHOT_CONTENT_SCOPE_FULL
+  storageLocation: gs://${BUCKET_NAME}/ate-scale-tiny/
+sandboxConfig:
+  sandboxClass: SANDBOX_CLASS_GVISOR
+  configName: gvisor-default

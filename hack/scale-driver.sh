@@ -71,16 +71,19 @@ log() { echo -e "\033[1;36m[driver]: $*\033[0m"; }
 # resolve it here (once) rather than teaching the driver to speak to ateapi.
 GOLDEN_SNAPSHOT_URI="${GOLDEN_SNAPSHOT_URI:-}"
 if [[ -z "${GOLDEN_SNAPSHOT_URI}" && "${VIA}" == "atelet" ]]; then
-  golden="$(kubectl "${KCTX[@]}" get actortemplate -n "${TEMPLATE_NS}" "${TEMPLATE_NAME}" \
-    -o jsonpath='{.status.goldenSnapshot}')"
-  if [[ -z "${golden}" ]]; then
-    echo "Error: ActorTemplate ${TEMPLATE_NS}/${TEMPLATE_NAME} has no golden snapshot yet" >&2
-    exit 1
-  fi
+  # An ActorTemplate is an ateapi resource, not a Kubernetes one, so both the
+  # template and the snapshot it points at are read with kubectl-ate. The
+  # template's atespace is TEMPLATE_NS.
   ATE_BIN="${ATE_BIN:-kubectl-ate}"
   ATE=("${ATE_BIN}" "${KCTX[@]}")
   [[ -n "${ATE_ENDPOINT:-}" ]] && ATE+=(--endpoint="${ATE_ENDPOINT}")
   [[ -n "${ATE_TOKEN_FILE:-}" ]] && ATE+=(--token-file="${ATE_TOKEN_FILE}")
+  golden="$("${ATE[@]}" get actor-templates "${TEMPLATE_NAME}" --atespace "${TEMPLATE_NS}" -o json \
+    | python3 -c 'import sys,json; print(json.load(sys.stdin)["actorTemplates"][0].get("status",{}).get("goldenSnapshotStatus",{}).get("goldenSnapshot",{}).get("name",""))')"
+  if [[ -z "${golden}" ]]; then
+    echo "Error: ActorTemplate ${TEMPLATE_NS}/${TEMPLATE_NAME} has no golden snapshot yet" >&2
+    exit 1
+  fi
   GOLDEN_SNAPSHOT_URI="$("${ATE[@]}" get actor-snapshot "${golden}" -a ate-golden -o json \
     | python3 -c 'import sys,json; print(json.load(sys.stdin)["actorSnapshots"][0]["status"]["snapshotUri"])')"
 fi

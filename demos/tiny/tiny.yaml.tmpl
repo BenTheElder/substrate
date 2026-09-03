@@ -22,6 +22,10 @@
 # It targets a dedicated tainted node pool so a few thousand Actors cannot
 # disturb anything else on the cluster, and nothing else can land on the node
 # and skew the measurement.
+#
+# Only the Kubernetes objects live here. The ActorTemplates are ateapi
+# resources and are applied with kubectl-ate; see tiny-templates.yaml.tmpl and
+# tiny-fast-template.yaml.tmpl.
 
 apiVersion: v1
 kind: Namespace
@@ -92,102 +96,3 @@ spec:
       requests:
         cpu: "4"
         memory: 150Gi
-
----
-
-apiVersion: ate.dev/v1alpha1
-kind: ActorTemplate
-metadata:
-  name: tiny
-  namespace: ate-scale-tiny
-spec:
-  containers:
-  - name: tiny
-    image: ko://github.com/agent-substrate/substrate/demos/tiny
-    command:
-    - /ko-app/tiny
-    readyz:
-      httpGet:
-        path: /readyz
-        port: 80
-
-  # The denominator, set from MEASUREMENT rather than guesswork: an idle Actor
-  # of this template costs ~30MB of real RSS, so 56Mi is a realistic declaration
-  # with headroom. It is what decides where the run stops, because admission is
-  # per dimension: 220Gi / 56Mi = ~4022, just under the 4094 the pod-side /20 can
-  # number. Whichever of the two says no first is the finding.
-  #
-  # CPU is the ACTIVATION dial, not a steady-state cost: an idle Actor draws
-  # nothing, but a restore is ~0.85 core-seconds of real work, so the limit
-  # divides straight into activation latency -- 100m means ~8.5s per restore,
-  # 500m means ~1.7s. (10m is the cgroup floor and is NOT usable: readyz times
-  # out and even runsc delete gets killed.) Density does not pay for the higher
-  # limit, because the worker's CPU limit is a declaration and 4094 x 500m is
-  # only ever real if they all restore at once -- concurrency, not occupancy, is
-  # what spends it.
-  resources:
-    limits:
-      cpu: 500m
-      memory: 56Mi
-
-  workerSelector:
-    matchLabels:
-      workload: tiny
-
-  # No durable volume and no data snapshot: this measures the floor, and a
-  # per-Actor volume would add storage to what is meant to be a memory and
-  # namespace measurement.
-  snapshotsConfig:
-    onPause: Full
-    location: gs://${BUCKET_NAME}/ate-scale-tiny/
-
----
-
-# The same actor with 4x the CPU, to separate "a restore is expensive" from "a
-# restore is being throttled".
-#
-# Measured on a full worker: an actor's own cgroup stalls on its quota for 2.28s
-# of an ~11.8s activation, and 30.8% of its scheduling periods are throttled --
-# while the node itself sits at 5-16% of 32 cores. So the limit, not the
-# machine, is what the restore is waiting for. A restore is ~0.85 core-seconds
-# of real work, which at 500m cannot finish in under 1.7s however idle the node
-# is.
-#
-# CPU is an ACTIVATION dial, not a steady-state cost: an idle actor draws
-# nothing, so the worker's declared CPU only has to cover the actors restoring
-# at once, not all of them. That is why the pool can advertise far less CPU
-# than 4094 x 2000m and still admit a full worker.
-#
-# A separate template rather than an edit, because an ActorTemplate spec is
-# immutable -- the size is baked into its snapshots -- and because having both
-# side by side is what makes the comparison a comparison.
-
-apiVersion: ate.dev/v1alpha1
-kind: ActorTemplate
-metadata:
-  name: tiny-fast
-  namespace: ate-scale-tiny
-spec:
-  containers:
-  - name: tiny
-    image: ko://github.com/agent-substrate/substrate/demos/tiny
-    command:
-    - /ko-app/tiny
-    readyz:
-      httpGet:
-        path: /readyz
-        port: 80
-
-  resources:
-    limits:
-      cpu: "2"
-      memory: 56Mi
-
-  # The same pool as tiny: the point is to change one thing.
-  workerSelector:
-    matchLabels:
-      workload: tiny
-
-  snapshotsConfig:
-    onPause: Full
-    location: gs://${BUCKET_NAME}/ate-scale-tiny-fast/
