@@ -294,6 +294,24 @@ func main() {
 		csiDriverConfigLister,
 		clusterTrustBundleLister,
 	)
+	// Pre-download sandbox assets as SandboxConfigs appear/change so the first
+	// Run/Restore on this node hits the cache. Best-effort: on failure the
+	// on-demand fetch in ensureSandboxAssets still covers correctness.
+	//
+	// The informer is requested only now, after the factory's blocking
+	// WaitForCacheSync above, so it cannot hold up atelet startup when its
+	// list/watch fails (e.g. Forbidden while the ClusterRole rollout lags the
+	// binary): the reflector retries in the background and prewarm stays cold
+	// until it recovers.
+	sandboxConfigInformer := ateFactory.Api().V1alpha1().SandboxConfigs().Informer()
+	if err := startSandboxAssetPrewarm(ctx, sandboxConfigInformer, wmService, imageCache, microvmNodeCapable(hostDevRoot)); err != nil {
+		slog.ErrorContext(ctx, "Sandbox asset prewarm disabled", slog.Any("err", err))
+	}
+	// The factory only runs informers that exist when Start is called: the
+	// Start above predates the SandboxConfigs informer, so without this call
+	// it would never list or watch. Start is idempotent per informer — this
+	// launches the new one and leaves the already-running ones untouched.
+	ateFactory.Start(stopCh)
 	dialOpts, err := ateapiauth.DialOptions(ateapiauth.ClientConfig{
 		K8sClient:        k8sClient,
 		CAFile:           *ateapiCAFile,
