@@ -1509,6 +1509,7 @@ func (p *Persistence) BindActorToWorker(ctx context.Context, workerName string, 
 	}
 	// The store assigns identity. atespace is empty because Workers are
 	// global-scoped; the name is the Actor's UID, which is also the row key.
+	// This is the identity a first bind gets; a rebind keeps the recorded one.
 	assignment.Metadata = &ateapipb.ResourceMetadata{Name: actorUID}
 	setCreateMetadata(assignment.Metadata)
 	assignmentBytes, err := proto.Marshal(assignment)
@@ -1516,7 +1517,7 @@ func (p *Persistence) BindActorToWorker(ctx context.Context, workerName string, 
 		return fmt.Errorf("marshaling assignment: %w", err)
 	}
 
-	return p.writeAndAppendEventFor(ctx, store.WorkerEventUpdated, func(ctx context.Context, tx pgx.Tx) (*ateapipb.Worker, error) {
+	_, err = p.writeAndAppendEvent(ctx, store.WorkerEventUpdated, func(ctx context.Context, tx pgx.Tx) (*ateapipb.Worker, error) {
 		worker, err := getWorkerForUpdate(ctx, tx, workerName)
 		if err != nil {
 			return nil, err
@@ -1586,12 +1587,20 @@ func (p *Persistence) BindActorToWorker(ctx context.Context, workerName string, 
 		}
 		resources.Allocation(worker).Allocated = allocated
 
+		// A rebind updates the assignment already recorded, so re-stamping it
+		// as a create would make a retried claim look like a new subresource.
+		setUpdateMetadata(assignment.Metadata, previous.GetMetadata())
+		rebindBytes, err := proto.Marshal(assignment)
+		if err != nil {
+			return nil, fmt.Errorf("marshaling rebound assignment: %w", err)
+		}
+
 		// Guarded on worker_name so a claim that moved the Actor elsewhere is
 		// refused rather than overwritten.
 		rebind, err := tx.Exec(ctx, `
 			UPDATE worker_assignments SET proto = $3
 			WHERE actor_uid = $1 AND worker_name = $2`,
-			actorUID, workerName, assignmentBytes)
+			actorUID, workerName, rebindBytes)
 		if err != nil {
 			return nil, fmt.Errorf("rebinding actor %s on worker %s: %w", actorUID, workerName, err)
 		}
@@ -1603,11 +1612,12 @@ func (p *Persistence) BindActorToWorker(ctx context.Context, workerName string, 
 		}
 		return worker, nil
 	})
+	return err
 }
 
 func (p *Persistence) ReleaseActorFromWorker(ctx context.Context, workerName string, expectedVersion int64, actorUID string) (*ateapipb.Worker, error) {
 	var released *ateapipb.Worker
-	err := p.writeAndAppendEventFor(ctx, store.WorkerEventUpdated, func(ctx context.Context, tx pgx.Tx) (*ateapipb.Worker, error) {
+	_, err := p.writeAndAppendEvent(ctx, store.WorkerEventUpdated, func(ctx context.Context, tx pgx.Tx) (*ateapipb.Worker, error) {
 		released = nil
 		worker, err := getWorkerForUpdate(ctx, tx, workerName)
 		if err != nil {

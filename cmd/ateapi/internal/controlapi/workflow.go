@@ -145,6 +145,7 @@ func NewWorkerWorkflow(store workerWorkflowStore) *WorkerWorkflow {
 // WorkerWorkflow and nothing more.
 type workerWorkflowStore interface {
 	GetWorker(ctx context.Context, name string) (*ateapipb.Worker, error)
+	UpdateWorker(ctx context.Context, name string, precondition store.Precondition, mutate func(toUpdate *ateapipb.Worker) error) (*ateapipb.Worker, error)
 	DeleteWorker(ctx context.Context, name string, pre store.DeletePreconditions) (*ateapipb.Worker, error)
 	ListWorkerAssignments(ctx context.Context, workerName string, opts store.ListOptions) (store.ListResponse[*ateapipb.ActorAssignment], error)
 	GetActor(ctx context.Context, actorRef resources.ActorRef) (*ateapipb.Actor, error)

@@ -543,7 +543,13 @@ func TestDeleteWorker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeleteWorker() failed: %v", err)
 	}
-	if diff := cmp.Diff(seeded, got, protocmp.Transform()); diff != "" {
+	// Delete drains before it sweeps, so it removes one revision past what was
+	// seeded.
+	want := proto.Clone(seeded).(*ateapipb.Worker)
+	want.Metadata.Version = seeded.GetMetadata().GetVersion() + 1
+	want.Metadata.UpdateTime = got.GetMetadata().GetUpdateTime()
+	want.Status.State = ateapipb.WorkerState_WORKER_STATE_DRAINING
+	if diff := cmp.Diff(want, got, protocmp.Transform()); diff != "" {
 		t.Errorf("DeleteWorker() returned something other than the worker it removed (-want +got):\n%s", diff)
 	}
 	if _, err := persistence.GetWorker(ctx, apiWorkerName); err == nil {

@@ -1809,6 +1809,39 @@ func runWorkerAssignmentContractTests(t *testing.T, setup func(t *testing.T) sto
 		}
 	})
 
+	t.Run("BindActorToWorker_RebindKeepsAssignmentIdentity", func(t *testing.T) {
+		s := setup(t)
+		ctx := context.Background()
+
+		if _, err := s.CreateWorker(ctx, newTestWorker(testWorkerName, "pod-1")); err != nil {
+			t.Fatalf("CreateWorker failed: %v", err)
+		}
+		bind(t, s, testWorkerName, newTestAssignment("uid-1", 500, 1<<20))
+		first, err := s.GetWorkerAssignment(ctx, testWorkerName, "uid-1")
+		if err != nil {
+			t.Fatalf("GetWorkerAssignment failed: %v", err)
+		}
+
+		// A retried claim rebinds the same Actor, which updates the assignment
+		// already recorded. A reader watching uid or create_time must not see a
+		// different subresource.
+		bind(t, s, testWorkerName, newTestAssignment("uid-1", 250, 1<<21))
+		again, err := s.GetWorkerAssignment(ctx, testWorkerName, "uid-1")
+		if err != nil {
+			t.Fatalf("GetWorkerAssignment after rebind failed: %v", err)
+		}
+
+		if got, want := again.GetMetadata().GetUid(), first.GetMetadata().GetUid(); got != want {
+			t.Errorf("rebind changed the assignment uid to %q, want %q", got, want)
+		}
+		if diff := cmp.Diff(first.GetMetadata().GetCreateTime(), again.GetMetadata().GetCreateTime(), protocmp.Transform()); diff != "" {
+			t.Errorf("rebind moved create_time (-want +got):\n%s", diff)
+		}
+		if got, want := again.GetMetadata().GetVersion(), first.GetMetadata().GetVersion()+1; got != want {
+			t.Errorf("rebind left version at %d, want %d: an update advances it", got, want)
+		}
+	})
+
 	t.Run("BindActorToWorker_RefusedAdmissionLeavesNothingBehind", func(t *testing.T) {
 		s := setup(t)
 		ctx := context.Background()

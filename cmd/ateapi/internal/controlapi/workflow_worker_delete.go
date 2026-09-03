@@ -42,6 +42,31 @@ func (w *WorkerWorkflow) DeleteWorker(ctx context.Context, name string, pre stor
 		return nil, err
 	}
 
+	// Checked against the Worker the caller observed, before the drain below
+	// moves the version.
+	if err := pre.Check(worker.GetMetadata()); err != nil {
+		switch {
+		case errors.Is(err, store.ErrUIDConflict):
+			return nil, status.Errorf(codes.Aborted, "Worker %s does not have uid %s", name, pre.UID)
+		case errors.Is(err, store.ErrVersionConflict):
+			return nil, status.Error(codes.Aborted, "concurrent update conflict, please retry")
+		}
+		return nil, err
+	}
+
+	// Scheduling only places on ACTIVE Workers, so draining first stops a
+	// concurrent resume from binding to a page the sweep has already passed.
+	// The delete would cascade that assignment away and leave the Actor
+	// pointing at a Worker that is gone.
+	worker, err = w.ensureDraining(ctx, worker)
+	if err != nil {
+		return nil, err
+	}
+
+	// The drain moved the version, so only the uid guard still means anything:
+	// a Worker replaced by a new incarnation mid-delete is still refused.
+	pre.Version = 0
+
 	// Order matters: the delete is what erases the Actor's pointer at the
 	// Worker, so a failed release has to leave the record in place for the
 	// caller to rediscover and retry.
@@ -66,6 +91,29 @@ func (w *WorkerWorkflow) loadWorkerForDelete(ctx context.Context, name string) (
 		return nil, fmt.Errorf("while fetching worker: %w", err)
 	}
 	return worker, nil
+}
+
+// ensureDraining moves the Worker out of the state scheduling will place on,
+// and is a no-op for one already draining.
+func (w *WorkerWorkflow) ensureDraining(ctx context.Context, worker *ateapipb.Worker) (_ *ateapipb.Worker, err error) {
+	ctx, done := stepSpan(ctx, "DrainWorkerForDelete")
+	defer func() { err = done(err) }()
+
+	if worker.GetStatus().GetState() == ateapipb.WorkerState_WORKER_STATE_DRAINING {
+		return worker, nil
+	}
+	drained, err := w.store.UpdateWorker(ctx, worker.GetMetadata().GetName(), store.PreconditionFrom(worker),
+		func(toUpdate *ateapipb.Worker) error {
+			if toUpdate.Status == nil {
+				toUpdate.Status = &ateapipb.WorkerStatus{}
+			}
+			toUpdate.Status.State = ateapipb.WorkerState_WORKER_STATE_DRAINING
+			return nil
+		})
+	if err != nil {
+		return nil, fmt.Errorf("while draining worker for delete: %w", err)
+	}
+	return drained, nil
 }
 
 // ensureBoundActorsReleased resets every Actor bound to the Worker.

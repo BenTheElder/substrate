@@ -112,7 +112,8 @@ func Report(ctx context.Context, cfg ReportConfig) error {
 }
 
 // retryReport calls send until it succeeds or ctx ends, backing off between
-// attempts.
+// attempts. send is a parameter so the loop can be exercised without a socket
+// or certificates.
 func retryReport(ctx context.Context, send func() error, backoff time.Duration) error {
 	for {
 		err := send()
