@@ -69,6 +69,7 @@ const (
 	atunnelIdentityMountPath    = "/run/podidentity.podcert.ate.dev"
 	atunnelEgressTrustVolume    = "atunnel-egress-trust"
 	atunnelEgressTrustMountPath = "/run/servicedns.podcert.ate.dev"
+	ateomCapacityVolume         = "ateom-capacity"
 )
 
 // buildDeploymentApplyConfig constructs the SSA apply configuration for the
@@ -120,6 +121,10 @@ func buildDeploymentApplyConfig(wp *atev1alpha1.WorkerPool, otel ateomOTelSettin
 		WithEnv(ateomContainerEnv(otel)...).
 		WithVolumeMounts(
 			corev1ac.VolumeMount().
+				WithName(ateomCapacityVolume).
+				WithMountPath(ateomcapacity.CapacityMountPath).
+				WithReadOnly(true),
+			corev1ac.VolumeMount().
 				WithName("run-ateom").
 				WithMountPath(ateompath.BasePath).
 				WithMountPropagation(corev1.MountPropagationHostToContainer),
@@ -138,6 +143,13 @@ func buildDeploymentApplyConfig(wp *atev1alpha1.WorkerPool, otel ateomOTelSettin
 			WithRunAsUser(0).
 			WithRunAsGroup(0)).
 		WithVolumes(
+			corev1ac.Volume().
+				WithName(ateomCapacityVolume).
+				WithDownwardAPI(corev1ac.DownwardAPIVolumeSource().
+					WithItems(
+						resourceFieldRefFile(ateomcapacity.CPULimitFile, "limits.cpu", milliCores),
+						resourceFieldRefFile(ateomcapacity.MemoryLimitFile, "limits.memory", wholeBytes),
+					)),
 			corev1ac.Volume().
 				WithName("run-ateom").
 				WithHostPath(corev1ac.HostPathVolumeSource().
@@ -205,10 +217,6 @@ func buildDeploymentApplyConfig(wp *atev1alpha1.WorkerPool, otel ateomOTelSettin
 func ateomContainerEnv(otel ateomOTelSettings) []*corev1ac.EnvVarApplyConfiguration {
 	envs := []*corev1ac.EnvVarApplyConfiguration{
 		fieldRefEnv("POD_UID", "metadata.uid"),
-		// What the ateom reports as its capacity. A container without a limit
-		// gets the node's allocatable, which is what it can in fact use.
-		resourceFieldRefEnv(ateomcapacity.CPULimitEnv, "limits.cpu", milliCores),
-		resourceFieldRefEnv(ateomcapacity.MemoryLimitEnv, "limits.memory", wholeBytes),
 	}
 	if otel.Endpoint == "" {
 		return envs
@@ -243,7 +251,7 @@ func ateomContainerEnv(otel ateomOTelSettings) []*corev1ac.EnvVarApplyConfigurat
 	return envs
 }
 
-// Divisors for resourceFieldRefEnv. The downward API reports
+// Divisors for resourceFieldRefFile. The downward API reports
 // ceil(limit/divisor), so these are the units the value arrives in; the default
 // divisor of one core would round a fractional CPU limit up to a whole one.
 const (
@@ -251,15 +259,14 @@ const (
 	wholeBytes = "1"
 )
 
-// resourceFieldRefEnv reports a container resource in units of divisor.
-func resourceFieldRefEnv(name, resourceName, divisor string) *corev1ac.EnvVarApplyConfiguration {
-	return corev1ac.EnvVar().
-		WithName(name).
-		WithValueFrom(corev1ac.EnvVarSource().
-			WithResourceFieldRef(corev1ac.ResourceFieldSelector().
-				WithContainerName("ateom").
-				WithResource(resourceName).
-				WithDivisor(resource.MustParse(divisor))))
+// resourceFieldRefFile projects a container resource in units of divisor.
+func resourceFieldRefFile(path, resourceName, divisor string) *corev1ac.DownwardAPIVolumeFileApplyConfiguration {
+	return corev1ac.DownwardAPIVolumeFile().
+		WithPath(path).
+		WithResourceFieldRef(corev1ac.ResourceFieldSelector().
+			WithContainerName("ateom").
+			WithResource(resourceName).
+			WithDivisor(resource.MustParse(divisor)))
 }
 
 func fieldRefEnv(name, fieldPath string) *corev1ac.EnvVarApplyConfiguration {

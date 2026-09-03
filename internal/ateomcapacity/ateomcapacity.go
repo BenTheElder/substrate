@@ -22,7 +22,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/agent-substrate/substrate/internal/ateletdial"
@@ -32,11 +34,12 @@ import (
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
 )
 
-// Environment variables the atecontroller sets on the ateom container from the
-// downward API, in milli-cores and bytes.
+// Files the atecontroller projects into the ateom container from the downward
+// API, in milli-cores and bytes.
 const (
-	CPULimitEnv    = "ATEOM_CPU_LIMIT_MILLI"
-	MemoryLimitEnv = "ATEOM_MEMORY_LIMIT_BYTES"
+	CapacityMountPath = "/run/ateom-capacity"
+	CPULimitFile      = "cpu_milli"
+	MemoryLimitFile   = "memory_bytes"
 )
 
 // actorsPerAteom is how many actors an ateom hosts at once. One, today.
@@ -48,34 +51,44 @@ const (
 	maxReportBackoff     = 30 * time.Second
 )
 
-// FromEnv reads the ateom's compute limits out of the environment, as the
-// report it sends to the node-local atelet.
+// FromFiles reads the ateom's compute limits from its downward API volume, as
+// the report it sends to the node-local atelet.
 //
 // A limit that is missing or unparseable is reported as zero, which the control
 // plane reads as none: better to place nothing on a worker that cannot say what
 // it has than to invent a number for it.
 //
-// TODO: read the limits from the ateom's own cgroup instead. The environment is
-// fixed when the pod is created, so it goes stale under in-place pod resize.
-func FromEnv() *ateletpb.SetWorkerCapacityRequest {
+// TODO: Watch the projected files and report changes. For now we do not support
+// in-place Pod vertical scaling (IPPR); capacity is read once at startup.
+// NOTE: Please do not implement this yet. IPPR needs more general consideration.
+func FromFiles() *ateletpb.SetWorkerCapacityRequest {
+	return fromDir(CapacityMountPath)
+}
+
+func fromDir(dir string) *ateletpb.SetWorkerCapacityRequest {
 	return &ateletpb.SetWorkerCapacityRequest{
 		Capacity: &ateapipb.WorkerResources{
 			Actors: actorsPerAteom,
 			// A limit read as zero is left out, which the control plane reads
 			// as none of that dimension.
-			Resources: resources.CPUMemory(readLimit(CPULimitEnv), readLimit(MemoryLimitEnv)),
+			Resources: resources.CPUMemory(
+				readLimit(filepath.Join(dir, CPULimitFile)),
+				readLimit(filepath.Join(dir, MemoryLimitFile)),
+			),
 		},
 	}
 }
 
-func readLimit(name string) int64 {
-	raw, ok := os.LookupEnv(name)
-	if !ok {
+func readLimit(path string) int64 {
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		slog.Warn("Ignoring unreadable capacity limit", slog.String("path", path), slog.Any("err", err))
 		return 0
 	}
+	raw := strings.TrimSpace(string(contents))
 	value, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil || value < 0 {
-		slog.Warn("Ignoring unusable capacity limit", slog.String("env", name), slog.String("value", raw))
+		slog.Warn("Ignoring unusable capacity limit", slog.String("path", path), slog.String("value", raw))
 		return 0
 	}
 	return value
@@ -100,7 +113,7 @@ func Report(ctx context.Context, cfg ReportConfig) error {
 	if err != nil {
 		return fmt.Errorf("capacity report: %w", err)
 	}
-	capacity := FromEnv()
+	capacity := FromFiles()
 	err = retryReport(ctx, func() error {
 		return reportOnce(ctx, cfg.SocketPath, tlsConfig, capacity)
 	}, initialReportBackoff)

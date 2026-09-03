@@ -29,7 +29,7 @@ import (
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 )
 
-func TestFromEnv(t *testing.T) {
+func TestFromFiles(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		cpu    string
@@ -41,10 +41,15 @@ func TestFromEnv(t *testing.T) {
 		{name: "negative is none", cpu: "-1", memory: "-1", want: nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(CPULimitEnv, tc.cpu)
-			t.Setenv(MemoryLimitEnv, tc.memory)
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, CPULimitFile), []byte(tc.cpu), 0o600); err != nil {
+				t.Fatalf("writing CPU limit: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, MemoryLimitFile), []byte(tc.memory), 0o600); err != nil {
+				t.Fatalf("writing memory limit: %v", err)
+			}
 
-			got := FromEnv().GetCapacity()
+			got := fromDir(dir).GetCapacity()
 			if got.GetActors() != actorsPerAteom {
 				t.Errorf("actors = %d, want %d", got.GetActors(), actorsPerAteom)
 			}
@@ -55,14 +60,8 @@ func TestFromEnv(t *testing.T) {
 	}
 }
 
-func TestFromEnvUnset(t *testing.T) {
-	// t.Setenv first so the originals are restored for other tests.
-	t.Setenv(CPULimitEnv, "")
-	t.Setenv(MemoryLimitEnv, "")
-	os.Unsetenv(CPULimitEnv)
-	os.Unsetenv(MemoryLimitEnv)
-
-	got := FromEnv().GetCapacity()
+func TestFromFilesMissing(t *testing.T) {
+	got := fromDir(t.TempDir()).GetCapacity()
 	if got.GetResources() != nil {
 		t.Errorf("unset environment reported %v, want no compute", got.GetResources())
 	}
