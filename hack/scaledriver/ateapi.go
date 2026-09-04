@@ -86,6 +86,11 @@ func driveViaAteapi(ctx context.Context) error {
 			// --name-prefix documents and what a resume-only measurement needs.
 			return fmt.Errorf("create: %w", err)
 		}
+		if *mode == "create" {
+			// Create only, leaving the actors SUSPENDED for a later resume-only
+			// run to measure activation without the create in the same clock.
+			return nil
+		}
 		if _, err := client.ResumeActor(ctx, &ateapipb.ResumeActorRequest{
 			Actor: &ateapipb.ObjectRef{Atespace: *atespace, Name: name},
 		}); err != nil {
