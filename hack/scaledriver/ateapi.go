@@ -75,7 +75,17 @@ func driveViaAteapi(ctx context.Context) error {
 		name := actorName(n)
 		// Create then resume, which is what activating an actor through the API
 		// is. Both are timed together: splitting them would measure two RPCs
-		// rather than the thing a caller actually waits for.
+		// rather than the thing a caller actually waits for. Resume mode skips
+		// the create entirely: ateapi attempts the insert before it reports
+		// AlreadyExists, so even a no-op create pays the insert's cost.
+		if *mode == "resume" {
+			if _, err := client.ResumeActor(ctx, &ateapipb.ResumeActorRequest{
+				Actor: &ateapipb.ObjectRef{Atespace: *atespace, Name: name},
+			}); err != nil {
+				return fmt.Errorf("resume: %w", err)
+			}
+			return nil
+		}
 		if _, err := client.CreateActor(ctx, &ateapipb.CreateActorRequest{
 			Actor: &ateapipb.Actor{
 				Metadata:      &ateapipb.ResourceMetadata{Atespace: *atespace, Name: name},
