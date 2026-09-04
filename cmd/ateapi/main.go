@@ -33,6 +33,7 @@ import (
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store/atepg"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/workercache"
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/workerservice"
 	"github.com/agent-substrate/substrate/internal/ateapiauth"
 	"github.com/agent-substrate/substrate/internal/ateinterceptors"
 	"github.com/agent-substrate/substrate/internal/credbundle"
@@ -239,6 +240,7 @@ func main() {
 	reflection.Register(mux)
 	ateapipb.RegisterControlServer(mux, controlSrv)
 	ateapipb.RegisterActorIdentityServer(mux, actorIdentitySrv)
+	ateapipb.RegisterWorkerServiceServer(mux, workerservice.New(persistence))
 
 	readiness := &serverboot.Readiness{}
 	go serverboot.StartMetricsServer(ctx, serverboot.MetricsServerOptions{

@@ -424,7 +424,15 @@ func createWorkerPool(t *testing.T, tc *testContext, ns string, name string, lab
 		t.Fatalf("failed to create WorkerPool: %v", err)
 	}
 
-	err = wait.PollUntilContextTimeout(context.Background(), 100*time.Millisecond, 5*time.Second, true, func(ctx context.Context) (bool, error) {
+	waitForWorkerPoolInInformer(t, tc, ns, name)
+}
+
+// waitForWorkerPoolInInformer blocks until the pool the test just created is
+// visible to the scheduler, which reads it through an informer rather than the
+// API.
+func waitForWorkerPoolInInformer(t *testing.T, tc *testContext, ns, name string) {
+	t.Helper()
+	err := wait.PollUntilContextTimeout(context.Background(), 100*time.Millisecond, 5*time.Second, true, func(ctx context.Context) (bool, error) {
 		_, err := tc.workerPoolLister.WorkerPools(ns).Get(name)
 		return err == nil, nil
 	})
@@ -523,10 +531,15 @@ func createWorkerPod(t *testing.T, tc *testContext, ns string, name string, node
 			NodeName:        nodeName,
 			SandboxClass:    string(pool.Spec.SandboxClass),
 			Labels:          pool.GetLabels(),
+			// Capacity is not settable here: a Worker gets it from its own
+			// ateom's report, which the reportWorkerCapacity below stands in
+			// for. These pods declare no limits, so only the actor ceiling is
+			// reported; see setWorkerActorCapacity for tests needing more.
 		},
 	}); err != nil {
 		t.Fatalf("failed to register worker: %v", err)
 	}
+	reportWorkerCapacity(t, tc, string(createdPod.UID), 1)
 
 	// Wait for the worker to appear in worker cache.
 	err = wait.PollUntilContextTimeout(context.Background(), 10*time.Millisecond, 5*time.Second, true, func(ctx context.Context) (bool, error) {
@@ -557,7 +570,10 @@ func waitForWorkerAvailable(t *testing.T, tc *testContext, workerName string) {
 		if err != nil {
 			return false, nil
 		}
-		return worker.GetStatus().GetState() == ateapipb.WorkerState_WORKER_STATE_ACTIVE && worker.GetStatus().GetAssignment() == nil, nil
+		// Hosting nothing is what "available" means, and the allocation total
+		// is how a cached Worker reports it: it does not carry the records.
+		return worker.GetStatus().GetState() == ateapipb.WorkerState_WORKER_STATE_ACTIVE &&
+			worker.GetStatus().GetAllocation().GetAllocated().GetActors() == 0, nil
 	})
 	if err != nil {
 		t.Fatalf("failed to wait for worker %s to become available: %v", workerName, err)
