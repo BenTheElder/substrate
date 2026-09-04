@@ -72,7 +72,7 @@ const (
 )
 
 var (
-	mode = pflag.String("mode", "restore", "restore (pack actors on) or terminate (tear them back down).")
+	mode = pflag.String("mode", "restore", "restore (create and activate), create (create only, leaving actors suspended), or terminate (tear them back down).")
 	// The whole point of having both: the difference between them IS the control
 	// plane's share of an activation, and nothing else measures it. Same process,
 	// same concurrency, same clock -- only the layer being dialed changes.
