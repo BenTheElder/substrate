@@ -17,6 +17,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"os"
 
 	"github.com/spf13/pflag"
@@ -79,7 +81,9 @@ func driveViaAteapi(ctx context.Context) error {
 				Metadata:      &ateapipb.ResourceMetadata{Atespace: *atespace, Name: name},
 				ActorTemplate: &ateapipb.ObjectRef{Atespace: *templateNamespace, Name: *templateName},
 			},
-		}); err != nil {
+		}); err != nil && status.Code(err) != codes.AlreadyExists {
+			// An actor left by a previous run is resumed again, which is what
+			// --name-prefix documents and what a resume-only measurement needs.
 			return fmt.Errorf("create: %w", err)
 		}
 		if _, err := client.ResumeActor(ctx, &ateapipb.ResumeActorRequest{
