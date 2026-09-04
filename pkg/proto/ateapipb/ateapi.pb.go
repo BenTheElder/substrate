@@ -2133,7 +2133,6 @@ type ActorTemplate struct {
 	// +k8s:listMapKey=name
 	Volumes []*Volume `protobuf:"bytes,4,rep,name=volumes,proto3" json:"volumes,omitempty"`
 	// +k8s:required
-	// +k8s:customValidation # on_commit must be a subset of on_pause
 	SnapshotsConfig *SnapshotsConfig `protobuf:"bytes,5,opt,name=snapshots_config,json=snapshotsConfig,proto3" json:"snapshots_config,omitempty"`
 	// sandbox_config selects the sandbox runtime this version's actors run on.
 	//
@@ -2520,6 +2519,7 @@ func (x *SandboxConfig) GetConfigName() string {
 	return ""
 }
 
+// +k8s:customValidation # on_commit must be a subset of on_pause
 type SnapshotsConfig struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// on_pause selects what is captured during pause actor. UNSPECIFIED is
@@ -2691,6 +2691,9 @@ type Container struct {
 	// +k8s:listType=atomic
 	// +k8s:eachVal=+k8s:maxLength=4096 # argv strings; guardrail, not a contract
 	Args []string `protobuf:"bytes,4,rep,name=args,proto3" json:"args,omitempty"`
+	// Env variables to set in the container's process environment. Unlike
+	// Kubernetes, $(VAR_NAME) references are NOT expanded in this field.
+	//
 	// +k8s:optional
 	// +k8s:maxItems=32
 	// +k8s:listType=map # each variable is set at most once
