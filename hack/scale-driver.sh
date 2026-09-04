@@ -49,6 +49,10 @@ NAME_PREFIX="${NAME_PREFIX:-d}"
 # Generous by default: the ateom's 30s scores a queued activation as a failed
 # one, which reads as a ceiling that is not there.
 READYZ_TIMEOUT_SECONDS="${READYZ_TIMEOUT_SECONDS:-300}"
+# Every shard holds until this instant, so their rates add up to the fleet's.
+# Long enough for the shard pods to schedule and pull the image.
+START_DELAY_SECONDS="${START_DELAY_SECONDS:-120}"
+START_AT="${START_AT:-$(date -u -v+"${START_DELAY_SECONDS}"S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "+${START_DELAY_SECONDS} seconds" +%Y-%m-%dT%H:%M:%SZ)}"
 TEMPLATE_NS="${TEMPLATE_NS:-ate-scale-tiny}"
 TEMPLATE_NAME="${TEMPLATE_NAME:-tiny}"
 # The pool defaults to the template's own fixture; the two only differ if a
@@ -89,7 +93,7 @@ if [[ -z "${GOLDEN_SNAPSHOT_URI}" && "${VIA}" == "atelet" ]]; then
 fi
 log "golden snapshot: ${GOLDEN_SNAPSHOT_URI}"
 
-log "via=${VIA} mode=${MODE} count=${COUNT} parallel=${PARALLEL} prefix=${NAME_PREFIX} shards=${SHARDS}"
+log "via=${VIA} mode=${MODE} count=${COUNT} parallel=${PARALLEL} prefix=${NAME_PREFIX} shards=${SHARDS} start_at=${START_AT}"
 
 # Restart policy is Never, so previous runs leave Completed pods behind, and a
 # pod's spec is immutable, so re-applying over one fails rather than replacing
@@ -112,6 +116,7 @@ subst_common() {
       -e "s|\${TEMPLATE_NAME}|${TEMPLATE_NAME}|g" \
       -e "s|\${ATESPACE}|${ATESPACE}|g" \
       -e "s|\${READYZ_TIMEOUT_SECONDS}|${READYZ_TIMEOUT_SECONDS}|g" \
+      -e "s|\${START_AT}|${START_AT}|g" \
       -e "s|\${GOLDEN_SNAPSHOT_URI}|${GOLDEN_SNAPSHOT_URI}|g" \
       -e "s|\${DRIVER_NODESELECTOR}|${DRIVER_NODESELECTOR}|g"
 }
