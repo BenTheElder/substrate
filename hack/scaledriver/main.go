@@ -95,6 +95,11 @@ var (
 	parallel = pflag.Int("parallel", 16, "How many activations to keep in flight.")
 	prefix   = pflag.String("name-prefix", "d", "Actor name prefix. Scope it per run: a name left behind by a previous run restores again rather than failing, which quietly measures the wrong thing.")
 	timeout  = pflag.Duration("timeout", 5*time.Minute, "Per-activation deadline.")
+	// A fleet of shards scheduling onto a few nodes starts over a minute, and
+	// summing their per-shard rates then overstates the fleet's. Holding every
+	// shard until one wall-clock instant makes since_start_ms comparable across
+	// shards, and the aggregate rate a real one.
+	startAt = pflag.String("start-at", "", "RFC3339 instant to hold at before issuing. Empty starts immediately.")
 
 	credBundle = pflag.String("cred-bundle", "/run/podidentity.podcert.ate.dev/credential-bundle.pem", "Client credential bundle presented to atelet.")
 	caCerts    = pflag.String("ca-certs", "/run/podidentity.podcert.ate.dev/trust-bundle.pem", "CA bundle used to verify atelet.")
@@ -235,9 +240,25 @@ func terminateCall(client ateletpb.AteomHerderClient, workerUID string, spec *at
 // costing more than activation 0 is what says the worker is degrading, and that
 // is invisible in an average.
 func drive(ctx context.Context, call func(context.Context, int) error) error {
+	if *startAt != "" {
+		at, err := time.Parse(time.RFC3339, *startAt)
+		if err != nil {
+			return fmt.Errorf("parsing --start-at: %w", err)
+		}
+		if late := time.Since(at); late > 0 {
+			fmt.Fprintf(os.Stderr, "start barrier already passed by %s; starting now\n", late.Round(time.Millisecond))
+		} else {
+			select {
+			case <-time.After(-late):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
 	fmt.Println("n,done,elapsed_ms,since_start_ms,ok,error")
 
 	start := time.Now()
+	fmt.Fprintf(os.Stderr, "started_at_epoch_ms=%d\n", start.UnixMilli())
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, *parallel)
 	var mu sync.Mutex
