@@ -116,9 +116,7 @@ func seed(ctx context.Context, st store.Interface, run string) ([]string, error)
 				Status: &ateapipb.WorkerStatus{
 					State: ateapipb.WorkerState_WORKER_STATE_ACTIVE,
 					// The capacity a reporting ateom would have landed.
-					Allocation: &ateapipb.WorkerAllocation{
-						Capacity: &ateapipb.WorkerResources{Actors: 4094, Resources: resources.CPUMemory(64000, 256<<30)},
-					},
+					Capacity: &ateapipb.WorkerResources{Actors: 4094, Resources: resources.CPUMemory(64000, 256<<30)},
 				},
 			}); err != nil {
 				errs[i] = fmt.Errorf("creating worker %d: %w", i, err)
