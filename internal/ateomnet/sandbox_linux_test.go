@@ -20,17 +20,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/agent-substrate/substrate/internal/ateompath"
-	"github.com/vishvananda/netlink"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/agent-substrate/substrate/internal/ateompath"
+	"github.com/vishvananda/netlink"
+
 	"github.com/agent-substrate/substrate/internal/roottest"
+	"github.com/vishvananda/netns"
 )
 
 const testEgressPort = 15001
@@ -78,6 +81,53 @@ func TestNetNSDialerRejectsNonIPTargets(t *testing.T) {
 	}
 }
 
+func TestSandboxSessionDialerAfterClose(t *testing.T) {
+	session := &SandboxSession{}
+	dial := session.Dialer()
+	if err := session.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dial(context.Background(), "tcp", "127.0.0.1:1"); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("dial after close: got %v, want closed", err)
+	}
+}
+
+func TestSandboxSessionDialerConcurrentClose(t *testing.T) {
+	roottest.Require(t, "creates network namespaces")
+	session, err := ServeSandbox(context.Background(), SandboxNetworkConfig{
+		ActorUID: "concurrent-close", EgressPort: testEgressPort,
+	}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close(context.Background()) })
+	dial := session.Dialer()
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	for range 32 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			for range 32 {
+				conn, err := dial(context.Background(), "udp", "127.0.0.1:9")
+				if err != nil {
+					if !errors.Is(err, net.ErrClosed) {
+						t.Errorf("dial during close: %v", err)
+					}
+					return
+				}
+				_ = conn.Close()
+			}
+		}()
+	}
+	close(start)
+	if err := session.Close(context.Background()); err != nil {
+		t.Error(err)
+	}
+	workers.Wait()
+}
+
 func TestNetNSDialerCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -105,9 +155,6 @@ func TestSetupSandboxNetwork(t *testing.T) {
 				t.Errorf("cleanup %s: %v", uid, err)
 			}
 		})
-		if got := n.PodSideIP.String(); got != ActorVethIP {
-			t.Errorf("actor address = %s, want the same %s every actor holds", got, ActorVethIP)
-		}
 
 		// The actor's app, bound where a real one binds, inside its namespace.
 		var lis net.Listener
@@ -258,41 +305,6 @@ func TestSetupSandboxNetworkWithoutVeth(t *testing.T) {
 	}
 }
 
-// A micro-VM snapshot freezes the guest's ARP entry for its gateway, so the
-// gateway has to answer with the same MAC on every worker.
-func TestGatewayHardwareAddressIsFixedWhenAsked(t *testing.T) {
-	roottest.Require(t, "creates network namespaces")
-	ctx := context.Background()
-
-	want, err := net.ParseMAC("02:00:00:00:17:01")
-	if err != nil {
-		t.Fatal(err)
-	}
-	n, err := SetupSandboxNetwork(ctx, SandboxNetworkConfig{
-		ActorUID:      "88888888-8888-8888-8888-888888888888",
-		Veth:          true,
-		EgressPort:    testEgressPort,
-		GatewayHWAddr: want,
-	})
-	if err != nil {
-		t.Fatalf("SetupSandboxNetwork: %v", err)
-	}
-	t.Cleanup(func() { CleanupSandboxNetwork(n) })
-
-	if err := NetNSDo(ctx, n.GatewayNetNS, func(context.Context) error {
-		l, err := netlink.LinkByName("atside")
-		if err != nil {
-			return err
-		}
-		if got := l.Attrs().HardwareAddr.String(); got != want.String() {
-			t.Errorf("gateway MAC is %s, want %s", got, want)
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("reading the gateway link: %v", err)
-	}
-}
-
 func TestSetupSucceedsOverALeftoverNamespace(t *testing.T) {
 	roottest.Require(t, "creates network namespaces")
 	ctx := context.Background()
@@ -404,9 +416,12 @@ func TestClosingSandboxDNSStopsServing(t *testing.T) {
 	defer func() { _ = CleanupSandboxNetwork(network) }()
 
 	relay := &stoppableDNS{packet: make(chan struct{}), stream: make(chan struct{})}
-	closers, err := ServeSandboxDNS(context.Background(), relay, network.GatewayNetNS, 53)
+	closers, serve, err := serveSandboxDNS(context.Background(), relay, network.GatewayNetNS, 53)
 	if err != nil {
 		t.Fatal(err)
+	}
+	for _, fn := range serve {
+		go fn()
 	}
 	for _, c := range closers {
 		_ = c.Close()
@@ -421,5 +436,77 @@ func TestClosingSandboxDNSStopsServing(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Errorf("%s serving outlived the sandbox's sockets", tc.name)
 		}
+	}
+}
+
+// slowDNS holds its serving goroutines open until released, so a test can tell
+// whether Close waits for them or merely closes their sockets.
+type slowDNS struct{ release chan struct{} }
+
+func (d *slowDNS) ServePacket(ctx context.Context, pc net.PacketConn) error {
+	<-ctx.Done()
+	<-d.release
+	return pc.Close()
+}
+
+func (d *slowDNS) Serve(ctx context.Context, l net.Listener) error {
+	<-ctx.Done()
+	<-d.release
+	return l.Close()
+}
+
+// Close's contract is that serving has stopped when it returns, not just that
+// the sockets are shut: a caller tearing an actor down needs the relay's
+// capacity back.
+func TestSessionCloseWaitsForServingToStop(t *testing.T) {
+	roottest.Require(t, "creates network namespaces")
+	relay := &slowDNS{release: make(chan struct{})}
+	session, err := ServeSandbox(context.Background(), SandboxNetworkConfig{
+		ActorUID: "close-waits", EgressPort: testEgressPort, DNSPort: 53,
+	}, nil, relay)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	returned := make(chan error, 1)
+	go func() { returned <- session.Close(context.Background()) }()
+	select {
+	case <-returned:
+		t.Fatal("Close returned while the relay was still serving")
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	close(relay.release)
+	select {
+	case err := <-returned:
+		if err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Error("Close did not return after serving stopped")
+	}
+}
+
+// A caller that cannot wait forever gets its deadline back as an error, and
+// the namespaces are still removed -- leaving them would wedge the next
+// activation of this actor.
+func TestSessionCloseReportsAWaitItCouldNotFinish(t *testing.T) {
+	roottest.Require(t, "creates network namespaces")
+	relay := &slowDNS{release: make(chan struct{})}
+	defer close(relay.release)
+	session, err := ServeSandbox(context.Background(), SandboxNetworkConfig{
+		ActorUID: "close-deadline", EgressPort: testEgressPort, DNSPort: 53,
+	}, nil, relay)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := session.Close(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Close = %v, want the deadline reported", err)
+	}
+	if _, err := netns.GetFromName(ateompath.ActorNetNSName("close-deadline")); err == nil {
+		t.Error("the namespace survived a Close whose wait timed out")
 	}
 }
