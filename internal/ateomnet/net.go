@@ -170,6 +170,40 @@ func CleanupActorNetwork(ctx context.Context, interiorNetNS netns.NsHandle) erro
 	return cleanupErr
 }
 
+// AllowUnprivilegedPorts lets the current network namespace bind ports below
+// 1024 without CAP_NET_BIND_SERVICE. The sysctl is per-namespace, so this
+// grants nothing outside the namespace it is called in -- which is how atunnel
+// answers a sandbox's DNS on 53 without the worker holding the capability.
+func AllowUnprivilegedPorts() error {
+	return setNetSysctl("net/ipv4/ip_unprivileged_port_start", "0")
+}
+
+// setNetSysctl writes value to the named sysctl in the current network
+// namespace, and is a no-op when it already reads that way.
+//
+// Without privileged, the runtime bind-mounts /proc/sys read-only. The worker
+// holds CAP_SYS_ADMIN and uses no user namespace, so the flag is not locked:
+// clear it, write, restore.
+func setNetSysctl(key, value string) error {
+	path := "/proc/sys/" + key
+	if b, err := os.ReadFile(path); err == nil && strings.TrimSpace(string(b)) == value {
+		return nil
+	}
+	if err := os.WriteFile(path, []byte(value+"\n"), 0o644); err == nil {
+		return nil
+	}
+	if err := unix.Mount("none", "/proc/sys", "", unix.MS_BIND|unix.MS_REMOUNT, ""); err != nil {
+		return fmt.Errorf("while remounting /proc/sys read-write to set %s: %w", key, err)
+	}
+	defer func() {
+		_ = unix.Mount("none", "/proc/sys", "", unix.MS_BIND|unix.MS_REMOUNT|unix.MS_RDONLY, "")
+	}()
+	if err := os.WriteFile(path, []byte(value+"\n"), 0o644); err != nil {
+		return fmt.Errorf("while setting %s in worker pod netns: %w", key, err)
+	}
+	return nil
+}
+
 // EnableIPv4Forwarding enables IPv4 forwarding in the current network namespace.
 func EnableIPv4Forwarding() error {
 	// Forwarding is required because actor packets now enter the worker pod via

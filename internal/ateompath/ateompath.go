@@ -82,6 +82,18 @@ func AteletOTLPSocketPath() string {
 
 // AteomsDir is the parent of every per-ateom directory. Each ateom creates
 // AteomPath(podUID) under it when it boots, so listing this directory is how a
+// ActorNetNSName is the named network namespace one actor's sandbox runs in.
+// Per actor rather than per pod, so a worker can hold several sandboxes whose
+// networks cannot see each other.
+func ActorNetNSName(actorUID string) string {
+	return "ateom-actor:" + actorUID
+}
+
+// ActorNetNSPath is where the kernel exposes that namespace.
+func ActorNetNSPath(actorUID string) string {
+	return filepath.Join("/run/netns", ActorNetNSName(actorUID))
+}
+
 // scraper with no prior knowledge discovers the node's ateoms.
 func AteomsDir() string {
 	return filepath.Join(BasePath, "ateoms")
