@@ -262,15 +262,10 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 	tLowers := time.Now()
 	tDurable := tLowers
 
-	// Networking: rebuild the per-activation veth + tap; the snapshot's virtio-net
-	// is fd-backed, so CH needs fresh tap FDs (net_fds) on restore.
-	if err := ateomnet.SetupActorNetwork(ctx, ateomnet.NetworkConfig{
-		InteriorNetNS:      s.interiorNetNS,
-		HostVethHWAddr:     hostVethHWAddr,
-		SweepInteriorLinks: true,
-		EgressRedirectPort: s.egressRedirectPort(p.egressGateway != nil),
-	}); err != nil {
-		return fmt.Errorf("while setting up actor network: %w", err)
+	// Networking: rebuild the actor's namespace; the snapshot's virtio-net is
+	// fd-backed, so CH needs fresh tap FDs (net_fds) on restore.
+	if err := s.prepareSandboxNetwork(ctx, actorUID); err != nil {
+		return err
 	}
 	defer func() {
 		if retErr != nil {
@@ -279,7 +274,7 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 			if cleanupErr := s.deactivateActorNetworking(cleanupCtx); cleanupErr != nil {
 				slog.WarnContext(cleanupCtx, "Failed to deactivate actor networking after Restore failure", slog.Any("err", cleanupErr))
 			}
-			if cleanupErr := ateomnet.CleanupActorNetwork(cleanupCtx, s.interiorNetNS); cleanupErr != nil {
+			if cleanupErr := s.releaseSandboxNetwork(cleanupCtx); cleanupErr != nil {
 				slog.WarnContext(cleanupCtx, "Failed to clean up actor network after Restore failure", slog.Any("err", cleanupErr))
 			}
 			// Detach any bundle rootfs overlays mounted by buildActorContainers
@@ -301,7 +296,7 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 		}
 	}()
 	for i, nd := range netDevs {
-		files, terr := s.setupRestoreTap(ctx, fmt.Sprintf("tap%d_kata", i), nd.QueuePairs)
+		files, terr := setupActorTap(ctx, s.sandboxNetNS(), fmt.Sprintf("tap%d_kata", i), nd.QueuePairs)
 		if terr != nil {
 			return fmt.Errorf("while building restore tap for %s: %w", nd.ID, terr)
 		}
@@ -352,7 +347,7 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 	tResume := time.Now()
 
 	// Block until every readyz-enabled container reports 200.
-	if err := readyz.WaitAll(ctx, containers, ateomnet.ActorVethIP, nil); err != nil {
+	if err := readyz.WaitAll(ctx, containers, ateomnet.ActorVethIP, readyz.DialFunc(s.sandbox.Dialer())); err != nil {
 		return fmt.Errorf("while waiting for container readyz: %w", err)
 	}
 
