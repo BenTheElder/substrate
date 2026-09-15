@@ -52,14 +52,23 @@ const (
 	maxIdleConnsHost      = 1
 )
 
+// DialFunc reaches the actor. Needed when the actor is not addressable from
+// the caller's own network namespace.
+type DialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
+
 // HTTPClient builds a keep-alive HTTP client tuned for fast, repeated
 // probing of a single endpoint. Exposed as a var so tests can substitute a
 // transport that targets a test server's loopback address.
-var HTTPClient = func() *http.Client {
+var HTTPClient = func() *http.Client { return clientVia(nil) }
+
+func clientVia(dial DialFunc) *http.Client {
+	if dial == nil {
+		dial = (&net.Dialer{Timeout: RequestTimeout}).DialContext
+	}
 	tr := &http.Transport{
 		DisableCompression:    true,
 		MaxIdleConnsPerHost:   maxIdleConnsHost,
-		DialContext:           (&net.Dialer{Timeout: RequestTimeout}).DialContext,
+		DialContext:           dial,
 		ResponseHeaderTimeout: RequestTimeout,
 	}
 	return &http.Client{Transport: tr, Timeout: RequestTimeout}
@@ -74,6 +83,11 @@ var HTTPClient = func() *http.Client {
 // bare codes.Internal, leaving atelet reading UNKNOWN. The ErrorInfo detail is
 // what carries it. Internal and no crash directive both match today's behavior.
 func WaitAll(ctx context.Context, containers []*ateompb.Container, actorIP string) error {
+	return WaitAllVia(ctx, containers, actorIP, nil)
+}
+
+// WaitAllVia is WaitAll reaching the actor through dial.
+func WaitAllVia(ctx context.Context, containers []*ateompb.Container, actorIP string, dial DialFunc) error {
 	g, gctx := errgroup.WithContext(ctx)
 	for _, ac := range containers {
 		if ac.GetReadyz() == nil {
@@ -81,7 +95,7 @@ func WaitAll(ctx context.Context, containers []*ateompb.Container, actorIP strin
 		}
 		ac := ac
 		g.Go(func() error {
-			return Wait(gctx, ac.GetName(), ac.GetReadyz(), actorIP)
+			return WaitVia(gctx, ac.GetName(), ac.GetReadyz(), actorIP, dial)
 		})
 	}
 	err := g.Wait()
@@ -94,12 +108,20 @@ func WaitAll(ctx context.Context, containers []*ateompb.Container, actorIP strin
 // Wait polls the configured HTTP endpoint until it returns 200, the context
 // is cancelled, or the overall deadline is exceeded.
 func Wait(ctx context.Context, containerName string, probe *ateompb.Readyz, actorIP string) error {
+	return WaitVia(ctx, containerName, probe, actorIP, nil)
+}
+
+// WaitVia is Wait reaching the actor through dial.
+func WaitVia(ctx context.Context, containerName string, probe *ateompb.Readyz, actorIP string, dial DialFunc) error {
 	url, err := URL(probe, actorIP)
 	if err != nil {
 		return fmt.Errorf("invalid readyz config for %q: %w", containerName, err)
 	}
 
 	client := HTTPClient()
+	if dial != nil {
+		client = clientVia(dial)
+	}
 	defer client.CloseIdleConnections()
 
 	timeout := overallTimeout(probe)
