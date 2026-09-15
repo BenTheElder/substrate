@@ -29,64 +29,34 @@ import (
 )
 
 const (
-	// DNSPort is where the relay answers. An actor's resolver is the gateway
-	// address, which is the same in every actor on every worker, so a snapshot
-	// may freeze it and still find the relay when it is restored elsewhere.
+	// DNSPort is the relay port on the sandbox's gateway.
 	DNSPort = 53
 
-	// maxDNSDatagram is the largest UDP payload there is. The relay parses no
-	// DNS, so it cannot know what buffer size a query advertised: anything
-	// smaller would chop a datagram the actor and its resolver had agreed on,
-	// and forward the remains as if they were the whole answer.
+	// Read complete UDP datagrams without truncating EDNS responses.
 	maxDNSDatagram = 65535
 
-	// maxInFlightDNS bounds the queries being resolved at once. A sandbox is
-	// untrusted and can ask as fast as it likes; past this, queries are dropped
-	// rather than turned into goroutines and upstream sockets, which is what a
-	// loaded resolver does and what a client retries.
+	// Drop excess UDP queries to bound goroutines and upstream sockets.
 	maxInFlightDNS = 64
 
-	// maxDNSConnections bounds concurrent TCP queries, for the same reason.
+	// maxDNSConnections bounds open TCP connections.
 	maxDNSConnections = 16
 
-	// dnsTCPTimeout bounds one TCP query's whole life, so a sandbox cannot hold
-	// connections open by never sending anything. RFC 7766 leaves the timeout
-	// to the server and expects clients to reconnect.
+	// dnsTCPTimeout limits connection lifetime, including idle clients.
 	dnsTCPTimeout = 30 * time.Second
 
-	// dnsExchangeTimeout bounds one upstream query, so a dead resolver costs the
-	// actor a retry against the next one rather than a hang.
+	// dnsExchangeTimeout bounds each upstream attempt.
 	dnsExchangeTimeout = 5 * time.Second
 )
 
-// DNSRelay answers an actor's DNS by forwarding it to the worker pod's own
-// resolvers.
-//
-// The actor addresses a resolver it has no route to; the relay holds the socket
-// it lands on, in the actor's namespace, and re-asks the question from the pod's
-// namespace where cluster DNS is reachable. Messages are forwarded verbatim --
-// the relay parses no DNS -- so IDs, EDNS options and anything else survive
-// untouched.
-//
-// This is the DNS half of routing everything through atunnel: without it an
-// actor's resolution either fails or escapes unseen.
-//
-// Deliberately not sent through the actor's egress tunnel. Doing so would need
-// a DNS parser, UDP-to-TCP translation, and an egress policy that admits the
-// resolver, and would make readiness depend on the egress path and on the
-// actor's certificate already being minted. The cost is that a name lookup is
-// not checked against egress policy the way a connection is; the actor cannot
-// choose its resolver, so what remains is which names it may resolve, and this
-// relay is where such a check would go.
+// DNSRelay forwards UDP and TCP DNS unchanged to the worker pod's resolvers.
+// It listens in the sandbox's gateway namespace and dials from the worker's.
+// DNS bypasses the egress tunnel and is not checked against egress policy.
 type DNSRelay struct {
 	upstreams []string
-	// dial reaches the upstream resolver. The default dials from wherever the
-	// relay runs, which is the pod's namespace: the listening socket is the only
-	// thing that belongs to the actor.
+	// dial reaches upstream resolvers from the worker namespace.
 	dial func(ctx context.Context, network, address string) (net.Conn, error)
 
-	// inFlight and connections bound the work one sandbox can make the worker
-	// do. Both are held for the life of a query rather than a rate.
+	// Limits are shared across all sandboxes using this relay.
 	inFlight    chan struct{}
 	connections chan struct{}
 }
@@ -110,9 +80,7 @@ func NewDNSRelay(upstreams []string) (*DNSRelay, error) {
 	}, nil
 }
 
-// ResolvConfNameservers reads the nameservers out of a resolv.conf, as
-// "host:port". The worker pod's own file is the intended argument: an actor
-// then resolves exactly what the pod resolves.
+// ResolvConfNameservers reads nameservers from resolv.conf as "host:53".
 func ResolvConfNameservers(path string) ([]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -196,8 +164,7 @@ func (r *DNSRelay) ServePacket(ctx context.Context, pc net.PacketConn) error {
 	}
 }
 
-// Serve answers TCP queries, which is where a resolver goes when an answer does
-// not fit in a datagram.
+// Serve relays TCP DNS connections until ctx is canceled or the listener closes.
 func (r *DNSRelay) Serve(ctx context.Context, listener net.Listener) error {
 	done := make(chan struct{})
 	go func() {
@@ -268,9 +235,7 @@ func (r *DNSRelay) exchangeUDP(ctx context.Context, query []byte) ([]byte, error
 	return nil, fmt.Errorf("atunnel: no upstream resolver answered: %w", errs)
 }
 
-// relayTCP pipes one DNS connection to an upstream. DNS over TCP is a
-// length-prefixed stream, and copying it whole means the relay never has to
-// know that.
+// relayTCP copies a DNS stream without parsing its length-prefixed messages.
 func (r *DNSRelay) relayTCP(ctx context.Context, downstream net.Conn) {
 	defer downstream.Close()
 
@@ -291,10 +256,7 @@ func (r *DNSRelay) relayTCP(ctx context.Context, downstream net.Conn) {
 	}
 	defer upstream.Close()
 
-	// A copy in progress does not watch ctx, and the connection slot it holds
-	// belongs to the worker rather than to the sandbox that opened it. Teardown
-	// must therefore take the connection down rather than wait out the
-	// deadline, or the next actor finds the slots still taken.
+	// Cancel active copies on teardown to release the worker's connection slots.
 	relayDone := make(chan struct{})
 	defer close(relayDone)
 	go func() {

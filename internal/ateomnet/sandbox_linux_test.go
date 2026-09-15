@@ -20,24 +20,69 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/agent-substrate/substrate/internal/ateompath"
-	"github.com/vishvananda/netlink"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/agent-substrate/substrate/internal/ateompath"
+	"github.com/vishvananda/netlink"
 
 	"github.com/agent-substrate/substrate/internal/roottest"
 )
 
-// Two actors, each in its own namespace, both holding the same address, both
-// reached through their own dialer. This is the whole POC3 premise in one test.
-// testEgressPort stands in for atunnel's egress listener, which the ateom
-// passes in from its own flag.
 const testEgressPort = 15001
+
+func TestSandboxSessionDialerAfterClose(t *testing.T) {
+	session := &SandboxSession{}
+	dial := session.Dialer()
+	if err := session.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dial(context.Background(), "tcp", "127.0.0.1:1"); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("dial after close: got %v, want closed", err)
+	}
+}
+
+func TestSandboxSessionDialerConcurrentClose(t *testing.T) {
+	roottest.Require(t, "creates network namespaces")
+	session, err := ServeSandbox(context.Background(), SandboxNetworkConfig{
+		ActorUID: "concurrent-close", EgressPort: testEgressPort,
+	}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close(context.Background()) })
+	dial := session.Dialer()
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	for range 32 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			for range 32 {
+				conn, err := dial(context.Background(), "udp", "127.0.0.1:9")
+				if err != nil {
+					if !errors.Is(err, net.ErrClosed) {
+						t.Errorf("dial during close: %v", err)
+					}
+					return
+				}
+				_ = conn.Close()
+			}
+		}()
+	}
+	close(start)
+	if err := session.Close(context.Background()); err != nil {
+		t.Error(err)
+	}
+	workers.Wait()
+}
 
 func TestNetNSDialerCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -101,18 +146,13 @@ func TestSetupSandboxNetwork(t *testing.T) {
 		}
 	}
 
-	// The worker's own namespace must not reach any of them: the address is
-	// meaningless outside a namespace, which is what makes reuse safe.
+	// Sandbox addresses must not be reachable from the worker namespace.
 	direct := &http.Client{Timeout: 2 * time.Second}
 	if _, err := direct.Get("http://" + net.JoinHostPort(ActorVethIP, "80")); err == nil {
 		t.Error("the worker namespace reached an actor directly; addresses are not isolated")
 	}
 }
 
-// With atunnel not listening, nothing escapes: the redirect sends the actor's
-// TCP to a port with nothing behind it, so the connection is refused rather
-// than reaching the internet. Which ports the actor may use is no longer the
-// policy -- whether atunnel is there to carry it is.
 func TestActorEgressIsFailClosedWithoutAtunnel(t *testing.T) {
 	roottest.Require(t, "creates network namespaces")
 	ctx := context.Background()
@@ -139,10 +179,6 @@ func TestActorEgressIsFailClosedWithoutAtunnel(t *testing.T) {
 	}
 }
 
-// atunnel dials the actor from the outer namespace, so ingress has to cross the
-// pair while the local default route is catching everything else. The connected
-// /30 wins for in-subnet destinations; the negative control is what proves the
-// dial reached the sandbox rather than being answered locally.
 func TestIngressCrossesThePairWhileEgressIsCaptured(t *testing.T) {
 	roottest.Require(t, "creates network namespaces")
 	ctx := context.Background()
@@ -184,8 +220,7 @@ func TestIngressCrossesThePairWhileEgressIsCaptured(t *testing.T) {
 		t.Errorf("ingress reached %q, want %q", got, "the-actor")
 	}
 
-	// A port the actor is not serving must be refused by the sandbox, not
-	// accepted by the local default route.
+	// An unopened port must be refused, not redirected to atunnel.
 	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	if c2, e := dial(cctx, "tcp", net.JoinHostPort(ActorVethIP, "81")); e == nil {
@@ -194,15 +229,7 @@ func TestIngressCrossesThePairWhileEgressIsCaptured(t *testing.T) {
 	}
 }
 
-// The whole egress contract in one test: whatever port the actor aims at, the
-// connection arrives on atunnel's one listener and still says where it was
-// headed. The port is deliberately not one anybody configured -- that is the
-
-// The micro-VM shape: one namespace, no veth. The tap ateom builds carries the
-// guest's traffic INTO the namespace, so the kernel keeps the interface side
-// and terminates it. Only the namespace shape is asserted here -- a process
-// dialing from inside takes the output path, which a prerouting redirect never
-// sees, so it is not a stand-in for a guest behind a tap.
+// This tests namespace setup only; testing microVM egress requires a tap.
 func TestSetupSandboxNetworkWithoutVeth(t *testing.T) {
 	roottest.Require(t, "creates network namespaces")
 	ctx := context.Background()
@@ -272,9 +299,6 @@ func TestGatewayHardwareAddressIsFixedWhenAsked(t *testing.T) {
 	}
 }
 
-// A teardown that fails leaves the actor's namespace names behind. The kernel
-// creates them with O_EXCL, so without removing the leftovers first the same
-// actor could never be hosted on this worker again.
 func TestSetupSucceedsOverALeftoverNamespace(t *testing.T) {
 	roottest.Require(t, "creates network namespaces")
 	ctx := context.Background()
@@ -285,8 +309,7 @@ func TestSetupSucceedsOverALeftoverNamespace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first SetupSandboxNetwork: %v", err)
 	}
-	// Drop the handles WITHOUT deleting the names, which is what a worker that
-	// failed or died mid-teardown leaves on disk.
+	// Simulate interrupted teardown by leaving the namespace names mounted.
 	first.RuntimeNetNS.Close()
 	if first.GatewayNetNS != first.RuntimeNetNS {
 		first.GatewayNetNS.Close()
@@ -303,7 +326,6 @@ func TestSetupSucceedsOverALeftoverNamespace(t *testing.T) {
 	}
 	t.Cleanup(func() { CleanupSandboxNetwork(second) })
 
-	// And it is a working namespace, not just a created one.
 	if err := NetNSDo(ctx, second.RuntimeNetNS, func(context.Context) error {
 		if _, err := netlink.LinkByName(ActorVethName); err != nil {
 			return fmt.Errorf("actor interface missing after reuse: %w", err)
@@ -314,14 +336,7 @@ func TestSetupSucceedsOverALeftoverNamespace(t *testing.T) {
 	}
 }
 
-// The worker-wide ruleset drops actor UDP to any port but DNS, because there it
-// would otherwise escape through the compatibility masquerade. Namespace-only
-// actors have no masquerade, and the property is worth pinning down because
-// QUIC on 443 is exactly how an actor would dodge a TCP-only tunnel.
-//
-// Asserted in the namespace the datagram lands in, not from the actor: UDP is
-// unacknowledged, so an actor's send succeeds on the strength of its default
-// route whether or not anything ever carries the packet further.
+// Check from the gateway: a successful UDP send from the actor does not prove delivery.
 func TestActorUDPHasNowhereToGoBeyondTheNamespacePair(t *testing.T) {
 	roottest.Require(t, "creates network namespaces")
 	ctx := context.Background()
@@ -334,8 +349,6 @@ func TestActorUDPHasNowhereToGoBeyondTheNamespacePair(t *testing.T) {
 	}
 	t.Cleanup(func() { CleanupSandboxNetwork(n) })
 
-	// The actor's UDP arrives here on the veth peer. With no route beyond the
-	// pair and no masquerade, there is nothing to forward it out of.
 	for _, destination := range []string{"93.184.216.34:443", "93.184.216.34:53"} {
 		if err := NetNSDo(ctx, n.GatewayNetNS, func(context.Context) error {
 			c, err := net.Dial("udp", destination)
@@ -351,13 +364,6 @@ func TestActorUDPHasNowhereToGoBeyondTheNamespacePair(t *testing.T) {
 	}
 }
 
-// DNS end to end in the namespace pair: the actor asks its gateway, atunnel
-// answers from the namespace next door by re-asking the worker pod's resolver.
-// The gateway address is identical in every actor, which is what lets a
-
-// Without a veth both handles name the same namespace. Closing a descriptor
-// twice would close whatever reused the number -- another actor's namespace, or
-// any socket the worker happens to open next.
 func TestCleanupClosesEachDescriptorOnce(t *testing.T) {
 	roottest.Require(t, "creates network namespaces")
 	network, err := SetupSandboxNetwork(context.Background(), SandboxNetworkConfig{
@@ -392,9 +398,6 @@ func (d *stoppableDNS) Serve(ctx context.Context, l net.Listener) error {
 	return l.Close()
 }
 
-// The relay is the worker's, shared by every actor it hosts. Closing a
-// sandbox's sockets has to stop the work behind them too, or an actor's
-// queries keep holding capacity the next one needs.
 func TestClosingSandboxDNSStopsServing(t *testing.T) {
 	roottest.Require(t, "creates network namespaces")
 	network, err := SetupSandboxNetwork(context.Background(), SandboxNetworkConfig{

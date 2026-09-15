@@ -25,16 +25,8 @@ import (
 	"strings"
 )
 
-// SandboxResolvConf rewrites the worker pod's resolv.conf into the one a
-// namespace-only actor should hold: the pod's search list and options, with
-// every nameserver replaced by the actor's gateway, where atunnel answers.
-//
-// Keeping search and options is what preserves Kubernetes name resolution --
-// short service names depend on the search list and on ndots, and an actor
-// given a bare nameserver line would resolve public names but not cluster ones.
-//
-// The gateway address is the same in every actor on every worker, so this file
-// stays correct when a snapshot of the actor is restored somewhere else.
+// SandboxResolvConf replaces nameservers with the sandbox gateway while
+// preserving the pod's search domains and options for Kubernetes DNS.
 func SandboxResolvConf(podResolvConf []byte) []byte {
 	var out strings.Builder
 	out.WriteString("nameserver " + ActorVethGateway + "\n")
@@ -52,9 +44,7 @@ func SandboxResolvConf(podResolvConf []byte) []byte {
 
 // WriteRootfsResolvConf installs content at /etc/resolv.conf inside rootfs.
 //
-// The rootfs is untrusted, so the write goes through os.Root and unlinks rather
-// than truncates: an image-planted /etc or /etc/resolv.conf symlink would
-// otherwise be followed and clobber that path on the worker pod as root.
+// os.Root confines path traversal; unlinking prevents writes through existing links.
 func WriteRootfsResolvConf(rootfs string, content []byte) error {
 	if len(content) == 0 {
 		return fmt.Errorf("actornet: refusing to write an empty resolv.conf")

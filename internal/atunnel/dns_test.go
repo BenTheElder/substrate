@@ -117,9 +117,6 @@ func TestDNSRelayCancelsUDPExchange(t *testing.T) {
 	}
 }
 
-// The relay forwards the query verbatim and returns the answer verbatim: it
-// parses no DNS, so a transaction ID or EDNS option it has never heard of still
-// reaches the actor intact.
 func TestDNSRelayForwardsUDPVerbatim(t *testing.T) {
 	upstream := newFakeResolver(t, func(query []byte) []byte {
 		return append([]byte{0xff}, query...)
@@ -141,8 +138,6 @@ func TestDNSRelayForwardsUDPVerbatim(t *testing.T) {
 	}
 }
 
-// A dead first resolver costs a retry, not the query: resolv.conf lists several
-// for exactly this reason.
 func TestDNSRelayFallsBackToTheNextResolver(t *testing.T) {
 	dead, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
@@ -231,10 +226,6 @@ func readWithin(t *testing.T, conn net.Conn) []byte {
 	return buf[:n]
 }
 
-// An actor that advertises a large EDNS(0) buffer can be sent an answer larger
-// than the common 4096. The relay parses no DNS, so it cannot tell a big answer
-// from a small one -- reading into anything short of a whole datagram would
-// hand the actor the first part as if it were all of it.
 func TestDNSRelayForwardsAnswersLargerThanTheCommonBuffer(t *testing.T) {
 	const size = 9000
 	answer := make([]byte, size)
@@ -261,11 +252,8 @@ func TestDNSRelayForwardsAnswersLargerThanTheCommonBuffer(t *testing.T) {
 	}
 }
 
-// A sandbox is untrusted: queries it sends faster than they can be resolved are
-// dropped rather than each becoming a goroutine holding an upstream socket.
 func TestDNSRelayDropsQueriesBeyondItsInFlightLimit(t *testing.T) {
-	// Concurrent, unlike newFakeResolver: a serial one would hold every query
-	// behind the first and hide whether the relay bounds anything.
+	// Hold concurrent queries to exercise the relay's limit.
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -302,8 +290,7 @@ func TestDNSRelayDropsQueriesBeyondItsInFlightLimit(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// Every query the relay takes up is stuck in the resolver, so the count
-	// settling means it is at the limit rather than merely behind.
+	// Wait for the accepted-query count to stabilize.
 	deadline := time.Now().Add(10 * time.Second)
 	last := int64(-1)
 	for time.Now().Before(deadline) {
@@ -379,9 +366,6 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
-// Connections past the limit are refused outright. Holding them instead would
-// let one sandbox park the worker's whole DNS capacity on connections it never
-// speaks on.
 func TestDNSRelayRefusesTCPConnectionsBeyondItsLimit(t *testing.T) {
 	upstream, held := newHeldTCPResolver(t)
 	relay, err := NewDNSRelay([]string{upstream})
@@ -401,8 +385,7 @@ func TestDNSRelayRefusesTCPConnectionsBeyondItsLimit(t *testing.T) {
 	}
 	waitFor(t, "the relay to fill up", func() bool { return held.Load() == maxDNSConnections })
 
-	// One more: accepted by the kernel, then dropped by the relay rather than
-	// queued behind the connections already holding every slot.
+	// The relay should close a connection accepted beyond its limit.
 	extra, err := net.Dial("tcp", relayAddr.String())
 	if err != nil {
 		t.Fatal(err)
@@ -419,8 +402,6 @@ func TestDNSRelayRefusesTCPConnectionsBeyondItsLimit(t *testing.T) {
 	}
 }
 
-// An actor's DNS connections are torn down with it. They hold worker-wide
-// capacity, so leaving them to time out would starve the next actor.
 func TestDNSRelayClosesTCPConnectionsWhenServingEnds(t *testing.T) {
 	upstream, held := newHeldTCPResolver(t)
 	relay, err := NewDNSRelay([]string{upstream})
@@ -439,8 +420,7 @@ func TestDNSRelayClosesTCPConnectionsWhenServingEnds(t *testing.T) {
 
 	cancel()
 
-	// Well inside dnsTCPTimeout, which is what the connection would otherwise
-	// sit on.
+	// Cancellation must close the connection before dnsTCPTimeout.
 	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		t.Fatal(err)
 	}

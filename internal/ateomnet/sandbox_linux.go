@@ -24,6 +24,7 @@ import (
 	"net"
 	"runtime"
 	"strconv"
+	"sync"
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/binaryutil"
@@ -33,21 +34,17 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// SandboxNetwork is one sandbox's private networking: the namespace the runtime
-// is given, and the namespace atunnel serves it from. They are the same handle
-// unless the runtime needs them split.
+// SandboxNetwork holds a sandbox's runtime and gateway namespaces.
 type SandboxNetwork struct {
 	// ActorUID names the namespaces, so a teardown can find them again.
 	ActorUID string
 	// RuntimeNetNS is what the sandbox runs in. gVisor claims every interface
 	// here and moves their addresses into its own stack.
 	RuntimeNetNS netns.NsHandle
-	// GatewayNetNS holds the kernel end of the link and atunnel's sockets. The
-	// same namespace as RuntimeNetNS when the runtime leaves the kernel on the
-	// packet path, as a micro-VM does.
+	// GatewayNetNS holds atunnel's sockets and the kernel end of the link.
+	// For microVMs it shares RuntimeNetNS.
 	GatewayNetNS netns.NsHandle
-	// PodSideIP is the address the sandbox is reached on. Every sandbox holds
-	// the same one; which namespace answers is what tells them apart.
+	// PodSideIP is identical across sandboxes, isolated by namespace.
 	PodSideIP net.IP
 }
 
@@ -57,16 +54,16 @@ func (n *SandboxNetwork) holdsNetNS() bool { return n.RuntimeNetNS > 0 }
 type SandboxNetworkConfig struct {
 	ActorUID string
 
-	// Veth builds a veth pair and hands eth0 to an inner namespace, leaving the
-	// peer and atunnel's sockets one namespace out. Required for gVisor, which
-	// claims every interface in the namespace it is given. A micro-VM does not
-	// need it: its tap is already the boundary, and the namespace keeps the end
-	// the kernel owns.
+	// Veth separates gVisor's interfaces from the kernel-owned gateway.
+	// MicroVMs use a tap in a single namespace instead.
 	Veth bool
 
 	// EgressPort is where atunnel serves this actor. Every TCP connection the
 	// actor makes is redirected to it, whatever port it was aimed at.
 	EgressPort uint16
+
+	// DNSPort is where the actor's resolver answers, on the gateway address.
+	DNSPort uint16
 
 	// GatewayHWAddr fixes the MAC the actor's gateway answers with. A micro-VM
 	// snapshot freezes the guest's ARP entry for it, so a random MAC would
@@ -75,28 +72,10 @@ type SandboxNetworkConfig struct {
 	GatewayHWAddr net.HardwareAddr
 }
 
-// SetupSandboxNetwork gives an actor private networking and nothing that any
-// other actor shares: no address from a worker-wide plan and no nftables.
-//
-//	actor netns:   what the workload sees. Under Veth, lo and eth0 holding
-//	               ActorVethIP with a default route at ActorVethGwIP -- the same
-//	               view an actor has under every other design, so a restored
-//	               guest still finds itself where its snapshot expects.
-//	atunnel netns: the gateway address, a local default route, and the sockets
-//	               atunnel serves this actor on. The outer namespace under Veth,
-//	               otherwise the actor's own.
-//
-// gVisor needs the two split because it claims EVERY interface in the namespace
-// it is given -- measured, see hack/experiments/gvisor-netns-probe.sh -- and
-// moves their addresses into its own stack. A peer beside eth0 would be
-// swallowed with it, leaving nothing able to terminate TCP. One namespace out,
-// the kernel still owns the peer, so atunnel serves the actor with ordinary
-// sockets and no userspace network stack is needed.
-//
-// A single nftables redirect in the atunnel namespace puts atunnel in front of
-// every TCP connection the actor makes, and SO_ORIGINAL_DST recovers where it
-// was headed. Nothing about the actor's addressing is per-actor: every actor
-// holds the same /30, so no address has to be allocated or tracked.
+// SetupSandboxNetwork creates isolated networking with fixed sandbox addresses.
+// gVisor uses a veth pair across runtime and gateway namespaces because it takes
+// over every interface in its namespace. MicroVMs use a tap in one namespace.
+// Gateway nftables redirect TCP egress to atunnel, preserving SO_ORIGINAL_DST.
 func SetupSandboxNetwork(ctx context.Context, cfg SandboxNetworkConfig) (_ *SandboxNetwork, retErr error) {
 	actorUID := cfg.ActorUID
 	if actorUID == "" {
@@ -115,8 +94,7 @@ func SetupSandboxNetwork(ctx context.Context, cfg SandboxNetworkConfig) (_ *Sand
 		}
 	}()
 
-	// Without a veth the actor's own namespace is where atunnel listens: the tap
-	// the runtime adds later is the boundary, and the kernel keeps this end.
+	// Without a veth, atunnel shares the namespace with the runtime's tap.
 	atunnelNS := actorNS
 	if cfg.Veth {
 		outerName := SandboxGatewayNetNSName(actorUID)
@@ -132,8 +110,7 @@ func SetupSandboxNetwork(ctx context.Context, cfg SandboxNetworkConfig) (_ *Sand
 		}()
 		atunnelNS = outer
 
-		// Built in the outer namespace, then eth0 is handed to the actor, so the
-		// pair never exists anywhere both ends are visible to gVisor.
+		// Keep the kernel-owned peer outside gVisor's namespace.
 		if err := NetNSDo(ctx, outer, func(context.Context) error {
 			veth := &netlink.Veth{
 				LinkAttrs: netlink.LinkAttrs{Name: gatewayVethName},
@@ -164,12 +141,9 @@ func SetupSandboxNetwork(ctx context.Context, cfg SandboxNetworkConfig) (_ *Sand
 			return nil, err
 		}
 
-		// The actor side is what gVisor reads its addresses and routes off
-		// before taking them into its own stack, so it has to look like an
-		// ordinary gateway attachment.
+		// gVisor imports these addresses and routes into its network stack.
 		if err := NetNSDo(ctx, actorNS, func(context.Context) error {
-			// The actor reaches its own address over loopback, so lo has to be
-			// up even though nothing else here uses it.
+			// Loopback lets the actor reach its own address.
 			if err := linkUp("lo"); err != nil {
 				return err
 			}
@@ -200,8 +174,7 @@ func SetupSandboxNetwork(ctx context.Context, cfg SandboxNetworkConfig) (_ *Sand
 		ActorUID:     actorUID,
 		RuntimeNetNS: actorNS,
 		GatewayNetNS: atunnelNS,
-		// Every actor holds the same address; the namespace is the identity.
-		PodSideIP: net.ParseIP(ActorVethIP),
+		PodSideIP:    net.ParseIP(ActorVethIP),
 	}, nil
 }
 
@@ -228,15 +201,8 @@ func setupGatewaySide(ctx context.Context, ns netns.NsHandle, egressPort uint16)
 	return installEgressRedirect(ns, egressPort)
 }
 
-// installEgressRedirect sends every TCP connection the actor makes to atunnel,
-// whatever port it was aimed at, so which ports an actor may reach is the
-// actor's business and nothing has to be declared on the worker.
-//
-// One rule and no sets, because exactly one actor's traffic crosses this
-// namespace. That is the difference from the worker-wide ruleset it replaces,
-// which held an element per actor and is what put a ceiling on how many a
-// worker could hold. The actor's own /30 is excluded so atunnel can still dial
-// back in to serve ingress.
+// installEgressRedirect redirects TCP egress to atunnel, excluding the sandbox's
+// own /30 so replies to ingress connections are not redirected.
 func installEgressRedirect(ns netns.NsHandle, egressPort uint16) error {
 	if egressPort == 0 {
 		return fmt.Errorf("actornet: atunnel egress port is required")
@@ -288,8 +254,7 @@ func actorSubnet() *net.IPNet {
 func actorSubnetBase() []byte { return actorSubnet().IP.To4() }
 func actorSubnetMask() []byte { return []byte(actorSubnet().Mask) }
 
-// gatewayVethName is the peer's name in the outer namespace. It never
-// appears in the sandbox, so it does not have to look like anything.
+// gatewayVethName is the veth peer in the gateway namespace.
 const gatewayVethName = "atside"
 
 // SandboxGatewayNetNSName names the namespace holding the veth peer and atunnel's
@@ -298,16 +263,13 @@ func SandboxGatewayNetNSName(actorUID string) string {
 	return ateompath.ActorNetNSName(actorUID) + "-at"
 }
 
-// CleanupSandboxNetwork releases the namespace. Nothing else was built, so
-// nothing else has to be taken apart.
+// CleanupSandboxNetwork closes namespace handles and removes their names.
 func CleanupSandboxNetwork(network *SandboxNetwork) error {
 	if network == nil {
 		return nil
 	}
 	var errs error
-	// Recorded before the first Close, which zeroes the handle it is called on:
-	// without a veth both name the same namespace, and closing a descriptor
-	// twice would land on whatever reused the number.
+	// Compare before Close sets the handle to -1; microVMs share one descriptor.
 	separate := network.GatewayNetNS != network.RuntimeNetNS
 	if network.holdsNetNS() {
 		if err := network.RuntimeNetNS.Close(); err != nil {
@@ -328,10 +290,8 @@ func CleanupSandboxNetwork(network *SandboxNetwork) error {
 	return errs
 }
 
-// ListenInNetNS opens a TCP listener per port inside ns, bound to the
-// wildcard address so any destination the local default route delivers is
-// accepted. A socket keeps the namespace it was created in, so the caller
-// serves these from wherever it likes.
+// ListenInNetNS opens wildcard TCP listeners inside ns.
+// Sockets retain their namespace and can be served from another namespace.
 func ListenInNetNS(ctx context.Context, ns netns.NsHandle, ports []uint16) (_ []net.Listener, retErr error) {
 	var listeners []net.Listener
 	defer func() {
@@ -359,18 +319,12 @@ func ListenInNetNS(ctx context.Context, ns netns.NsHandle, ports []uint16) (_ []
 // EgressServer serves one actor's captured connections. Satisfied by
 // atunnel.Egress; an interface so this package does not depend on it.
 type EgressServer interface {
-	ServeFor(ctx context.Context, actorKey string, listener net.Listener) error
+	Serve(ctx context.Context, listener net.Listener) error
 }
 
-// ServeSandboxEgress puts the egress server's sockets inside the actor's own
-// namespace, where the local default route delivers everything it sends. The
-// listener is the actor's identity: they all hold the same address, so nothing
-// about a connection distinguishes them.
-//
-// Only ports gets captured. A port with no listener is refused rather than
-// escaping, which is the fail-closed half of routing everything through the
-// tunnel. Closing the returned listeners stops the actor's egress.
-func ServeSandboxEgress(ctx context.Context, e EgressServer, actorKey string, ns netns.NsHandle, ports []uint16) ([]net.Listener, error) {
+// ServeSandboxEgress serves redirected TCP in the gateway namespace.
+// Closing the returned listeners stops accepting new connections.
+func ServeSandboxEgress(ctx context.Context, e EgressServer, ns netns.NsHandle, ports []uint16) ([]net.Listener, error) {
 	listeners, err := ListenInNetNS(ctx, ns, ports)
 	if err != nil {
 		return nil, fmt.Errorf("while opening actor egress listeners: %w", err)
@@ -379,9 +333,8 @@ func ServeSandboxEgress(ctx context.Context, e EgressServer, actorKey string, ns
 		go func(l net.Listener) {
 			// Background rather than the caller's context: these outlive the
 			// activation and are stopped by closing the listener.
-			if err := e.ServeFor(context.Background(), actorKey, l); err != nil {
-				slog.WarnContext(ctx, "Actor egress listener stopped",
-					slog.String("actorUID", actorKey), slog.Any("err", err))
+			if err := e.Serve(context.Background(), l); err != nil {
+				slog.WarnContext(ctx, "Sandbox egress listener stopped", slog.Any("err", err))
 			}
 		}(l)
 	}
@@ -395,22 +348,9 @@ type DNSServer interface {
 	Serve(ctx context.Context, listener net.Listener) error
 }
 
-// ServeSandboxDNS answers the actor's DNS on its gateway address, from inside the
-// namespace atunnel serves it in.
-//
-// The address is the same in every actor on every worker, so an actor's
-// resolv.conf can name it and still be right after a snapshot is restored
-// somewhere else -- which is what lets DNS work without allocating anything per
-// actor. Both transports are served: a resolver falls back to TCP when an
-// answer does not fit in a datagram.
-//
-// Closing the returned sockets stops answering for this actor.
+// ServeSandboxDNS serves UDP and TCP DNS in the gateway namespace.
 func ServeSandboxDNS(ctx context.Context, relay DNSServer, ns netns.NsHandle, port uint16) (_ []io.Closer, retErr error) {
-	// The wildcard rather than the gateway address: a micro-VM's gateway lives
-	// on the tap, which the runtime creates when it boots the guest, so the
-	// address does not exist yet when the actor is hosted. Binding the wildcard
-	// answers on it either way, and only lo and the actor's own device are ever
-	// in this namespace.
+	// Bind the wildcard because the microVM tap's gateway address is added later.
 	address := net.JoinHostPort("0.0.0.0", strconv.Itoa(int(port)))
 
 	var packet net.PacketConn
@@ -458,14 +398,7 @@ type closerFunc func() error
 
 func (f closerFunc) Close() error { return f() }
 
-// NetNSDialer dials from inside ns.
-//
-// The connection is made on a thread pinned into the namespace for the whole
-// dial, and on its own goroutine so the pin cannot leak: a network namespace is
-// a property of an OS thread, and Go moves goroutines between threads freely.
-// http.Transport in particular dials on a background goroutine, so a dialer
-// that did not pin would connect from the worker's namespace and reach either
-// nothing or the wrong actor.
+// NetNSDialer dials inside ns on a dedicated, pinned OS thread.
 func NetNSDialer(ns netns.NsHandle) func(context.Context, string, string) (net.Conn, error) {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		if err := ctx.Err(); err != nil {
@@ -510,5 +443,84 @@ func NetNSDialer(ns netns.NsHandle) func(context.Context, string, string) (net.C
 			return nil, err
 		}
 		return completed.conn, completed.err
+	}
+}
+
+// SandboxSession owns a sandbox's network and serving sockets.
+type SandboxSession struct {
+	Network *SandboxNetwork
+
+	mu      sync.Mutex
+	sockets []io.Closer
+}
+
+// ServeSandbox builds a sandbox's network and serves it from the gateway
+// namespace: egress on the redirect's port, DNS on 53. Either server may be nil
+// to leave that unserved, which fails the sandbox closed rather than letting it
+// out.
+func ServeSandbox(ctx context.Context, cfg SandboxNetworkConfig, egress EgressServer, dns DNSServer) (_ *SandboxSession, retErr error) {
+	network, err := SetupSandboxNetwork(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	session := &SandboxSession{Network: network}
+	defer func() {
+		if retErr != nil {
+			_ = session.Close(ctx)
+		}
+	}()
+
+	if egress != nil {
+		listeners, err := ServeSandboxEgress(ctx, egress, network.GatewayNetNS, []uint16{cfg.EgressPort})
+		if err != nil {
+			return nil, err
+		}
+		for _, l := range listeners {
+			session.sockets = append(session.sockets, l)
+		}
+	}
+	if dns != nil {
+		served, err := ServeSandboxDNS(ctx, dns, network.GatewayNetNS, cfg.DNSPort)
+		if err != nil {
+			return nil, err
+		}
+		session.sockets = append(session.sockets, served...)
+	}
+	return session, nil
+}
+
+// Close stops serving the sandbox and removes its namespaces.
+func (s *SandboxSession) Close(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, c := range s.sockets {
+		_ = c.Close()
+	}
+	s.sockets = nil
+	if s.Network == nil {
+		return nil
+	}
+	network := s.Network
+	s.Network = nil
+	return CleanupSandboxNetwork(network)
+}
+
+// Dialer reaches the sandbox from the gateway namespace, the only place its
+// address is routable.
+func (s *SandboxSession) Dialer() func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		s.mu.Lock()
+		if s.Network == nil {
+			s.mu.Unlock()
+			return nil, net.ErrClosed
+		}
+		fd, err := unix.FcntlInt(uintptr(s.Network.GatewayNetNS), unix.F_DUPFD_CLOEXEC, 0)
+		s.mu.Unlock()
+		if err != nil {
+			return nil, fmt.Errorf("while retaining the sandbox namespace: %w", err)
+		}
+		ns := netns.NsHandle(fd)
+		defer ns.Close()
+		return NetNSDialer(ns)(ctx, network, address)
 	}
 }

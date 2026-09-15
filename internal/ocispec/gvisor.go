@@ -26,8 +26,7 @@ import (
 // name is drawn from, so no actor container can collide with it.
 const PauseContainer = "_pause"
 
-// resolvConf is where the sandbox reads its resolver config. The source bound
-// there is the worker pod's own file unless the caller names another.
+// resolvConf is the sandbox resolver path and default bind source.
 const resolvConf = "/etc/resolv.conf"
 
 // GVisorOptions describes the gVisor-specific context of one actor container.
@@ -36,10 +35,7 @@ type GVisorOptions struct {
 	ContainerName string
 	// DurableVolumes are declared on the sandbox (pause) spec only.
 	DurableVolumes []string
-	// ResolvConf is bound over the sandbox's /etc/resolv.conf. Empty binds the
-	// worker pod's own, which is what a sandbox sharing the pod's network
-	// wants. A sandbox with its own namespace names a file of its own instead,
-	// because the resolver it must use is its gateway rather than the pod's.
+	// ResolvConf is the bind source for /etc/resolv.conf; empty uses the pod's file.
 	ResolvConf string
 	// Size sizes the container's cgroup leaf. Only gVisor applies it; a micro-VM
 	// container's limits come from its own declared resources (see sizing).

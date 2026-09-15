@@ -54,10 +54,6 @@ func TestGVisorCgroupLeafMatchesTheShapedPath(t *testing.T) {
 	}
 }
 
-// A sandbox with its own namespace resolves through its gateway, not the worker
-// pod's resolver. The sandbox binds /etc/resolv.conf over whatever the image
-// ships, so this bind is the only place that choice can be made -- a file
-// written into the rootfs is shadowed by it and never read.
 func TestShapeGVisorBindsTheNamedResolvConf(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

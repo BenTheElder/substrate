@@ -29,10 +29,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/roottest"
 )
 
-// The whole egress contract in one test: whatever port the sandbox aims at, the
-// connection arrives on atunnel's one listener and still says where it was
-// headed. The port is deliberately not one anybody configured -- that is the
-// point, a sandbox's choice of destination port is its own business.
+// Verify redirection preserves the destination, including unconfigured ports.
 func TestSandboxEgressReachesAtunnelOnAnyPort(t *testing.T) {
 	roottest.Require(t, "creates network namespaces")
 	ctx := context.Background()
