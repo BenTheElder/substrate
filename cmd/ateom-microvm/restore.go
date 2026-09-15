@@ -86,8 +86,6 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		return nil, err
 	}
 
-	// Same as RunWorkload: a restore is a boot, and graceful shutdown cancels it
-	// rather than queueing behind it.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	s.setActiveRPC(rpcRestoreWorkload, cancel)
@@ -354,7 +352,7 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 	tResume := time.Now()
 
 	// Block until every wakeup-probe-enabled container reports 200.
-	if err := wakeupprobe.WaitAll(ctx, containers, ateomnet.ActorVethIP); err != nil {
+	if err := wakeupprobe.WaitAll(ctx, containers, ateomnet.ActorVethIP, nil); err != nil {
 		return fmt.Errorf("while waiting for container wakeup probe: %w", err)
 	}
 

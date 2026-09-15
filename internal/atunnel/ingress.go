@@ -71,9 +71,7 @@ type Config struct {
 	Upstream             *url.URL
 }
 
-// Server is an activation-aware HTTPS reverse proxy. It is long-lived across
-// actor activations, but only routes requests for the actor currently assigned
-// to its worker.
+// Server is an HTTPS reverse proxy for the worker's active actors.
 type Server struct {
 	credentialBundlePath string
 	tlsConfig            *tls.Config
