@@ -25,7 +25,6 @@ import (
 	"net"
 	"net/netip"
 	"runtime"
-	"strconv"
 	"sync"
 	"syscall"
 
@@ -55,8 +54,6 @@ type SandboxNetwork struct {
 	// once runsc can be given one interface rather than claiming every
 	// interface in the namespace it runs in.
 	GatewayNetNS netns.NsHandle
-	// PodSideIP is identical across sandboxes, isolated by namespace.
-	PodSideIP net.IP
 }
 
 func (n *SandboxNetwork) holdsNetNS() bool { return n.RuntimeNetNS > 0 }
@@ -73,14 +70,8 @@ type SandboxNetworkConfig struct {
 	// actor makes is redirected to it, whatever port it was aimed at.
 	EgressPort uint16
 
-	// GatewayHWAddr fixes the gateway's MAC, which a micro-VM snapshot freezes
-	// into the guest's ARP cache. gVisor re-ARPs and can leave it unset.
-	//
-	// Applies to the veth path only. The tap path sets its own MAC in
-	// setupActorTap, after LinkAdd, because tuntap creation ignores the
-	// hardware address in the link attributes. Both belong here once the two
-	// runtimes share one shape.
-	GatewayHWAddr net.HardwareAddr
+	// DNSPort is where the actor's resolver answers, on the gateway address.
+	DNSPort uint16
 }
 
 // SetupSandboxNetwork creates isolated networking with fixed sandbox addresses.
@@ -130,8 +121,6 @@ func SetupSandboxNetwork(ctx context.Context, cfg SandboxNetworkConfig) (_ *Sand
 		ActorUID:     actorUID,
 		RuntimeNetNS: actorNS,
 		GatewayNetNS: atunnelNS,
-		// Every actor holds the same address; the namespace is the identity.
-		PodSideIP: net.ParseIP(ActorVethIP),
 	}, nil
 }
 
@@ -160,9 +149,6 @@ func setupVethPair(ctx context.Context, cfg SandboxNetworkConfig, actorNS netns.
 			// whole setup, all of it under the global RTNL lock, and this
 			// runs on the resume path.
 			PeerNamespace: netlink.NsFd(int(actorNS)),
-		}
-		if cfg.GatewayHWAddr != nil {
-			veth.LinkAttrs.HardwareAddr = cfg.GatewayHWAddr
 		}
 		if err := netlink.LinkAdd(veth); err != nil {
 			return fmt.Errorf("while creating the veth pair: %w", err)
@@ -344,85 +330,30 @@ func ListenInNetNS(ctx context.Context, ns netns.NsHandle, ports []uint16) (_ []
 	return listeners, nil
 }
 
-// EgressServer serves one actor's captured connections. Satisfied by
+// egressServer serves one actor's captured connections. Satisfied by
 // atunnel.Egress; an interface so this package does not depend on it.
-type EgressServer interface {
-	ServeFor(ctx context.Context, actorKey string, listener net.Listener) error
-}
-
-// ServeSandboxEgress puts the egress server's sockets inside the actor's own
-// namespace, where the local default route delivers everything it sends. The
-// listener is the actor's identity: they all hold the same address, so nothing
-// about a connection distinguishes them.
-//
-// Only ports gets captured. A port with no listener is refused rather than
-// escaping, which is the fail-closed half of routing everything through the
-// tunnel. Closing the returned listeners stops the actor's egress.
-func ServeSandboxEgress(ctx context.Context, e EgressServer, actorKey string, ns netns.NsHandle, ports []uint16) ([]net.Listener, error) {
-	listeners, err := ListenInNetNS(ctx, ns, ports)
-	if err != nil {
-		return nil, fmt.Errorf("while opening actor egress listeners: %w", err)
-	}
-	for _, l := range listeners {
-		go func(l net.Listener) {
-			// Background rather than the caller's context: these outlive the
-			// activation and are stopped by closing the listener.
-			if err := e.ServeFor(context.Background(), actorKey, l); err != nil {
-				slog.WarnContext(ctx, "Actor egress listener stopped",
-					slog.String("actorUID", actorKey), slog.Any("err", err))
-			}
-		}(l)
-	}
-	return listeners, nil
-}
-
-// DNSServer answers an actor's DNS. Satisfied by atunnel.DNSRelay; an interface
-// so this package does not depend on it.
-type DNSServer interface {
-	ServePacket(ctx context.Context, pc net.PacketConn) error
+type egressServer interface {
 	Serve(ctx context.Context, listener net.Listener) error
 }
 
-// ServeSandboxDNS serves UDP and TCP DNS in the gateway namespace.
-func ServeSandboxDNS(ctx context.Context, relay DNSServer, ns netns.NsHandle, port uint16) (_ []io.Closer, retErr error) {
-	// Bind the wildcard because the microVM tap's gateway address is added later.
-	address := net.JoinHostPort("0.0.0.0", strconv.Itoa(int(port)))
-
-	var packet net.PacketConn
-	var stream net.Listener
-	if err := NetNSDo(ctx, ns, func(context.Context) error {
-		pc, err := net.ListenPacket("udp", address)
-		if err != nil {
-			return fmt.Errorf("while opening the actor DNS socket: %w", err)
-		}
-		packet = pc
-		l, err := net.Listen("tcp", address)
-		if err != nil {
-			_ = pc.Close()
-			return fmt.Errorf("while opening the actor DNS listener: %w", err)
-		}
-		stream = l
-		return nil
-	}); err != nil {
-		return nil, err
+// ServeSandboxEgress serves redirected TCP in the gateway namespace.
+// Closing the returned listeners stops accepting new connections.
+func serveSandboxEgress(ctx context.Context, e egressServer, ns netns.NsHandle, ports []uint16) ([]net.Listener, []func(), error) {
+	listeners, err := ListenInNetNS(ctx, ns, ports)
+	if err != nil {
+		return nil, nil, fmt.Errorf("while opening actor egress listeners: %w", err)
 	}
-
-	// Detached from the activation RPC's context but cancelable: the relay's
-	// capacity is the worker's, so teardown must drop queries still in flight.
-	serveCtx, stopServing := context.WithCancel(context.WithoutCancel(ctx))
-	go func() {
-		if err := relay.ServePacket(serveCtx, packet); err != nil {
-			slog.WarnContext(ctx, "Actor DNS socket stopped", slog.Any("err", err))
-		}
-	}()
-	go func() {
-		if err := relay.Serve(serveCtx, stream); err != nil {
-			slog.WarnContext(ctx, "Actor DNS listener stopped", slog.Any("err", err))
-		}
-	}()
-	// Cancel first: closing the sockets alone leaves the queries already being
-	// resolved holding the relay.
-	return []io.Closer{closerFunc(func() error { stopServing(); return nil }), packet, stream}, nil
+	serve := make([]func(), 0, len(listeners))
+	for _, l := range listeners {
+		serve = append(serve, func() {
+			// Background rather than the caller's context: these outlive the
+			// activation and are stopped by closing the listener.
+			if err := e.Serve(context.Background(), l); err != nil {
+				slog.WarnContext(ctx, "Sandbox egress listener stopped", slog.Any("err", err))
+			}
+		})
+	}
+	return listeners, serve, nil
 }
 
 // closerFunc adapts a cancel function to io.Closer, so a caller takes a
@@ -526,5 +457,167 @@ func NetNSDialer(ns netns.NsHandle) func(context.Context, string, string) (net.C
 			return nil, ctx.Err()
 		}
 		return conn, nil
+	}
+}
+
+// SandboxSession owns a sandbox's network and serving sockets.
+type SandboxSession struct {
+	Network *SandboxNetwork
+
+	mu      sync.Mutex
+	sockets []io.Closer
+	// serving counts the goroutines serving this sandbox, so Close can wait
+	// for them rather than just closing their sockets.
+	serving sync.WaitGroup
+}
+
+// ServeSandbox builds a sandbox's network and serves egress and DNS from its
+// gateway namespace. A nil server leaves that unserved, which fails closed.
+func ServeSandbox(ctx context.Context, cfg SandboxNetworkConfig, egress egressServer, dns dnsServer) (_ *SandboxSession, retErr error) {
+	network, err := SetupSandboxNetwork(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	session := &SandboxSession{Network: network}
+	defer func() {
+		if retErr != nil {
+			_ = session.Close(ctx)
+		}
+	}()
+
+	var serve []func()
+	if egress != nil {
+		listeners, serveEgress, err := serveSandboxEgress(ctx, egress, network.GatewayNetNS, []uint16{cfg.EgressPort})
+		if err != nil {
+			return nil, err
+		}
+		for _, l := range listeners {
+			session.sockets = append(session.sockets, l)
+		}
+		serve = append(serve, serveEgress...)
+	}
+	if dns != nil {
+		closers, serveDNS, err := serveSandboxDNS(ctx, dns, network.GatewayNetNS, cfg.DNSPort)
+		if err != nil {
+			return nil, err
+		}
+		session.sockets = append(session.sockets, closers...)
+		serve = append(serve, serveDNS...)
+	}
+
+	// Started here rather than inside the helpers so the session owns them and
+	// Close can report when they have stopped.
+	for _, fn := range serve {
+		session.serving.Add(1)
+		go func() {
+			defer session.serving.Done()
+			fn()
+		}()
+	}
+	return session, nil
+}
+
+// Close cancels the work in flight, closes the sockets, waits for the serving
+// goroutines, then removes the namespaces. ctx bounds only the wait; the
+// namespaces go either way, since leaving them wedges the next activation.
+// Idempotent, and every step's error is returned.
+func (s *SandboxSession) Close(ctx context.Context) error {
+	s.mu.Lock()
+	sockets, network := s.sockets, s.Network
+	s.sockets, s.Network = nil, nil
+	s.mu.Unlock()
+
+	var errs error
+	for _, c := range sockets {
+		if err := c.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			errs = errors.Join(errs, err)
+		}
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		s.serving.Wait()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-ctx.Done():
+		errs = errors.Join(errs, fmt.Errorf("while waiting for the sandbox's serving goroutines: %w", ctx.Err()))
+	}
+
+	if network != nil {
+		errs = errors.Join(errs, CleanupSandboxNetwork(network))
+	}
+	return errs
+}
+
+// SessionHolder is the one sandbox session a worker is serving, for the ateoms
+// to share what is otherwise the same locking, replacement and dialing in both.
+type SessionHolder struct {
+	mu      sync.Mutex
+	session *SandboxSession
+}
+
+// Replace closes whatever session is held and installs next. A previous
+// actor's session can still be here if its teardown never ran, and overwriting
+// it would leak both namespaces, their /run/netns mounts and the goroutines
+// serving them.
+func (h *SessionHolder) Replace(ctx context.Context, next *SandboxSession) error {
+	if err := h.Close(ctx); err != nil {
+		return fmt.Errorf("while releasing the previous sandbox network: %w", err)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.session = next
+	return nil
+}
+
+// Session is what is held, or nil between activations.
+func (h *SessionHolder) Session() *SandboxSession {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.session
+}
+
+// Close releases the held session, if any.
+func (h *SessionHolder) Close(ctx context.Context) error {
+	h.mu.Lock()
+	session := h.session
+	h.session = nil
+	h.mu.Unlock()
+	if session == nil {
+		return nil
+	}
+	return session.Close(ctx)
+}
+
+// Dialer reaches whichever sandbox is held when the dial happens.
+func (h *SessionHolder) Dialer() func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		session := h.Session()
+		if session == nil {
+			return nil, errors.New("no actor is active on this worker")
+		}
+		return session.Dialer()(ctx, network, address)
+	}
+}
+
+// Dialer reaches the sandbox from the gateway namespace, the only place its
+// address is routable.
+func (s *SandboxSession) Dialer() func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		s.mu.Lock()
+		if s.Network == nil {
+			s.mu.Unlock()
+			return nil, net.ErrClosed
+		}
+		fd, err := unix.FcntlInt(uintptr(s.Network.GatewayNetNS), unix.F_DUPFD_CLOEXEC, 0)
+		s.mu.Unlock()
+		if err != nil {
+			return nil, fmt.Errorf("while retaining the sandbox namespace: %w", err)
+		}
+		ns := netns.NsHandle(fd)
+		defer ns.Close()
+		return NetNSDialer(ns)(ctx, network, address)
 	}
 }
