@@ -143,8 +143,8 @@ func TestSetupActorNetworkFinalState(t *testing.T) {
 		if host == nil {
 			t.Fatalf("host veth %q missing from the pod netns", HostVethName)
 		}
-		if !hasAddr(t, host, HostVethCIDR) {
-			t.Errorf("host veth %q does not carry %s", HostVethName, HostVethCIDR)
+		if !hasAddr(t, host, hostVethLocalAddress) {
+			t.Errorf("host veth %q does not carry %s", HostVethName, hostVethLocalAddress)
 		}
 		if host.Attrs().Flags&1 == 0 { // net.FlagUp
 			t.Errorf("host veth %q is not up", HostVethName)
@@ -162,8 +162,8 @@ func TestSetupActorNetworkFinalState(t *testing.T) {
 			if actor == nil {
 				t.Fatalf("actor veth %q missing from the interior netns", ActorVethName)
 			}
-			if !hasAddr(t, actor, ActorVethCIDR) {
-				t.Errorf("actor veth %q does not carry %s", ActorVethName, ActorVethCIDR)
+			if !hasAddr(t, actor, actorVethLocalAddress) {
+				t.Errorf("actor veth %q does not carry %s", ActorVethName, actorVethLocalAddress)
 			}
 			if actor.Attrs().Flags&1 == 0 {
 				t.Errorf("actor veth %q is not up", ActorVethName)
@@ -559,5 +559,22 @@ func TestCreateNetNSWithoutSwitchingReplacesALeftover(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Only EROFS takes the remount path: any other error is reported as it is,
+// and /proc/sys is left as it was found. Remounting it read-only on the way
+// out would break every later write.
+func TestSetNetSysctlReportsAnUnrelatedError(t *testing.T) {
+	err := setNetSysctl("net/ipv4/ateomnet_no_such_sysctl", "0")
+	if !errors.Is(err, unix.ENOENT) {
+		t.Fatalf("setNetSysctl() on a missing key: got %v, want ENOENT", err)
+	}
+	var st unix.Statfs_t
+	if err := unix.Statfs("/proc/sys", &st); err != nil {
+		t.Fatalf("statfs /proc/sys: %v", err)
+	}
+	if st.Flags&unix.ST_RDONLY != 0 {
+		t.Error("/proc/sys was left read-only")
 	}
 }
