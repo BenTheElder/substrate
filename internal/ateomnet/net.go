@@ -34,6 +34,10 @@ import (
 )
 
 const (
+	// DefaultMaxActors is how many actors a worker hosts at once unless its
+	// pool says otherwise.
+	DefaultMaxActors = 1000
+
 	ActorVethName    = "eth0"
 	ActorVethGateway = "169.254.17.1"
 	ActorVethIP      = "169.254.17.2"
