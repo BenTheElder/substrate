@@ -212,8 +212,6 @@ func do(ctx context.Context) error {
 	}
 	slog.InfoContext(ctx, "Actor DNS relay ready", slog.Any("upstreams", nameservers))
 
-	// The service owns the actor's namespace, and atunnel reaches the actor
-	// through it, so it is built first and handed to atunnel as a dialer.
 	ateomService := NewService(*podUID, *chBinary, *kataConfig, *kataDebug, *vmmMemReserve, dnsRelay, actorLogger, *workerCredentialBundle, *podIdentityTrustBundle, *egressGatewayTrustBundle)
 
 	atunnelIngress, err := atunnel.NewServer(atunnel.Config{
@@ -221,7 +219,6 @@ func do(ctx context.Context) error {
 		TrustBundlePath:      *podIdentityTrustBundle,
 		AllowedClientID:      *atunnelClientIdentity,
 		Upstream:             upstream,
-		Dial:                 ateomService.sandbox.Dialer(),
 	})
 	if err != nil {
 		return fmt.Errorf("while configuring atunnel: %w", err)
@@ -527,23 +524,26 @@ func (s *AteomService) prepareActorEgress(ctx context.Context, actorAtespace, ac
 	return &actorEgress{client: gatewayClient, certificateSource: certificateSource, expiresAt: expiresAt}, nil
 }
 
-func (s *AteomService) activateActorNetworking(atespace, actorName string, egress *actorEgress) error {
-	if err := s.atunnelIngress.Activate(atespace, actorName); err != nil {
+func (s *AteomService) activateActorNetworking(actor resources.ActorAttribution, egress *actorEgress) error {
+	if err := s.atunnelIngress.Activate(actor.Ref.Atespace, actor.Ref.Name, s.sandbox.Dialer()); err != nil {
 		return fmt.Errorf("while activating actor ingress: %w", err)
 	}
 	if egress == nil {
 		return nil
 	}
-	if err := s.atunnelEgress.Activate(egress.client, egress.certificateSource, egress.expiresAt); err != nil {
+	if err := s.atunnelEgress.Activate(actor.UID, egress.client, egress.certificateSource, egress.expiresAt); err != nil {
 		return fmt.Errorf("while activating actor egress: %w", err)
 	}
 	return nil
 }
 
-func (s *AteomService) deactivateActorNetworking(ctx context.Context) error {
+func (s *AteomService) deactivateActorNetworking(ctx context.Context, actor resources.ActorAttribution) error {
 	// Stop admitting traffic and drain active streams before the Actor network
 	// is torn down. Attempt both directions even if one fails to deactivate.
-	err := errors.Join(s.atunnelIngress.Deactivate(ctx), s.atunnelEgress.Deactivate(ctx))
+	err := errors.Join(
+		s.atunnelIngress.Deactivate(ctx, actor.Ref.Atespace, actor.Ref.Name),
+		s.atunnelEgress.Deactivate(ctx, actor.UID),
+	)
 	if err != nil {
 		return fmt.Errorf("while deactivating actor networking: %w", err)
 	}

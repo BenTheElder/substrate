@@ -214,7 +214,7 @@ func do(ctx context.Context) error {
 	// Construct the service first so atunnel can use its namespace dialer.
 	ateomService := NewService(dnsRelay, actorLogger, *workerCredentialBundle, *podIdentityTrustBundle, *egressGatewayTrustBundle)
 
-	atunnelIngress, atunnelEgress, atunnelEgressPort, err := runAtunnel(ctx, upstream, ateomService.sandbox.Dialer())
+	atunnelIngress, atunnelEgress, atunnelEgressPort, err := runAtunnel(ctx, upstream)
 	if err != nil {
 		return err
 	}
@@ -270,13 +270,12 @@ func do(ctx context.Context) error {
 	return nil
 }
 
-func runAtunnel(ctx context.Context, upstream *url.URL, dial atunnel.DialFunc) (*atunnel.Server, *atunnel.Egress, uint16, error) {
+func runAtunnel(ctx context.Context, upstream *url.URL) (*atunnel.Server, *atunnel.Egress, uint16, error) {
 	atunnelIngress, err := atunnel.NewServer(atunnel.Config{
 		CredentialBundlePath: *workerCredentialBundle,
 		TrustBundlePath:      *podIdentityTrustBundle,
 		AllowedClientID:      *atunnelClientIdentity,
 		Upstream:             upstream,
-		Dial:                 dial,
 	})
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("while configuring atunnel: %w", err)
@@ -614,7 +613,7 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	s.setActiveRPC(rpcRunWorkload, cancel)
 	defer s.clearActiveRPC()
 
-	if err := s.deactivateActorNetworking(ctx); err != nil {
+	if err := s.deactivateActorNetworking(ctx, ateomstats.ActorAttributionFromRequest(req)); err != nil {
 		return nil, err
 	}
 
@@ -653,7 +652,7 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 			s.activeActor.Store(nil)
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cancel()
-			if err := s.deactivateActorNetworking(cleanupCtx); err != nil {
+			if err := s.deactivateActorNetworking(cleanupCtx, ateomstats.ActorAttributionFromRequest(req)); err != nil {
 				slog.WarnContext(cleanupCtx, "Failed to deactivate actor networking after Run failure", slog.Any("err", err))
 			}
 			deleteContainers(cleanupCtx, rcmd, containersToDelete, "Run")
@@ -710,7 +709,7 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	if err := readyz.WaitAll(ctx, req.GetSpec().GetContainers(), ateomnet.ActorVethIP, readyz.DialFunc(s.sandbox.Dialer())); err != nil {
 		return nil, fmt.Errorf("while waiting for container readyz: %w", err)
 	}
-	if err := s.activateActorNetworking(req.GetAtespace(), req.GetActorName(), egress); err != nil {
+	if err := s.activateActorNetworking(ateomstats.ActorAttributionFromRequest(req), egress); err != nil {
 		return nil, err
 	}
 
@@ -731,7 +730,7 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 	s.setActiveRPC(rpcCheckpointWorkload, cancel)
 	defer s.clearActiveRPC()
 
-	if err := s.deactivateActorNetworking(ctx); err != nil {
+	if err := s.deactivateActorNetworking(ctx, ateomstats.ActorAttributionFromRequest(req)); err != nil {
 		return nil, err
 	}
 
@@ -910,7 +909,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	s.setActiveRPC(rpcRestoreWorkload, cancel)
 	defer s.clearActiveRPC()
 
-	if err := s.deactivateActorNetworking(ctx); err != nil {
+	if err := s.deactivateActorNetworking(ctx, ateomstats.ActorAttributionFromRequest(req)); err != nil {
 		return nil, err
 	}
 
@@ -947,7 +946,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 			s.activeActor.Store(nil)
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cancel()
-			if err := s.deactivateActorNetworking(cleanupCtx); err != nil {
+			if err := s.deactivateActorNetworking(cleanupCtx, ateomstats.ActorAttributionFromRequest(req)); err != nil {
 				slog.WarnContext(cleanupCtx, "Failed to deactivate actor networking after Restore failure", slog.Any("err", err))
 			}
 			deleteContainers(cleanupCtx, rcmd, containersToDelete, "Restore")
@@ -1035,7 +1034,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	if err := readyz.WaitAll(ctx, req.GetSpec().GetContainers(), ateomnet.ActorVethIP, readyz.DialFunc(s.sandbox.Dialer())); err != nil {
 		return nil, fmt.Errorf("while waiting for container readyz: %w", err)
 	}
-	if err := s.activateActorNetworking(req.GetAtespace(), req.GetActorName(), egress); err != nil {
+	if err := s.activateActorNetworking(ateomstats.ActorAttributionFromRequest(req), egress); err != nil {
 		return nil, err
 	}
 
@@ -1113,7 +1112,7 @@ func (s *AteomService) TerminateWorkload(ctx context.Context, req *ateompb.Termi
 
 func (s *AteomService) terminateWorkload(ctx context.Context, actorRef resources.ActorRef, actorUID, runscPath string, containers []*ateompb.Container) error {
 	var errs []error
-	if err := s.deactivateActorNetworking(ctx); err != nil {
+	if err := s.deactivateActorNetworking(ctx, resources.ActorAttribution{Ref: actorRef, UID: actorUID}); err != nil {
 		errs = append(errs, fmt.Errorf("while deactivating actor networking: %w", err))
 	}
 
@@ -1150,14 +1149,14 @@ func (s *AteomService) terminateWorkload(ctx context.Context, actorRef resources
 	return errors.Join(errs...)
 }
 
-func (s *AteomService) activateActorNetworking(atespace, actorName string, egress *actorEgress) error {
-	if err := s.atunnelIngress.Activate(atespace, actorName); err != nil {
+func (s *AteomService) activateActorNetworking(actor resources.ActorAttribution, egress *actorEgress) error {
+	if err := s.atunnelIngress.Activate(actor.Ref.Atespace, actor.Ref.Name, s.sandbox.Dialer()); err != nil {
 		return fmt.Errorf("while activating actor ingress: %w", err)
 	}
 	if egress == nil {
 		return nil
 	}
-	if err := s.atunnelEgress.Activate(egress.client, egress.certificateSource, egress.expiresAt); err != nil {
+	if err := s.atunnelEgress.Activate(actor.UID, egress.client, egress.certificateSource, egress.expiresAt); err != nil {
 		return fmt.Errorf("while activating actor egress: %w", err)
 	}
 	return nil
@@ -1172,10 +1171,13 @@ func deleteContainers(ctx context.Context, rcmd *runsc, containers []string, ope
 	}
 }
 
-func (s *AteomService) deactivateActorNetworking(ctx context.Context) error {
+func (s *AteomService) deactivateActorNetworking(ctx context.Context, actor resources.ActorAttribution) error {
 	// Stop admitting traffic and drain active streams before the Actor network
 	// is torn down. Attempt both directions even if one fails to deactivate.
-	err := errors.Join(s.atunnelIngress.Deactivate(ctx), s.atunnelEgress.Deactivate(ctx))
+	err := errors.Join(
+		s.atunnelIngress.Deactivate(ctx, actor.Ref.Atespace, actor.Ref.Name),
+		s.atunnelEgress.Deactivate(ctx, actor.UID),
+	)
 	if err != nil {
 		return fmt.Errorf("while deactivating actor networking: %w", err)
 	}

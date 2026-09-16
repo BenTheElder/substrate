@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/agent-substrate/substrate/internal/ateomstats"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -240,7 +241,7 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	s.setActiveRPC(rpcRunWorkload, cancel)
 	defer s.clearActiveRPC()
 
-	if err := s.deactivateActorNetworking(ctx); err != nil {
+	if err := s.deactivateActorNetworking(ctx, ateomstats.ActorAttributionFromRequest(req)); err != nil {
 		return nil, err
 	}
 
@@ -296,6 +297,17 @@ type actorBootParams struct {
 	// memory); a container's own cgroup limit comes from its declared resources.
 	// Zero fields keep the kata defaults.
 	size sizing.SandboxSize
+}
+
+// attribution is who this boot is for, as the tunnel and the stats path name
+// an actor.
+func (p actorBootParams) attribution() resources.ActorAttribution {
+	return resources.ActorAttribution{
+		Ref:              p.actorRef,
+		UID:              p.actorUID,
+		TemplateAtespace: p.templateAtespace,
+		TemplateName:     p.templateName,
+	}
 }
 
 // actorAttribution regroups the actor fields that arrived on the Run/Restore
@@ -377,7 +389,7 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 		if retErr != nil {
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cancel()
-			if cleanupErr := s.deactivateActorNetworking(cleanupCtx); cleanupErr != nil {
+			if cleanupErr := s.deactivateActorNetworking(cleanupCtx, p.attribution()); cleanupErr != nil {
 				slog.WarnContext(cleanupCtx, "Failed to deactivate actor networking after Run failure", slog.Any("err", cleanupErr))
 			}
 			if cleanupErr := s.releaseSandboxNetwork(cleanupCtx); cleanupErr != nil {
@@ -562,7 +574,7 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 		slog.Duration("since_boot", time.Since(tBooted)))
 
 	ra := &runningActor{chCmd: chCmd, vfsdCmd: vfsdCmd, apiSocket: apiSocket, baseID: actorUID, guestAgent: ac, workloadIDs: workloadIDs(ctrs)}
-	if err := s.activateActorNetworking(p.actorRef.Atespace, p.actorRef.Name, egress); err != nil {
+	if err := s.activateActorNetworking(p.attribution(), egress); err != nil {
 		return err
 	}
 	s.running[actorUID] = ra
