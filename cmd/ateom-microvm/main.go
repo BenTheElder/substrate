@@ -40,6 +40,7 @@ import (
 
 	"cloud.google.com/go/compute/metadata"
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/reaper"
+	"github.com/agent-substrate/substrate/internal/actorlock"
 	"github.com/agent-substrate/substrate/internal/actorlog"
 	"github.com/agent-substrate/substrate/internal/ateinterceptors"
 	"github.com/agent-substrate/substrate/internal/ateomcapacity"
@@ -351,46 +352,13 @@ type activeRPCInfo struct {
 	cancel context.CancelFunc
 }
 
-// cancelableMutex is a mutex whose acquisition can be abandoned. sync.Mutex has
-// no bounded Lock, and graceful shutdown must not park forever behind an RPC
-// that is wedged: it needs to give up and get on with signaling the guest
-// while the pod's termination grace period still has room.
-type cancelableMutex struct {
-	ch chan struct{}
-}
-
-func newCancelableMutex() *cancelableMutex {
-	ch := make(chan struct{}, 1)
-	ch <- struct{}{}
-	return &cancelableMutex{ch: ch}
-}
-
-func (m *cancelableMutex) Lock() {
-	<-m.ch
-}
-
-func (m *cancelableMutex) Unlock() {
-	m.ch <- struct{}{}
-}
-
-// LockContext acquires the mutex, reporting false if ctx terminates first. On
-// false the mutex is NOT held and must not be unlocked.
-func (m *cancelableMutex) LockContext(ctx context.Context) bool {
-	select {
-	case <-m.ch:
-		return true
-	case <-ctx.Done():
-		return false
-	}
-}
-
 // AteomService is the cloud-hypervisor implementation of ateompb.AteomServer.
 type AteomService struct {
 	ateompb.UnimplementedAteomServer
 
 	// lock serializes RPCs; like ateom-gvisor, the run/checkpoint/restore
 	// lifecycle is not safe to drive concurrently.
-	lock *cancelableMutex
+	lock *actorlock.CancelableMutex
 
 	// shuttingDown is set once SIGTERM has been received. While true, new workload
 	// RPCs are rejected with codes.Unavailable so the control plane reschedules.
@@ -495,7 +463,7 @@ var _ ateompb.AteomServer = (*AteomService)(nil)
 // NewService creates a new AteomService.
 func NewService(podUID, chBinary, kataConfig string, kataDebug bool, memReserveMiB int, dnsRelay *atunnel.DNSRelay, actorLogger *actorlog.ActorLogger, workerCredentialBundlePath, podIdentityTrustBundlePath, egressGatewayTrustBundlePath string) *AteomService {
 	return &AteomService{
-		lock:                         newCancelableMutex(),
+		lock:                         actorlock.NewCancelableMutex(),
 		podUID:                       podUID,
 		chBinary:                     chBinary,
 		kataConfig:                   kataConfig,

@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"github.com/agent-substrate/substrate/internal/actorlock"
 	"os"
 	"path/filepath"
 	"testing"
@@ -74,7 +75,7 @@ func newStatsService(t *testing.T, files map[string]string) *AteomService {
 		}
 	}
 	return &AteomService{
-		lock:       newCancelableMutex(),
+		lock:       actorlock.NewCancelableMutex(),
 		cgroupRoot: root,
 	}
 }
