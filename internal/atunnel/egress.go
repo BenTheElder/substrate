@@ -76,15 +76,44 @@ func NewEgress(originalDestination OriginalDestination) (*Egress, error) {
 	}, nil
 }
 
-// Serve accepts intercepted connections from actorUID's namespace until canceled.
-func (e *Egress) Serve(ctx context.Context, actorUID string, listener net.Listener) error {
+// Bind captures the actor's activation before its listeners start serving.
+func (e *Egress) Bind(actorUID string) (func(context.Context, net.Listener) error, error) {
 	if actorUID == "" {
-		return fmt.Errorf("atunnel: actor UID is required")
+		return nil, fmt.Errorf("atunnel: actor UID is required")
 	}
+	e.mu.Lock()
+	active := e.activationLocked(actorUID)
+	e.mu.Unlock()
+	return func(ctx context.Context, listener net.Listener) error {
+		defer func() {
+			e.mu.Lock()
+			defer e.mu.Unlock()
+			if e.active[actorUID] == active && active.dialer == nil {
+				delete(e.active, actorUID)
+				active.cancel()
+			}
+		}()
+		return e.serve(ctx, listener, active)
+	}, nil
+}
+
+func (e *Egress) activationLocked(actorUID string) *egressActivation {
+	active := e.active[actorUID]
+	if active == nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		active = &egressActivation{ctx: ctx, cancel: cancel}
+		e.active[actorUID] = active
+	}
+	return active
+}
+
+func (e *Egress) serve(ctx context.Context, listener net.Listener, active *egressActivation) error {
 	done := make(chan struct{})
 	go func() {
 		select {
 		case <-ctx.Done():
+			_ = listener.Close()
+		case <-active.ctx.Done():
 			_ = listener.Close()
 		case <-done:
 		}
@@ -99,7 +128,7 @@ func (e *Egress) Serve(ctx context.Context, actorUID string, listener net.Listen
 			}
 			return fmt.Errorf("atunnel: accepting actor egress connection: %w", err)
 		}
-		e.handle(conn, actorUID)
+		e.handle(conn, active)
 	}
 }
 
@@ -119,18 +148,13 @@ func (e *Egress) Activate(actorUID string, dialer egressDialer, certificateSourc
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if _, ok := e.active[actorUID]; ok {
+	active := e.activationLocked(actorUID)
+	if active.dialer != nil {
 		return fmt.Errorf("atunnel: actor %s already has active egress", actorUID)
 	}
-	activationCtx, cancel := context.WithCancel(context.Background())
-	active := &egressActivation{
-		dialer:            dialer,
-		certificateSource: certificateSource,
-		expiresAt:         expiresAt,
-		ctx:               activationCtx,
-		cancel:            cancel,
-	}
-	e.active[actorUID] = active
+	active.dialer = dialer
+	active.certificateSource = certificateSource
+	active.expiresAt = expiresAt
 	active.wg.Add(1)
 	go e.renew(active, expiresAt)
 	return nil
@@ -243,10 +267,9 @@ func (e *Egress) Deactivate(ctx context.Context, actorUID string) error {
 	}
 }
 
-func (e *Egress) handle(downstream net.Conn, actorUID string) {
+func (e *Egress) handle(downstream net.Conn, active *egressActivation) {
 	e.mu.Lock()
-	active := e.active[actorUID]
-	if active == nil {
+	if active == nil || active.ctx.Err() != nil {
 		e.mu.Unlock()
 		_ = downstream.Close()
 		return
