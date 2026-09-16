@@ -334,7 +334,7 @@ func ListenInNetNS(ctx context.Context, ns netns.NsHandle, ports []uint16) (_ []
 // egressServer serves one actor's captured connections. Satisfied by
 // atunnel.Egress; an interface so this package does not depend on it.
 type egressServer interface {
-	Serve(ctx context.Context, actorUID string, listener net.Listener) error
+	Bind(actorUID string) (func(context.Context, net.Listener) error, error)
 }
 
 // ServeSandboxEgress serves redirected TCP in the gateway namespace.
@@ -344,6 +344,15 @@ func serveSandboxEgress(ctx context.Context, e egressServer, actorUID string, ns
 	if err != nil {
 		return nil, nil, fmt.Errorf("while opening actor egress listeners: %w", err)
 	}
+	// Bound before anything is served, so a connection accepted here cannot
+	// pick up a later activation's credentials.
+	serveBound, err := e.Bind(actorUID)
+	if err != nil {
+		for _, listener := range listeners {
+			_ = listener.Close()
+		}
+		return nil, nil, err
+	}
 	serve := make([]func(), 0, len(listeners))
 	closers := make([]io.Closer, 0, len(listeners))
 	for _, l := range listeners {
@@ -351,7 +360,7 @@ func serveSandboxEgress(ctx context.Context, e egressServer, actorUID string, ns
 		serve = append(serve, func() {
 			// Background rather than the caller's context: these outlive the
 			// activation and are stopped by closing the listener.
-			if err := e.Serve(context.Background(), actorUID, l); err != nil {
+			if err := serveBound(context.Background(), l); err != nil {
 				slog.WarnContext(ctx, "Sandbox egress listener stopped", slog.Any("err", err))
 			}
 		})
@@ -496,14 +505,6 @@ func ServeSandbox(ctx context.Context, cfg SandboxNetworkConfig, egress egressSe
 	}()
 
 	var serve []func()
-	if egress != nil {
-		closers, serveEgress, err := serveSandboxEgress(ctx, egress, cfg.ActorUID, network.GatewayNetNS, []uint16{cfg.EgressPort})
-		if err != nil {
-			return nil, err
-		}
-		session.sockets = append(session.sockets, closers...)
-		serve = append(serve, serveEgress...)
-	}
 	if dns != nil {
 		closers, serveDNS, err := serveSandboxDNS(ctx, dns, network.GatewayNetNS, cfg.DNSPort)
 		if err != nil {
@@ -511,6 +512,16 @@ func ServeSandbox(ctx context.Context, cfg SandboxNetworkConfig, egress egressSe
 		}
 		session.sockets = append(session.sockets, closers...)
 		serve = append(serve, serveDNS...)
+	}
+	// Egress last: its binding is released by the serve goroutine, so nothing
+	// may fail between binding and starting it.
+	if egress != nil {
+		closers, serveEgress, err := serveSandboxEgress(ctx, egress, cfg.ActorUID, network.GatewayNetNS, []uint16{cfg.EgressPort})
+		if err != nil {
+			return nil, err
+		}
+		session.sockets = append(session.sockets, closers...)
+		serve = append(serve, serveEgress...)
 	}
 
 	// Started here rather than inside the helpers so the session owns them and
