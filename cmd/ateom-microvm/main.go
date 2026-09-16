@@ -307,6 +307,7 @@ func do(ctx context.Context) error {
 			CredentialBundlePath: *workerCredentialBundle,
 			TrustBundlePath:      *podIdentityTrustBundle,
 			AteletSPIFFEID:       *ateletIdentity,
+			Actors:               *maxActors,
 		})
 		if err != nil && ctx.Err() == nil {
 			serverboot.Fatal(ctx, "Failed to report worker capacity", err)
