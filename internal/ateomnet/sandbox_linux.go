@@ -22,9 +22,11 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"runtime"
 	"strconv"
 	"sync"
+	"syscall"
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/binaryutil"
@@ -398,11 +400,24 @@ type closerFunc func() error
 
 func (f closerFunc) Close() error { return f() }
 
-// NetNSDialer dials inside ns on a dedicated, pinned OS thread.
+// NetNSDialer dials TCP or UDP IP literals in ns, pinning a thread only until
+// the socket is created.
 func NetNSDialer(ns netns.NsHandle) func(context.Context, string, string) (net.Conn, error) {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+		switch network {
+		case "tcp", "tcp4", "tcp6", "udp", "udp4", "udp6":
+		default:
+			return nil, net.UnknownNetworkError(network)
+		}
+		hostname, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := netip.ParseAddr(hostname); err != nil {
+			return nil, fmt.Errorf("sandbox dial requires an IP literal: %w", err)
 		}
 		type result struct {
 			conn net.Conn
@@ -424,15 +439,32 @@ func NetNSDialer(ns netns.NsHandle) func(context.Context, string, string) (net.C
 				done <- result{err: fmt.Errorf("while entering the actor netns: %w", err)}
 				return
 			}
-			conn, dialErr := (&net.Dialer{}).DialContext(ctx, network, addr)
-			if err := netns.Set(host); err != nil {
+			locked := true
+			restore := func() error {
+				if !locked {
+					return nil
+				}
+				if err := netns.Set(host); err != nil {
+					return fmt.Errorf("while restoring the worker netns: %w", err)
+				}
+				runtime.UnlockOSThread()
+				locked = false
+				return nil
+			}
+			dialer := &net.Dialer{ControlContext: func(context.Context, string, string, syscall.RawConn) error {
+				if !locked {
+					return fmt.Errorf("sandbox dial cannot recreate its socket outside the namespace")
+				}
+				return restore()
+			}}
+			conn, dialErr := dialer.DialContext(ctx, network, addr)
+			if err := restore(); err != nil {
 				if conn != nil {
 					conn.Close()
 				}
-				done <- result{err: fmt.Errorf("while restoring the worker netns: %w", err)}
+				done <- result{err: err}
 				return
 			}
-			runtime.UnlockOSThread()
 			done <- result{conn: conn, err: dialErr}
 		}()
 		completed := <-done

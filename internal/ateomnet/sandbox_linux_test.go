@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime/pprof"
 	"sync"
 	"testing"
 	"time"
@@ -36,6 +37,78 @@ import (
 )
 
 const testEgressPort = 15001
+
+func TestNetNSDialerRejectsNonIPTargets(t *testing.T) {
+	for _, target := range []struct{ network, address string }{
+		{"tcp", "localhost:80"},
+		{"tcp", ":80"},
+		{"tcp", "127.0.0.1"},
+		{"unix", "/tmp/socket"},
+	} {
+		if conn, err := NetNSDialer(-1)(context.Background(), target.network, target.address); err == nil {
+			_ = conn.Close()
+			t.Errorf("accepted %s %s", target.network, target.address)
+		}
+	}
+}
+
+func TestNetNSDialerDoesNotPinPendingThreads(t *testing.T) {
+	roottest.Require(t, "creates network namespaces")
+	network, err := SetupSandboxNetwork(context.Background(), SandboxNetworkConfig{
+		ActorUID: "pending-dial-threads", EgressPort: testEgressPort,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = CleanupSandboxNetwork(network) })
+	if err := NetNSDo(context.Background(), network.GatewayNetNS, func(context.Context) error {
+		link := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "silent"}}
+		if err := netlink.LinkAdd(link); err != nil {
+			return err
+		}
+		if err := netlink.AddrReplace(link, MustParseAddr("192.0.2.1/24")); err != nil {
+			return err
+		}
+		return netlink.LinkSetUp(link)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before := pprof.Lookup("threadcreate").Count()
+	ctx, cancel := context.WithCancel(context.Background())
+	var workers sync.WaitGroup
+	defer func() { cancel(); workers.Wait() }()
+	finished := make(chan error, 64)
+	for range 64 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			conn, err := NetNSDialer(network.GatewayNetNS)(ctx, "tcp", "192.0.2.2:80")
+			if conn != nil {
+				_ = conn.Close()
+			}
+			finished <- err
+		}()
+	}
+	select {
+	case err := <-finished:
+		t.Fatalf("dial did not remain pending: %v", err)
+	case <-time.After(250 * time.Millisecond):
+	}
+	if growth := pprof.Lookup("threadcreate").Count() - before; growth >= 48 {
+		t.Errorf("64 pending dials created %d native threads", growth)
+	}
+	cancel()
+	for range 64 {
+		select {
+		case err := <-finished:
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("canceled dial: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("dial did not stop after cancellation")
+		}
+	}
+}
 
 func TestSandboxSessionDialerAfterClose(t *testing.T) {
 	session := &SandboxSession{}
