@@ -74,7 +74,7 @@ func (s *AteomService) gracefulShutdown(ctx context.Context) {
 
 	// Cancel an in-flight run or restore. Waiting for a cold boot to finish only to
 	// SIGTERM the guest it just produced is strictly worse than aborting it.
-	s.cancelActiveRestoreOrRunRPC()
+	s.cancelStartups(ctx)
 
 	// One deadline covers the whole drain. Waiting for the lock and waiting out
 	// SIGTERM below both run against it, so the two phases split a single grace
@@ -83,31 +83,23 @@ func (s *AteomService) gracefulShutdown(ctx context.Context) {
 	// workloadGracePeriod however the time falls between them.
 	deadline := time.Now().Add(workloadGracePeriod)
 
-	// Wait for whatever still holds lock — a suspend, a resume — to finish, but
-	// not past the deadline. Letting it run that long is the price of not
-	// truncating an RPC that may be saving the actor's state.
-	lockCtx, lockCancel := context.WithDeadline(ctx, deadline)
-	defer lockCancel()
-	if !s.lock.LockContext(lockCtx) {
-		slog.ErrorContext(ctx, "Failed to acquire lock during graceful shutdown; another RPC is still running")
-		return
+	// Let checkpoints finish saving state before stopping guests.
+	waitCtx, waitCancel := context.WithDeadline(ctx, deadline)
+	defer waitCancel()
+	if !s.inFlight.WaitIdle(waitCtx) {
+		slog.ErrorContext(ctx, "Giving up waiting for in-flight RPCs during graceful shutdown",
+			slog.Any("rpcs", s.inFlight.Names()))
 	}
-	// Snapshot by value rather than ranging over s.running directly: we drop the
-	// lock immediately below, and a suspend landing mid-drain deletes from the live
-	// map and writes through the *runningActor it finds there (teardownActor closes
-	// guestAgent and nils the field). Copying the map alone would not help — its
-	// values are pointers into that same mutable state.
-	targets := make([]drainTarget, 0, len(s.running))
-	for id, ra := range s.running {
+	// Copy VM records before unlocking; concurrent teardown mutates them.
+	hosted := s.hostedActors()
+	targets := make([]drainTarget, 0, len(hosted))
+	for _, h := range hosted {
+		ra := s.runningVM(h.attribution.UID)
 		if ra == nil {
 			continue
 		}
-		targets = append(targets, drainTarget{id: id, agent: ra.guestAgent, workloadIDs: ra.workloadIDs})
+		targets = append(targets, drainTarget{id: h.attribution.UID, agent: ra.guestAgent, workloadIDs: ra.workloadIDs})
 	}
-
-	// Release lock so the service can answer new RPCs — notably a suspend arriving
-	// mid-drain — while the stop below waits out the grace period.
-	s.lock.Unlock()
 
 	if len(targets) == 0 {
 		slog.InfoContext(ctx, "No active actor sessions at shutdown; exiting cleanly")

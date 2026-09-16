@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/agent-substrate/substrate/internal/ateomstats"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -28,6 +27,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"time"
+
+	"github.com/agent-substrate/substrate/internal/ateomstats"
 
 	"github.com/agent-substrate/substrate/internal/ateomnet"
 
@@ -228,18 +229,18 @@ func (s *AteomService) resolveRuntime(paths map[string]string) resolvedRuntime {
 //     base kata config) are on disk and passed as runtime asset paths.
 //   - The OCI bundle (config.json + populated rootfs/) is prepared per container.
 func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkloadRequest) (resp *ateompb.RunWorkloadResponse, retErr error) {
-	s.lock.Lock()
-	defer s.lock.Unlock()
-	if err := s.rejectIfDraining(); err != nil {
-		return nil, err
+	if !s.locks.Lock(ctx, req.GetActorUid()) {
+		return nil, status.Error(codes.Canceled, "gave up waiting for the actor's lock")
 	}
-
-	// Register the boot so a SIGTERM arriving mid-cold-boot cancels it rather than
-	// waiting out the whole thing holding lock.
+	defer s.locks.Unlock(req.GetActorUid())
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	s.setActiveRPC(rpcRunWorkload, cancel)
-	defer s.clearActiveRPC()
+	// Register for startup cancellation before checking for shutdown.
+	release, err := s.beginRPC(req.GetActorUid(), rpcRunWorkload, cancel, true)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 
 	if err := s.deactivateActorNetworking(ctx, ateomstats.ActorAttributionFromRequest(req)); err != nil {
 		return nil, err
@@ -259,16 +260,13 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	attribution := p.actorAttribution()
 	s.actorLogger.EmitLifecycleLog(ctx, "Actor starting", attribution)
 
-	// Retain the attribution before the boot rather than after it, so a sample
-	// taken against a workload that dies mid-boot is still attributable. A cold
-	// boot can take a while and can be retried, and an actor that never reaches
-	// readyz is one whose usage is worth reporting rather than the one case that
-	// reports nothing. The defer drops it again if the boot fails outright.
-	// Matches ateom-gvisor's RunWorkload.
-	s.activeActor.Store(&attribution)
+	// Publish attribution before boot so stats can include startup usage.
+	if _, err := s.hostActor(ctx, attribution); err != nil {
+		return nil, err
+	}
 	defer func() {
 		if retErr != nil {
-			s.activeActor.Store(nil)
+			_ = s.unhostActor(ctx, attribution.UID)
 		}
 	}()
 
@@ -299,8 +297,6 @@ type actorBootParams struct {
 	size sizing.SandboxSize
 }
 
-// attribution is who this boot is for, as the tunnel and the stats path name
-// an actor.
 func (p actorBootParams) attribution() resources.ActorAttribution {
 	return resources.ActorAttribution{
 		Ref:              p.actorRef,
@@ -346,6 +342,10 @@ func (s *AteomService) coldBootActorRetrying(ctx context.Context, p actorBootPar
 		}
 		slog.WarnContext(ctx, "Micro-VM stopped before the kata-agent answered; retrying cold boot",
 			slog.String("id", p.actorUID), slog.Int("attempt", attempt), slog.Any("err", err))
+		// Recreate the network removed by the failed attempt.
+		if _, err := s.hostActor(ctx, p.attribution()); err != nil {
+			return err
+		}
 	}
 }
 
@@ -382,9 +382,6 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 
 	// Networking (host side): the actor's own namespace. The tap is built below
 	// (after the VM exists) so its FDs are fresh.
-	if err := s.prepareSandboxNetwork(ctx, actorUID); err != nil {
-		return err
-	}
 	defer func() {
 		if retErr != nil {
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
@@ -392,7 +389,7 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 			if cleanupErr := s.deactivateActorNetworking(cleanupCtx, p.attribution()); cleanupErr != nil {
 				slog.WarnContext(cleanupCtx, "Failed to deactivate actor networking after Run failure", slog.Any("err", cleanupErr))
 			}
-			if cleanupErr := s.releaseSandboxNetwork(cleanupCtx); cleanupErr != nil {
+			if cleanupErr := s.unhostActor(cleanupCtx, actorUID); cleanupErr != nil {
 				slog.WarnContext(cleanupCtx, "Failed to clean up actor network after Run failure", slog.Any("err", cleanupErr))
 			}
 			// Detach any bundle rootfs overlays mounted by buildActorContainers
@@ -504,7 +501,7 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 
 	// Network device: build the actor's tap and add a virtio-net to the created
 	// (pre-boot) VM with its FDs (SCM_RIGHTS).
-	tapFiles, err := setupActorTap(ctx, s.sandboxNetNS(), "tap0_kata", 1)
+	tapFiles, err := setupActorTap(ctx, s.sandboxNetNS(actorUID), "tap0_kata", 1)
 	if err != nil {
 		return fmt.Errorf("while building tap: %w", err)
 	}
@@ -560,7 +557,7 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 	tContainers := time.Now()
 
 	// Block until every readyz-enabled container reports 200.
-	if err := readyz.WaitAll(ctx, containers, ateomnet.ActorVethIP, readyz.DialFunc(s.sandbox.Dialer())); err != nil {
+	if err := readyz.WaitAll(ctx, containers, ateomnet.ActorVethIP, s.readyzDialer(actorUID)); err != nil {
 		return fmt.Errorf("while waiting for container readyz: %w", err)
 	}
 
@@ -577,7 +574,7 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 	if err := s.activateActorNetworking(p.attribution(), egress); err != nil {
 		return err
 	}
-	s.running[actorUID] = ra
+	s.setRunningVM(actorUID, ra)
 
 	// Forward each container's stdout/stderr into the pod logs, keyed by the
 	// container id (== the name; see StartRootfsContainer). The goroutines read
@@ -595,7 +592,7 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 	// then try the whole boot again), so a target published earlier would leave
 	// the handler polling a connection nobody owns. Same client the forwarding
 	// above reads over — ttrpc multiplexes, and teardownActor ends both.
-	s.guestStats.Store(&guestStatsTarget{actorUID: actorUID, agent: ac, workloadIDs: workloadIDs})
+	s.setGuestStats(actorUID, &guestStatsTarget{actorUID: actorUID, agent: ac, workloadIDs: workloadIDs})
 
 	return nil
 }
@@ -860,7 +857,7 @@ func (s *AteomService) startActorContainers(ctx context.Context, ac *kata.AgentC
 	tSandbox := time.Now()
 
 	// Configure guest networking (the shim's job): eth0 IP/MAC/MTU, routes, ARP.
-	mtu := uint64(actorTapMTUOf(ctx, s.sandboxNetNS(), "tap0_kata"))
+	mtu := uint64(actorTapMTUOf(ctx, s.sandboxNetNS(id), "tap0_kata"))
 	netCtx, netCancel := context.WithTimeout(ctx, 20*time.Second)
 	err = s.configureGuestNetwork(netCtx, ac, mtu)
 	netCancel()

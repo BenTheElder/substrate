@@ -82,6 +82,7 @@ var (
 	atunnelEgressListenAddress  = flag.String("atunnel-egress-listen-address", "0.0.0.0:15001", "Address for transparently intercepted actor egress TCP")
 	egressGatewayTrustBundle    = flag.String("atunnel-egress-trust-bundle", "/run/servicedns.podcert.ate.dev/trust-bundle.pem", "Service DNS trust bundle for the remote egress gateway")
 	readinessListenAddress      = flag.String("readiness-listen-address", "0.0.0.0:8080", "Address for HTTP readiness checks")
+	maxActors                   = flag.Int("max-actors", ateomnet.DefaultMaxActors, "How many actors this worker will host at once")
 )
 
 const (
@@ -212,7 +213,7 @@ func do(ctx context.Context) error {
 	}
 	slog.InfoContext(ctx, "Actor DNS relay ready", slog.Any("upstreams", nameservers))
 
-	ateomService := NewService(*podUID, *chBinary, *kataConfig, *kataDebug, *vmmMemReserve, dnsRelay, actorLogger, *workerCredentialBundle, *podIdentityTrustBundle, *egressGatewayTrustBundle)
+	ateomService := NewService(*podUID, *chBinary, *kataConfig, *kataDebug, *vmmMemReserve, *maxActors, dnsRelay, actorLogger, *workerCredentialBundle, *podIdentityTrustBundle, *egressGatewayTrustBundle)
 
 	atunnelIngress, err := atunnel.NewServer(atunnel.Config{
 		CredentialBundlePath: *workerCredentialBundle,
@@ -342,20 +343,14 @@ const (
 	rpcCheckpointWorkload = "CheckpointWorkload"
 )
 
-// activeRPCInfo identifies the workload RPC currently holding lock, so graceful
-// shutdown can cancel a boot that would otherwise hold it for minutes.
-type activeRPCInfo struct {
-	name   string
-	cancel context.CancelFunc
-}
-
 // AteomService is the cloud-hypervisor implementation of ateompb.AteomServer.
 type AteomService struct {
 	ateompb.UnimplementedAteomServer
 
-	// lock serializes RPCs; like ateom-gvisor, the run/checkpoint/restore
-	// lifecycle is not safe to drive concurrently.
-	lock *actorlock.CancelableMutex
+	// Serializes lifecycle RPCs per actor.
+	locks *actorlock.Locks
+	// Tracks lifecycle RPCs for shutdown cancellation and draining.
+	inFlight *actorlock.InFlight
 
 	// shuttingDown is set once SIGTERM has been received. While true, new workload
 	// RPCs are rejected with codes.Unavailable so the control plane reschedules.
@@ -364,13 +359,6 @@ type AteomService struct {
 	// take lock, precisely so an RPC that arrives while it is still waiting is
 	// turned away instead of queueing behind it.
 	shuttingDown atomic.Bool
-
-	// activeRPC is the workload RPC in flight, tracked so gracefulShutdown can
-	// cancel a run or restore rather than wait out its boot. Guarded by
-	// activeRPCMu, which is separate from lock because the whole point is to reach
-	// it while lock is held by the RPC being cancelled.
-	activeRPCMu sync.Mutex
-	activeRPC   *activeRPCInfo
 
 	podUID     string
 	chBinary   string
@@ -381,9 +369,6 @@ type AteomService struct {
 	// the cloud-hypervisor VMM + virtiofsd (host processes sharing the pod cgroup
 	// with the guest RAM). Set from --vmm-mem-reserve-mib.
 	memReserveMiB int
-
-	// sandbox is the network of the actor this worker is serving.
-	sandbox ateomnet.SessionHolder
 
 	// dnsRelay answers the actor's DNS from inside its own namespace.
 	dnsRelay *atunnel.DNSRelay
@@ -406,61 +391,24 @@ type AteomService struct {
 	// egressGatewayTrustBundlePath verifies the remote gateway's serving cert.
 	egressGatewayTrustBundlePath string
 
-	// running maps actor UID -> the live micro-VM, kept so CheckpointWorkload can
-	// pause+snapshot+teardown the same sandbox (and RestoreWorkload can track the
-	// CH it relaunched).
-	running map[string]*runningActor
-
-	// activeActor is the actor whose workload this ateom is currently running,
-	// or nil when it is "available". An ateom serves one actor at a time, so a
-	// single slot is enough; running is keyed by UID for lookup, not because
-	// several actors can be live at once.
-	//
-	// Set by RunWorkload / RestoreWorkload and cleared by CheckpointWorkload, so
-	// it tracks exactly the available/executing state machine described on the
-	// Ateom service. GetWorkloadStats reads it to attribute its sample.
-	//
-	// Kept here rather than on runningActor, even though that struct already
-	// exists per actor: runningActor holds processes that do not exist until the
-	// guest is up (chCmd, vfsdCmd, guestAgent), so it cannot be built before the
-	// boot, and an entry in running is what tells CheckpointWorkload a live VM is
-	// there. Attribution has to outlive both of those constraints — it is needed
-	// from the moment the ateom accepts the actor, including for a boot that
-	// never finishes. Same field, same timing, as the gVisor ateom's
-	// AteomService.activeActor.
-	//
-	// Atomic for the same reason as there, and it matters at least as much on
-	// this runtime: lock is held across a cold boot with its retry, across a
-	// snapshot write, and across a restore, so a lock-guarded read would park a
-	// poller through all of them. The writers keep holding lock; the point is the
-	// reader. As there, the type makes a lock-free read possible without making
-	// one happen — GetWorkloadStats must not take lock at all.
-	activeActor atomic.Pointer[resources.ActorAttribution]
-
-	// guestStats is what GetWorkloadStats measures with: the kata-agent client
-	// and the guest containers to sum. Nil whenever there is no guest to ask —
-	// before the containers are up, after teardownActor, and for the rest of an
-	// activation whose post-restore agent dial failed.
-	//
-	// Separate from activeActor because the two become true at different points:
-	// the attribution is retained from the moment the ateom accepts the actor,
-	// deliberately including a boot that never finishes, while this can only
-	// exist once the guest is answering. Non-nil here implies activeActor is
-	// set, never the reverse.
-	//
-	// Atomic for the same reason as activeActor, and it is the other half of the
-	// same rule: GetWorkloadStats must not take lock, so it cannot reach into
-	// running for the agent client the way a lifecycle RPC does. Written under
-	// lock like every other transition; the atomic is for the reader.
-	guestStats atomic.Pointer[guestStatsTarget]
+	// Guards actors, draining, and mutable hostedActor fields.
+	actorsMu sync.RWMutex
+	// Keyed by actor UID.
+	actors map[string]*hostedActor
+	// Actors undergoing network cleanup still count against capacity.
+	draining  int
+	maxActors int
 }
 
 var _ ateompb.AteomServer = (*AteomService)(nil)
 
 // NewService creates a new AteomService.
-func NewService(podUID, chBinary, kataConfig string, kataDebug bool, memReserveMiB int, dnsRelay *atunnel.DNSRelay, actorLogger *actorlog.ActorLogger, workerCredentialBundlePath, podIdentityTrustBundlePath, egressGatewayTrustBundlePath string) *AteomService {
+func NewService(podUID, chBinary, kataConfig string, kataDebug bool, memReserveMiB, maxActors int, dnsRelay *atunnel.DNSRelay, actorLogger *actorlog.ActorLogger, workerCredentialBundlePath, podIdentityTrustBundlePath, egressGatewayTrustBundlePath string) *AteomService {
 	return &AteomService{
-		lock:                         actorlock.NewCancelableMutex(),
+		locks:                        actorlock.New(),
+		inFlight:                     actorlock.NewInFlight(),
+		actors:                       map[string]*hostedActor{},
+		maxActors:                    maxActors,
 		podUID:                       podUID,
 		chBinary:                     chBinary,
 		kataConfig:                   kataConfig,
@@ -471,7 +419,6 @@ func NewService(podUID, chBinary, kataConfig string, kataDebug bool, memReserveM
 		workerCredentialBundlePath:   workerCredentialBundlePath,
 		podIdentityTrustBundlePath:   podIdentityTrustBundlePath,
 		egressGatewayTrustBundlePath: egressGatewayTrustBundlePath,
-		running:                      map[string]*runningActor{},
 	}
 }
 
@@ -525,7 +472,7 @@ func (s *AteomService) prepareActorEgress(ctx context.Context, actorAtespace, ac
 }
 
 func (s *AteomService) activateActorNetworking(actor resources.ActorAttribution, egress *actorEgress) error {
-	if err := s.atunnelIngress.Activate(actor.Ref.Atespace, actor.Ref.Name, s.sandbox.Dialer()); err != nil {
+	if err := s.atunnelIngress.Activate(actor.Ref.Atespace, actor.Ref.Name, s.sandboxDialer(actor.UID)); err != nil {
 		return fmt.Errorf("while activating actor ingress: %w", err)
 	}
 	if egress == nil {
@@ -550,6 +497,16 @@ func (s *AteomService) deactivateActorNetworking(ctx context.Context, actor reso
 	return nil
 }
 
+// beginRPC registers before checking the drain flag so shutdown cannot miss it.
+func (s *AteomService) beginRPC(actorUID, name string, cancel context.CancelFunc, cancelable bool) (func(), error) {
+	release := s.inFlight.Add(actorUID, name, cancel, cancelable)
+	if err := s.rejectIfDraining(); err != nil {
+		release()
+		return nil, err
+	}
+	return release, nil
+}
+
 // rejectIfDraining returns a codes.Unavailable error if ateom has begun graceful
 // shutdown, so the control plane reschedules the actor onto a live worker.
 func (s *AteomService) rejectIfDraining() error {
@@ -559,27 +516,10 @@ func (s *AteomService) rejectIfDraining() error {
 	return nil
 }
 
-func (s *AteomService) setActiveRPC(name string, cancel context.CancelFunc) {
-	s.activeRPCMu.Lock()
-	defer s.activeRPCMu.Unlock()
-	s.activeRPC = &activeRPCInfo{name: name, cancel: cancel}
-}
-
-func (s *AteomService) clearActiveRPC() {
-	s.activeRPCMu.Lock()
-	defer s.activeRPCMu.Unlock()
-	s.activeRPC = nil
-}
-
-// cancelActiveRestoreOrRunRPC cancels an in-flight run or restore so it releases
-// lock instead of running its boot to completion. A checkpoint is deliberately
-// left alone: it is the one workload RPC worth finishing during a drain, since
-// it is what saves the actor's state.
-func (s *AteomService) cancelActiveRestoreOrRunRPC() {
-	s.activeRPCMu.Lock()
-	defer s.activeRPCMu.Unlock()
-	if s.activeRPC != nil && (s.activeRPC.name == rpcRestoreWorkload || s.activeRPC.name == rpcRunWorkload) {
-		slog.Info("Cancelling in-progress workload startup RPC due to graceful shutdown", slog.String("rpc", s.activeRPC.name))
-		s.activeRPC.cancel()
+// cancelStartups cancels all boots and restores, leaving checkpoints running.
+func (s *AteomService) cancelStartups(ctx context.Context) {
+	for _, actorUID := range s.inFlight.CancelStartups() {
+		slog.InfoContext(ctx, "Cancelling in-progress workload startup RPC due to graceful shutdown",
+			slog.String("actorUID", actorUID))
 	}
 }
