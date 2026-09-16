@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"github.com/agent-substrate/substrate/internal/actorlock"
+	"github.com/agent-substrate/substrate/internal/ateomnet"
 	"os"
 	"path/filepath"
 	"testing"
@@ -64,25 +65,44 @@ func newStatsService(t *testing.T, files map[string]string) *AteomService {
 	t.Helper()
 	root := t.TempDir()
 	if files != nil {
-		dir := filepath.Join(root, ocispec.GVisorCgroupLeaf(testActor.UID, sandboxCgroupContainer))
-		if err := os.Mkdir(dir, 0o700); err != nil {
-			t.Fatalf("creating fixture cgroup dir: %v", err)
-		}
-		for name, content := range files {
-			if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
-				t.Fatalf("writing fixture %q: %v", name, err)
-			}
-		}
+		writeCgroupFixture(t, root, ocispec.GVisorCgroupLeaf(testActor.UID, sandboxCgroupContainer), files)
 	}
 	return &AteomService{
-		lock:       actorlock.NewCancelableMutex(),
+		locks:      actorlock.New(),
+		actors:     map[string]*hostedActor{},
+		maxActors:  ateomnet.DefaultMaxActors,
 		cgroupRoot: root,
+	}
+}
+
+// writeCgroupFixture lays down one actor's cgroup leaf under root.
+func writeCgroupFixture(t *testing.T, root, leaf string, files map[string]string) {
+	t.Helper()
+	dir := filepath.Join(root, leaf)
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatalf("creating fixture cgroup dir: %v", err)
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+			t.Fatalf("writing fixture %q: %v", name, err)
+		}
+	}
+}
+
+// setHostedActor makes the ateom host exactly this actor, the way RunWorkload
+// would, or nothing when attribution is nil.
+func setHostedActor(s *AteomService, attribution *resources.ActorAttribution) {
+	s.actorsMu.Lock()
+	defer s.actorsMu.Unlock()
+	s.actors = map[string]*hostedActor{}
+	if attribution != nil {
+		s.actors[attribution.UID] = &hostedActor{attribution: *attribution}
 	}
 }
 
 func TestGetWorkloadStats(t *testing.T) {
 	s := newStatsService(t, healthyCgroup)
-	s.activeActor.Store(&testActor)
+	setHostedActor(s, &testActor)
 
 	before := time.Now().UnixNano()
 	got, err := s.GetWorkloadStats(context.Background(), &ateompb.GetWorkloadStatsRequest{ActorUid: "uid-a"})
@@ -178,7 +198,7 @@ func TestGetWorkloadStatsErrors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newStatsService(t, tc.files)
 			if tc.active != nil {
-				s.activeActor.Store(tc.active)
+				setHostedActor(s, tc.active)
 			}
 
 			resp, err := s.GetWorkloadStats(context.Background(), &ateompb.GetWorkloadStatsRequest{ActorUid: tc.actorUID})
@@ -199,12 +219,14 @@ func TestGetWorkloadStatsErrors(t *testing.T) {
 // assertion.
 func TestGetWorkloadStatsDoesNotTakeLock(t *testing.T) {
 	s := newStatsService(t, healthyCgroup)
-	s.activeActor.Store(&testActor)
+	setHostedActor(s, &testActor)
 
-	// Stands in for a RunWorkload or CheckpointWorkload in flight, which hold the
-	// lock across their entire bodies.
-	s.lock.Lock()
-	defer s.lock.Unlock()
+	// Stands in for a RunWorkload or CheckpointWorkload in flight against this
+	// actor, which holds its lock across the entire body.
+	if !s.locks.Lock(context.Background(), testActor.UID) {
+		t.Fatal("could not take the actor lock")
+	}
+	defer s.locks.Unlock(testActor.UID)
 
 	if _, err := s.GetWorkloadStats(context.Background(), &ateompb.GetWorkloadStatsRequest{ActorUid: "uid-a"}); err != nil {
 		t.Errorf("GetWorkloadStats() error = %v, want nil", err)
@@ -216,14 +238,14 @@ func TestGetWorkloadStatsDoesNotTakeLock(t *testing.T) {
 // is built on this: a non-nil zero value here would make an idle ateom report
 // an empty actor's usage instead of refusing.
 func TestAteomServiceStartsAvailable(t *testing.T) {
-	if got := (&AteomService{}).activeActor.Load(); got != nil {
-		t.Errorf("new AteomService.activeActor = %v, want nil", got)
+	if got := (&AteomService{}).hostedActors(); len(got) != 0 {
+		t.Errorf("new AteomService hosts %v, want nothing", got)
 	}
 }
 
 func TestGetActiveWorkloadStats(t *testing.T) {
 	s := newStatsService(t, healthyCgroup)
-	s.activeActor.Store(&testActor)
+	setHostedActor(s, &testActor)
 
 	got, err := s.GetActiveWorkloadStats(context.Background(), &ateompb.GetActiveWorkloadStatsRequest{})
 	if err != nil {
@@ -283,7 +305,7 @@ func pendingFor(attr resources.ActorAttribution) *ateompb.WorkloadStatsSample {
 // boot attributable.
 func TestGetActiveWorkloadStatsBooting(t *testing.T) {
 	s := newStatsService(t, nil) // no cgroup directory: a poll landing mid-boot
-	s.activeActor.Store(&testActor)
+	setHostedActor(s, &testActor)
 
 	got, err := s.GetActiveWorkloadStats(context.Background(), &ateompb.GetActiveWorkloadStatsRequest{})
 	if err != nil {
@@ -302,11 +324,13 @@ func TestGetActiveWorkloadStatsBooting(t *testing.T) {
 	}
 }
 
-// The transition tests cover the re-check that runs after the lock-free
-// measurement, via the readSandboxCgroup seam: flipping activeActor inside the
-// read lands in exactly the window a checkpoint plus a fresh run (or a
-// checkpoint alone) can land in.
+// The transition tests change the hosted set inside the lock-free measurement,
+// via the readSandboxCgroup seam: that is exactly the window a checkpoint plus
+// a fresh run (or a checkpoint alone) can land in.
 
+// The discovery read samples the set it snapshotted, so a change underneath it
+// does not move the attribution: the numbers belong to the actor they were
+// read for either way, and the next tick reports the new set.
 func TestGetActiveWorkloadStatsTransition(t *testing.T) {
 	otherActor := testActor
 	otherActor.UID = "uid-b"
@@ -314,24 +338,17 @@ func TestGetActiveWorkloadStatsTransition(t *testing.T) {
 	tests := []struct {
 		name string
 		to   *resources.ActorAttribution
-		// want is the expected samples list: a pending entry for the new
-		// occupant, or nothing when the slot emptied.
-		want []*ateompb.WorkloadStatsSample
 	}{
-		// A new actor took the slot: there is a workload, its numbers are just
-		// not attributable this tick, so it answers as that actor's pending
-		// entry.
-		{name: "to another actor", to: &otherActor, want: []*ateompb.WorkloadStatsSample{pendingFor(otherActor)}},
-		// A checkpoint emptied the slot: report what is true now.
-		{name: "to available", to: nil, want: nil},
+		{name: "to another actor", to: &otherActor},
+		{name: "to available", to: nil},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newStatsService(t, healthyCgroup)
-			s.activeActor.Store(&testActor)
+			setHostedActor(s, &testActor)
 			s.readSandboxCgroup = func(dir string) (cgroupstats.Sample, error) {
-				s.activeActor.Store(tc.to)
+				setHostedActor(s, tc.to)
 				return cgroupstats.Read(dir)
 			}
 
@@ -339,11 +356,11 @@ func TestGetActiveWorkloadStatsTransition(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GetActiveWorkloadStats() during transition: error = %v, want nil", err)
 			}
-			for _, entry := range got.GetSamples() {
-				entry.ObservedAtUnixNano = 0
+			if len(got.GetSamples()) != 1 {
+				t.Fatalf("GetActiveWorkloadStats() = %v, want exactly one sample", got)
 			}
-			if diff := cmp.Diff(tc.want, got.GetSamples(), protocmp.Transform()); diff != "" {
-				t.Errorf("GetActiveWorkloadStats() during transition mismatch (-want +got):\n%s", diff)
+			if uid := got.GetSamples()[0].GetActorUid(); uid != testActor.UID {
+				t.Errorf("sample attributed to %q, want %q", uid, testActor.UID)
 			}
 		})
 	}
@@ -354,14 +371,77 @@ func TestGetActiveWorkloadStatsTransition(t *testing.T) {
 // exists, so the answer is NOT_FOUND -- its mapping wants re-resolving.
 func TestGetWorkloadStatsTransition(t *testing.T) {
 	s := newStatsService(t, healthyCgroup)
-	s.activeActor.Store(&testActor)
+	setHostedActor(s, &testActor)
 	s.readSandboxCgroup = func(dir string) (cgroupstats.Sample, error) {
-		s.activeActor.Store(nil)
+		setHostedActor(s, nil)
 		return cgroupstats.Read(dir)
 	}
 
 	_, err := s.GetWorkloadStats(context.Background(), &ateompb.GetWorkloadStatsRequest{ActorUid: "uid-a"})
 	if got := status.Code(err); got != codes.NotFound {
 		t.Errorf("GetWorkloadStats() during transition: code = %v, want %v (err: %v)", got, codes.NotFound, err)
+	}
+}
+
+func TestGetActiveWorkloadStatsSeveralActors(t *testing.T) {
+	second := testActor
+	second.UID = "uid-b"
+
+	s := newStatsService(t, healthyCgroup)
+	// Give the second actor its own cgroup fixture.
+	writeCgroupFixture(t, s.cgroupRoot, ocispec.GVisorCgroupLeaf(second.UID, sandboxCgroupContainer), healthyCgroup)
+
+	s.actorsMu.Lock()
+	s.actors = map[string]*hostedActor{
+		testActor.UID: {attribution: testActor},
+		second.UID:    {attribution: second},
+	}
+	s.actorsMu.Unlock()
+
+	got, err := s.GetActiveWorkloadStats(context.Background(), &ateompb.GetActiveWorkloadStatsRequest{})
+	if err != nil {
+		t.Fatalf("GetActiveWorkloadStats() error = %v, want nil", err)
+	}
+	if len(got.GetSamples()) != 2 {
+		t.Fatalf("GetActiveWorkloadStats() returned %d samples, want 2: %v", len(got.GetSamples()), got)
+	}
+	seen := map[string]bool{}
+	for _, sample := range got.GetSamples() {
+		seen[sample.GetActorUid()] = true
+	}
+	for _, uid := range []string{testActor.UID, second.UID} {
+		if !seen[uid] {
+			t.Errorf("no sample for actor %q; got %v", uid, seen)
+		}
+	}
+}
+
+// One actor booting does not stop the rest being measured: it answers as a
+// pending entry alongside their samples.
+func TestGetActiveWorkloadStatsOneBooting(t *testing.T) {
+	booting := testActor
+	booting.UID = "uid-booting"
+
+	s := newStatsService(t, healthyCgroup)
+	s.actorsMu.Lock()
+	s.actors = map[string]*hostedActor{
+		testActor.UID: {attribution: testActor},
+		// No cgroup leaf: accepted, but runsc has not created it yet.
+		booting.UID: {attribution: booting},
+	}
+	s.actorsMu.Unlock()
+
+	got, err := s.GetActiveWorkloadStats(context.Background(), &ateompb.GetActiveWorkloadStatsRequest{})
+	if err != nil {
+		t.Fatalf("GetActiveWorkloadStats() error = %v, want nil", err)
+	}
+	if len(got.GetSamples()) != 2 {
+		t.Fatalf("GetActiveWorkloadStats() returned %d samples, want 2: %v", len(got.GetSamples()), got)
+	}
+	for _, sample := range got.GetSamples() {
+		measured := sample.GetSource() != ateompb.StatsSource_STATS_SOURCE_UNSPECIFIED
+		if want := sample.GetActorUid() == testActor.UID; measured != want {
+			t.Errorf("actor %q measured = %v, want %v", sample.GetActorUid(), measured, want)
+		}
 	}
 }

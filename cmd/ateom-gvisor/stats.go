@@ -104,13 +104,14 @@ func (s *AteomService) GetWorkloadStats(ctx context.Context, req *ateompb.GetWor
 	// Both of these are NOT_FOUND rather than FAILED_PRECONDITION: they tell the
 	// caller the requested actor is not here, which no amount of retrying on the
 	// same timer will change. Its worker-to-actor mapping wants re-resolving.
-	active := s.activeActor.Load()
-	if active == nil {
-		return nil, status.Errorf(codes.NotFound, "ateom is available; it is not executing actor %q", req.GetActorUid())
+	hosted := s.lookupActor(req.GetActorUid())
+	if hosted == nil {
+		if len(s.hostedActors()) == 0 {
+			return nil, status.Errorf(codes.NotFound, "ateom is available; it is not executing actor %q", req.GetActorUid())
+		}
+		return nil, status.Errorf(codes.NotFound, "ateom is not executing the requested actor %q", req.GetActorUid())
 	}
-	if active.UID != req.GetActorUid() {
-		return nil, status.Errorf(codes.NotFound, "ateom is executing actor %q, not the requested %q", active.UID, req.GetActorUid())
-	}
+	active := &hosted.attribution
 
 	sample, err := s.sampleSandbox(active)
 	if err != nil {
@@ -128,18 +129,10 @@ func (s *AteomService) GetWorkloadStats(ctx context.Context, req *ateompb.GetWor
 		return nil, status.Errorf(codes.Internal, "reading sandbox cgroup: %v", err)
 	}
 
-	// Re-check that the same workload is still the active one. The read above
-	// holds no lock, so a checkpoint plus a fresh run can complete underneath it,
-	// and the numbers would then belong to an actor other than the one being
-	// reported. Pointer identity is enough: activeActor is stored as a new
-	// pointer on every Run and Restore and never mutated in place, so an
-	// unchanged pointer means no transition happened across the read.
-	//
-	// NOT_FOUND, like the two checks above and for the same reason: the requested
-	// actor is no longer the one here, so a retry lands on one of them and gets
-	// that answer anyway. The same state should not report two different codes
-	// depending on where in the handler it was noticed.
-	if s.activeActor.Load() != active {
+	// The read above holds no lock, so a checkpoint plus a fresh run can land
+	// underneath it. Pointer identity catches that: hostActor stores a new
+	// record every time.
+	if s.lookupActor(req.GetActorUid()) != hosted {
 		return nil, status.Errorf(codes.NotFound, "ateom stopped executing actor %q while the sample was being taken", req.GetActorUid())
 	}
 
@@ -151,47 +144,26 @@ func (s *AteomService) GetWorkloadStats(ctx context.Context, req *ateompb.GetWor
 // whatever is executing with no identity asserted. Same lock discipline as
 // GetWorkloadStats above, for the same reasons.
 func (s *AteomService) GetActiveWorkloadStats(ctx context.Context, req *ateompb.GetActiveWorkloadStatsRequest) (*ateompb.GetActiveWorkloadStatsResponse, error) {
-	active := s.activeActor.Load()
-	if active == nil {
-		// "Available" is the empty list, per the proto: a normal answer for a
-		// scraper to get, not an error.
-		return &ateompb.GetActiveWorkloadStatsResponse{}, nil
-	}
-
-	sample, err := s.sampleSandbox(active)
-	if err != nil {
+	hosted := s.hostedActors()
+	samples := make([]*ateompb.WorkloadStatsSample, 0, len(hosted))
+	for _, h := range hosted {
 		// A missing cgroup is a workload with no numbers yet -- a poll landing
-		// in the boot -- which for a caller with no prior knowledge is as
-		// normal a finding as an available ateom. It answers as a pending
-		// entry: attribution without measurements, so even a workload that
-		// dies during boot is attributable. Anything else is a real read
-		// failure.
+		// in the boot -- which the discovery read reports as a pending entry
+		// rather than as an error, so even a workload that dies during boot is
+		// attributable. On a worker hosting several actors, one of them
+		// booting must not stop the rest being reported.
+		sample, err := s.sampleSandbox(&h.attribution)
 		if errors.Is(err, fs.ErrNotExist) {
-			return &ateompb.GetActiveWorkloadStatsResponse{
-				Samples: []*ateompb.WorkloadStatsSample{pendingSample(active)},
-			}, nil
+			sample = pendingSample(&h.attribution)
+		} else if err != nil {
+			return nil, status.Errorf(codes.Internal, "reading sandbox cgroup for actor %q: %v", h.attribution.UID, err)
 		}
-		return nil, status.Errorf(codes.Internal, "reading sandbox cgroup: %v", err)
+		samples = append(samples, sample)
 	}
 
-	// Same re-check as GetWorkloadStats, different answer: with no uid asserted
-	// there is no "requested actor" for NOT_FOUND to disown, and a transition
-	// underneath the read just means these numbers cannot be attributed to any
-	// single actor. Report the state as of now -- empty if the slot emptied, a
-	// pending entry for the new occupant otherwise; the next tick resolves it
-	// either way.
-	if latest := s.activeActor.Load(); latest != active {
-		if latest == nil {
-			return &ateompb.GetActiveWorkloadStatsResponse{}, nil
-		}
-		return &ateompb.GetActiveWorkloadStatsResponse{
-			Samples: []*ateompb.WorkloadStatsSample{pendingSample(latest)},
-		}, nil
-	}
-
-	return &ateompb.GetActiveWorkloadStatsResponse{
-		Samples: []*ateompb.WorkloadStatsSample{sample},
-	}, nil
+	// An empty list is "available", per the proto: a normal answer for a
+	// scraper to get, not an error.
+	return &ateompb.GetActiveWorkloadStatsResponse{Samples: samples}, nil
 }
 
 // pendingSample is a workload with no numbers to give yet, as the discovery
@@ -216,8 +188,8 @@ func pendingSample(active *resources.ActorAttribution) *ateompb.WorkloadStatsSam
 // active. Errors come back raw -- notably fs.ErrNotExist for a cgroup that is
 // not there yet -- because the two RPCs disagree on what that means: an error
 // code for the keyed read, a normal EXECUTING answer for the discovery read.
-// Callers re-check s.activeActor against the pointer they loaded after this
-// returns; the read holds no lock.
+// The read holds no lock, so the keyed caller re-checks the actor record it
+// loaded after this returns.
 func (s *AteomService) sampleSandbox(active *resources.ActorAttribution) (*ateompb.WorkloadStatsSample, error) {
 	read := s.readSandboxCgroup
 	if read == nil {
