@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/agent-substrate/substrate/internal/resources"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -68,11 +69,11 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 	s.setActiveRPC(rpcCheckpointWorkload, cancel)
 	defer s.clearActiveRPC()
 
-	if err := s.deactivateActorNetworking(ctx); err != nil {
+	attribution := ateomstats.ActorAttributionFromRequest(req)
+	if err := s.deactivateActorNetworking(ctx, attribution); err != nil {
 		return nil, err
 	}
 
-	attribution := ateomstats.ActorAttributionFromRequest(req)
 	actorUID := req.GetActorUid()
 
 	s.actorLogger.EmitLifecycleLog(ctx, "Actor checkpointing", attribution)
@@ -187,7 +188,7 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 	// Tear down: the actor returns to "available". Best-effort; the snapshot is
 	// already on disk for atelet to ship.
 	tTeardown := time.Now()
-	if err := s.terminateWorkload(ctx, actorUID); err != nil {
+	if err := s.terminateWorkload(ctx, attribution); err != nil {
 		slog.WarnContext(ctx, "failed to terminate workload after checkpoint",
 			slog.String("actor", attribution.Ref.String()),
 			slog.String("actorUID", actorUID),
@@ -356,7 +357,7 @@ func (s *AteomService) TerminateWorkload(ctx context.Context, req *ateompb.Termi
 
 	attribution := ateomstats.ActorAttributionFromRequest(req)
 
-	if err := s.terminateWorkload(ctx, attribution.UID); err != nil {
+	if err := s.terminateWorkload(ctx, attribution); err != nil {
 		return nil, fmt.Errorf("failed to terminate workload: %w", err)
 	}
 
@@ -365,12 +366,13 @@ func (s *AteomService) TerminateWorkload(ctx context.Context, req *ateompb.Termi
 	return &ateompb.TerminateWorkloadResponse{}, nil
 }
 
-func (s *AteomService) terminateWorkload(ctx context.Context, actorUID string) error {
+func (s *AteomService) terminateWorkload(ctx context.Context, actor resources.ActorAttribution) error {
 	var errs []error
-	if err := s.deactivateActorNetworking(ctx); err != nil {
+	if err := s.deactivateActorNetworking(ctx, actor); err != nil {
 		errs = append(errs, fmt.Errorf("while deactivating actor networking: %w", err))
 	}
 
+	actorUID := actor.UID
 	ra := s.running[actorUID]
 	chSocket := kata.CLHSocketPath(actorUID)
 	if ra != nil && ra.apiSocket != "" {
