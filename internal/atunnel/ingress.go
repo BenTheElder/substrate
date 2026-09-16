@@ -134,7 +134,7 @@ func NewServer(cfg Config) (*Server, error) {
 	if dial == nil {
 		dial = (&net.Dialer{}).DialContext
 	}
-	transport := newProtocolMirrorTransport(cfg.Dial)
+	transport := newProtocolMirrorTransport(dial)
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(cfg.Upstream)

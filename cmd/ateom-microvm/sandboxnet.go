@@ -32,6 +32,12 @@ import (
 
 // prepareSandboxNetwork builds the actor's network and starts serving it.
 func (s *AteomService) prepareSandboxNetwork(ctx context.Context, actorUID string) error {
+	// A previous actor's session can still be here if its teardown never ran,
+	// and overwriting it would leak both namespaces, their /run/netns mounts,
+	// the egress listener and the DNS goroutines.
+	if err := s.releaseSandboxNetwork(ctx); err != nil {
+		return fmt.Errorf("while releasing the previous sandbox network: %w", err)
+	}
 	session, err := ateomnet.ServeSandbox(ctx, ateomnet.SandboxNetworkConfig{
 		ActorUID:      actorUID,
 		EgressPort:    s.atunnelEgressPort,

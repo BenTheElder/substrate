@@ -176,6 +176,11 @@ func (r *DNSRelay) Serve(ctx context.Context, listener net.Listener) error {
 	}()
 	defer close(done)
 
+	// Wait for the relays to drain before returning, so a closed listener
+	// leaves no goroutine still holding a connection slot.
+	var wg sync.WaitGroup
+	defer wg.Wait()
+
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -191,7 +196,9 @@ func (r *DNSRelay) Serve(ctx context.Context, listener net.Listener) error {
 			_ = conn.Close()
 			continue
 		}
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			defer func() { <-r.connections }()
 			r.relayTCP(ctx, conn)
 		}()

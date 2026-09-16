@@ -71,6 +71,11 @@ type SandboxNetworkConfig struct {
 	// snapshot freezes the guest's ARP entry for it, so a random MAC would
 	// blackhole guest egress until that entry expired. gVisor re-ARPs and can
 	// leave it unset.
+	//
+	// Applies to the veth path only. The tap path sets its own MAC in
+	// setupActorTap, after LinkAdd, because tuntap creation ignores the
+	// hardware address in the link attributes. Both belong here once the two
+	// runtimes share one shape.
 	GatewayHWAddr net.HardwareAddr
 }
 
@@ -117,6 +122,11 @@ func SetupSandboxNetwork(ctx context.Context, cfg SandboxNetworkConfig) (_ *Sand
 			veth := &netlink.Veth{
 				LinkAttrs: netlink.LinkAttrs{Name: gatewayVethName},
 				PeerName:  ActorVethName,
+				// Create the peer directly in the actor's namespace. Moving a
+				// netdev across namespaces afterwards costs several times the
+				// whole setup, all of it under the global RTNL lock, and this
+				// runs on the resume path.
+				PeerNamespace: netlink.NsFd(int(actorNS)),
 			}
 			if cfg.GatewayHWAddr != nil {
 				veth.LinkAttrs.HardwareAddr = cfg.GatewayHWAddr
@@ -134,11 +144,7 @@ func SetupSandboxNetwork(ctx context.Context, cfg SandboxNetworkConfig) (_ *Sand
 			if err := netlink.LinkSetUp(atSide); err != nil {
 				return err
 			}
-			peer, err := netlink.LinkByName(ActorVethName)
-			if err != nil {
-				return err
-			}
-			return netlink.LinkSetNsFd(peer, int(actorNS))
+			return nil
 		}); err != nil {
 			return nil, err
 		}
