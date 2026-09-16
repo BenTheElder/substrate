@@ -333,7 +333,7 @@ func ListenInNetNS(ctx context.Context, ns netns.NsHandle, ports []uint16) (_ []
 // egressServer serves one actor's captured connections. Satisfied by
 // atunnel.Egress; an interface so this package does not depend on it.
 type egressServer interface {
-	Serve(ctx context.Context, actorUID string, listener net.Listener) error
+	Bind(actorUID string) (func(context.Context, net.Listener) error, error)
 }
 
 // ServeSandboxEgress serves redirected TCP in the gateway namespace.
@@ -343,12 +343,21 @@ func serveSandboxEgress(ctx context.Context, e egressServer, actorUID string, ns
 	if err != nil {
 		return nil, nil, fmt.Errorf("while opening actor egress listeners: %w", err)
 	}
+	// Bound before anything is served, so a connection accepted here cannot
+	// pick up a later activation's credentials.
+	serveBound, err := e.Bind(actorUID)
+	if err != nil {
+		for _, listener := range listeners {
+			_ = listener.Close()
+		}
+		return nil, nil, err
+	}
 	serve := make([]func(), 0, len(listeners))
 	for _, l := range listeners {
 		serve = append(serve, func() {
 			// Background rather than the caller's context: these outlive the
 			// activation and are stopped by closing the listener.
-			if err := e.Serve(context.Background(), actorUID, l); err != nil {
+			if err := serveBound(context.Background(), l); err != nil {
 				slog.WarnContext(ctx, "Sandbox egress listener stopped", slog.Any("err", err))
 			}
 		})
