@@ -42,17 +42,13 @@ const (
 	MemoryLimitFile   = "memory_bytes"
 )
 
-// actorsPerAteom is how many actors an ateom hosts at once. One, today.
-const actorsPerAteom = 1
-
 const (
 	reportTimeout        = 10 * time.Second
 	initialReportBackoff = 500 * time.Millisecond
 	maxReportBackoff     = 30 * time.Second
 )
 
-// FromFiles reads the ateom's compute limits from its downward API volume, as
-// the report it sends to the node-local atelet.
+// FromFiles combines the downward API compute limits with the ateom's actor limit.
 //
 // A limit that is missing or unparseable is reported as zero, which the control
 // plane reads as none: better to place nothing on a worker that cannot say what
@@ -61,14 +57,14 @@ const (
 // TODO: Watch the projected files and report changes. For now we do not support
 // in-place Pod vertical scaling (IPPR); capacity is read once at startup.
 // NOTE: Please do not implement this yet. IPPR needs more general consideration.
-func FromFiles() *ateletpb.SetWorkerCapacityRequest {
-	return fromDir(CapacityMountPath)
+func FromFiles(actors int) *ateletpb.SetWorkerCapacityRequest {
+	return fromDir(CapacityMountPath, actors)
 }
 
-func fromDir(dir string) *ateletpb.SetWorkerCapacityRequest {
+func fromDir(dir string, actors int) *ateletpb.SetWorkerCapacityRequest {
 	return &ateletpb.SetWorkerCapacityRequest{
 		Capacity: &ateapipb.WorkerResources{
-			Actors: actorsPerAteom,
+			Actors: int32(actors),
 			// A limit read as zero is left out, which the control plane reads
 			// as none of that dimension.
 			Resources: resources.CPUMemory(
@@ -99,6 +95,8 @@ type ReportConfig struct {
 	SocketPath           string
 	CredentialBundlePath string
 	TrustBundlePath      string
+	// Actors is how many actors this ateom will host at once.
+	Actors int
 }
 
 // Report tells the node-local atelet what this ateom can supply, retrying
@@ -113,7 +111,7 @@ func Report(ctx context.Context, cfg ReportConfig) error {
 	if err != nil {
 		return fmt.Errorf("capacity report: %w", err)
 	}
-	capacity := FromFiles()
+	capacity := FromFiles(cfg.Actors)
 	err = retryReport(ctx, func() error {
 		return reportOnce(ctx, cfg.SocketPath, tlsConfig, capacity)
 	}, initialReportBackoff)

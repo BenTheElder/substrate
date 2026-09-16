@@ -255,6 +255,7 @@ func do(ctx context.Context) error {
 			SocketPath:           ateompath.AteomSupportSocket,
 			CredentialBundlePath: *workerCredentialBundle,
 			TrustBundlePath:      *podIdentityTrustBundle,
+			Actors:               *maxActors,
 		})
 		if err != nil && ctx.Err() == nil {
 			serverboot.Fatal(ctx, "Failed to report worker capacity", err)
