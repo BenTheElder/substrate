@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"errors"
+	"github.com/agent-substrate/substrate/internal/actorlock"
 	"testing"
 	"time"
 
@@ -167,7 +168,7 @@ func containerStats(usage, peak, inactiveFile, cpuNanos uint64) *agentpb.CgroupS
 // does, since it is a pointer with no usable zero value and
 // TestGetWorkloadStatsDoesNotTakeLock holds it.
 func newStatsService(agent containerStatsReader, workloadIDs ...string) *AteomService {
-	s := &AteomService{lock: newCancelableMutex()}
+	s := &AteomService{lock: actorlock.NewCancelableMutex()}
 	s.activeActor.Store(&testActor)
 	s.guestStats.Store(&guestStatsTarget{actorUID: testActor.UID, agent: agent, workloadIDs: workloadIDs})
 	return s

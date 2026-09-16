@@ -35,6 +35,7 @@ import (
 
 	"cloud.google.com/go/compute/metadata"
 	"github.com/agent-substrate/substrate/cmd/ateom-gvisor/internal/cgroupstats"
+	"github.com/agent-substrate/substrate/internal/actorlock"
 	"github.com/agent-substrate/substrate/internal/actorlog"
 	"github.com/agent-substrate/substrate/internal/ateinterceptors"
 	"github.com/agent-substrate/substrate/internal/ateomcapacity"
@@ -343,40 +344,13 @@ type workloadSession struct {
 	containers []string
 }
 
-type cancelableMutex struct {
-	ch chan struct{}
-}
-
-func newCancelableMutex() *cancelableMutex {
-	ch := make(chan struct{}, 1)
-	ch <- struct{}{}
-	return &cancelableMutex{ch: ch}
-}
-
-func (m *cancelableMutex) Lock() {
-	<-m.ch
-}
-
-func (m *cancelableMutex) Unlock() {
-	m.ch <- struct{}{}
-}
-
-func (m *cancelableMutex) LockContext(ctx context.Context) bool {
-	select {
-	case <-m.ch:
-		return true
-	case <-ctx.Done():
-		return false
-	}
-}
-
 // AteomService is a service for shepherding single microvm.
 type AteomService struct {
 	ateompb.UnimplementedAteomServer
 
 	// Let's go ahead and assume that Ateom RPCs that are running `runsc`
 	// subcommands are probably not safe to call concurrently.
-	lock *cancelableMutex
+	lock *actorlock.CancelableMutex
 
 	// sandbox is the network of the actor this worker is serving.
 	sandbox ateomnet.SessionHolder
@@ -455,7 +429,7 @@ var _ ateompb.AteomServer = (*AteomService)(nil)
 // NewService creates a new AteomService.
 func NewService(dnsRelay *atunnel.DNSRelay, actorLogger *actorlog.ActorLogger, workerCredentialBundlePath, podIdentityTrustBundlePath, egressGatewayTrustBundlePath, ateletSPIFFEID string) *AteomService {
 	return &AteomService{
-		lock:                         newCancelableMutex(),
+		lock:                         actorlock.NewCancelableMutex(),
 		dnsRelay:                     dnsRelay,
 		actorLogger:                  actorLogger,
 		workerCredentialBundlePath:   workerCredentialBundlePath,
