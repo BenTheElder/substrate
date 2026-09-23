@@ -373,6 +373,16 @@ func (s *AteomService) TerminateWorkload(ctx context.Context, req *ateompb.Termi
 	return &ateompb.TerminateWorkloadResponse{}, nil
 }
 
+// stopActorVM tears down the actor's micro-VM, if any, keeping it hosted.
+func (s *AteomService) stopActorVM(ctx context.Context, actorUID string) error {
+	ra := s.runningVM(actorUID)
+	chSocket := kata.CLHSocketPath(actorUID)
+	if ra != nil && ra.apiSocket != "" {
+		chSocket = ra.apiSocket
+	}
+	return s.teardownActor(ctx, actorUID, ra, ch.NewClient(chSocket))
+}
+
 func (s *AteomService) terminateWorkload(ctx context.Context, actor resources.ActorAttribution) error {
 	var errs []error
 	if err := s.deactivateActorNetworking(ctx, actor); err != nil {
@@ -380,14 +390,7 @@ func (s *AteomService) terminateWorkload(ctx context.Context, actor resources.Ac
 	}
 
 	actorUID := actor.UID
-	ra := s.runningVM(actorUID)
-	chSocket := kata.CLHSocketPath(actorUID)
-	if ra != nil && ra.apiSocket != "" {
-		chSocket = ra.apiSocket
-	}
-	client := ch.NewClient(chSocket)
-
-	if err := s.teardownActor(ctx, actorUID, ra, client); err != nil {
+	if err := s.stopActorVM(ctx, actorUID); err != nil {
 		errs = append(errs, fmt.Errorf("while tearing down actor: %w", err))
 	}
 	// Remove attribution after teardown; a failed checkpoint may leave the VM running.
