@@ -44,6 +44,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/actorlog"
 	"github.com/agent-substrate/substrate/internal/ateinterceptors"
 	"github.com/agent-substrate/substrate/internal/ateomcapacity"
+	"github.com/agent-substrate/substrate/internal/ateomcgroup"
 	"github.com/agent-substrate/substrate/internal/ateomnet"
 	"github.com/agent-substrate/substrate/internal/ateompath"
 	"github.com/agent-substrate/substrate/internal/atunnel"
@@ -226,7 +227,15 @@ func do(ctx context.Context) error {
 	}
 	slog.InfoContext(ctx, "Actor DNS relay ready", slog.Any("upstreams", nameservers))
 
+	// Give each actor's VMM and virtiofsd a cgroup of their own, so one busy
+	// guest cannot starve the rest.
+	actorCgroups, err := ateomcgroup.Delegate(ctx)
+	if err != nil {
+		return fmt.Errorf("while delegating the worker cgroup: %w", err)
+	}
+
 	ateomService := NewService(*podUID, *chBinary, *kataDebug, *vmmMemReserve, *maxActors, dnsRelay, actorLogger, *workerCredentialBundle, *podIdentityTrustBundle, *egressGatewayTrustBundle, *ateletIdentity)
+	ateomService.actorCgroups = actorCgroups
 
 	atunnelIngress, err := atunnel.NewServer(atunnel.Config{
 		CredentialBundlePath: *workerCredentialBundle,
@@ -416,6 +425,9 @@ type AteomService struct {
 	// Actors undergoing network cleanup still count against capacity.
 	draining  int
 	maxActors int
+	// actorCgroups is set when the worker's cgroup is delegated, so each actor's
+	// VMM and virtiofsd run in a leaf of their own.
+	actorCgroups bool
 }
 
 var _ ateompb.AteomServer = (*AteomService)(nil)
