@@ -26,9 +26,11 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/agent-substrate/substrate/internal/ateomcgroup"
 	"github.com/agent-substrate/substrate/internal/ateomnet"
 	"github.com/agent-substrate/substrate/internal/atunnel"
 	"github.com/agent-substrate/substrate/internal/resources"
+	"github.com/agent-substrate/substrate/internal/sizing"
 )
 
 // hostedActor holds one actor's attribution, network, and runtime state.
@@ -99,8 +101,16 @@ func (s *AteomService) hostActor(ctx context.Context, attribution resources.Acto
 	return hosted, nil
 }
 
-// unhostActor removes an actor and its network. Repeated calls are safe.
-// The caller must stop the VM first.
+// actorLeaf opens the actor's cgroup, or returns nil when the worker has none.
+func (s *AteomService) actorLeaf(actorUID string, size sizing.SandboxSize) (*ateomcgroup.ActorLeaf, error) {
+	if !s.actorCgroups {
+		return nil, nil
+	}
+	return ateomcgroup.OpenActorLeaf(actorUID, size.MilliCPU)
+}
+
+// unhostActor removes an actor, its network, and its cgroup. Repeated calls are
+// safe. The caller must stop the VM first.
 func (s *AteomService) unhostActor(ctx context.Context, actorUID string) error {
 	s.actorsMu.Lock()
 	hosted, ok := s.actors[actorUID]
@@ -119,6 +129,11 @@ func (s *AteomService) unhostActor(ctx context.Context, actorUID string) error {
 		s.actorsMu.Unlock()
 	}()
 
+	if s.actorCgroups {
+		if err := ateomcgroup.RemoveActorLeaf(actorUID); err != nil {
+			slog.WarnContext(ctx, "Failed to remove the actor's cgroup", slog.Any("err", err))
+		}
+	}
 	if hosted.network == nil {
 		return nil
 	}

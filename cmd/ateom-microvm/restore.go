@@ -254,7 +254,12 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 		return untarErr
 	}
 	tUpper := time.Now()
-	vfsdCmd, err := s.stageMergedRootfs(ctx, rr, actorUID, ctrs, containers)
+	leaf, err := s.actorLeaf(actorUID, p.size)
+	if err != nil {
+		return err
+	}
+	defer leaf.Close()
+	vfsdCmd, err := s.stageMergedRootfs(ctx, rr, actorUID, ctrs, containers, leaf.SysProcAttr())
 	if err != nil {
 		return err
 	}
@@ -316,6 +321,7 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 	tTap := time.Now()
 	chCmd, client, err := ch.LaunchVMM(ctx, ch.LaunchVMMOptions{
 		Binary: rr.chBinary, APISocket: apiSocket, Stdout: slogWriter{ctx}, Stderr: slogWriter{ctx},
+		SysProcAttr: leaf.SysProcAttr(),
 	})
 	if err != nil {
 		return fmt.Errorf("while launching VMM for restore: %w", err)
