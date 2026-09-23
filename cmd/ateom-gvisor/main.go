@@ -27,7 +27,6 @@ import (
 	"os/signal"
 	"slices"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -39,6 +38,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/actorlog"
 	"github.com/agent-substrate/substrate/internal/ateinterceptors"
 	"github.com/agent-substrate/substrate/internal/ateomcapacity"
+	"github.com/agent-substrate/substrate/internal/ateomcgroup"
 	"github.com/agent-substrate/substrate/internal/ateomnet"
 	"github.com/agent-substrate/substrate/internal/ateompath"
 	"github.com/agent-substrate/substrate/internal/ateomstats"
@@ -57,7 +57,6 @@ import (
 	"github.com/agent-substrate/substrate/internal/wakeupprobe"
 	"github.com/spf13/pflag"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
-	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/reflection"
@@ -192,7 +191,7 @@ func do(ctx context.Context) error {
 
 	// Prepare the pod cgroup so runsc can create per-actor-container leaves under
 	// it with real accounting.
-	if err := setupCgroupDelegation(ctx); err != nil {
+	if _, err := ateomcgroup.Delegate(ctx); err != nil {
 		return fmt.Errorf("while setting up cgroup delegation: %w", err)
 	}
 
@@ -387,7 +386,7 @@ type AteomService struct {
 	shuttingDown atomic.Bool
 
 	// cgroupRoot is where the sandbox's cgroup v2 leaves live: the worker pod's
-	// own cgroup scope, which setupCgroupDelegation prepares. A field rather
+	// own cgroup scope, which ateomcgroup.Delegate prepares. A field rather
 	// than a constant so tests can point GetWorkloadStats at a fixture tree.
 	cgroupRoot string
 
@@ -1150,125 +1149,4 @@ func (s *AteomService) deactivateActorNetworking(ctx context.Context, actor reso
 		return fmt.Errorf("while deactivating actor networking: %w", err)
 	}
 	return nil
-}
-
-// setupCgroupDelegation prepares the worker pod's cgroup so runsc can create a
-// per-actor-container leaf under it with real cpu/memory/pids accounting.
-//
-// The unprivileged worker runs in a private cgroup namespace, so /sys/fs/cgroup
-// is the pod's own cgroup scope rather than the host root. Two things must be
-// arranged before runsc can nest container cgroups here:
-//
-//   - The cgroup v2 "no internal processes" rule forbids a cgroup from holding
-//     processes directly while also delegating controllers to children. The pod
-//     scope is not the true cgroup root, so the exemption does not apply: we move
-//     the worker's own processes into a dedicated "ateom" leaf.
-//   - Controllers are only available to children if enabled in the scope's
-//     cgroup.subtree_control. We enable everything the parent delegated to us.
-//
-// The runtime bind-mounts /sys/fs/cgroup read-only for unprivileged pods. The
-// worker holds CAP_SYS_ADMIN with no user namespace, so the ro flag is not
-// locked: clear it and leave it writable (runsc writes here on every
-// create/restore).
-func setupCgroupDelegation(ctx context.Context) error {
-	const root = "/sys/fs/cgroup"
-	const leaf = root + "/ateom"
-
-	// Delegation only makes sense inside a private cgroup namespace, where
-	// /sys/fs/cgroup is the pod's own scope. A privileged worker instead inherits
-	// the host cgroup namespace, so /sys/fs/cgroup is the true host root: it holds
-	// unmovable kernel threads (cgroup.procs would never drain) and must not be
-	// carved up. Detect the namespace via /proc/self/cgroup, which reads "0::/"
-	// only at a cgroup-namespace root, and skip delegation otherwise (runsc then
-	// falls back to its own cgroup handling).
-	if private, err := inPrivateCgroupNamespace(); err != nil {
-		return fmt.Errorf("while detecting cgroup namespace: %w", err)
-	} else if !private {
-		slog.InfoContext(ctx, "not in a private cgroup namespace; skipping cgroup delegation (worker is likely privileged)")
-		return nil
-	}
-
-	if err := os.Mkdir(leaf, 0o755); err != nil && !os.IsExist(err) {
-		// The runtime bind-mounts /sys/fs/cgroup read-only; clear the flag with a
-		// bind-remount. This needs CAP_SYS_ADMIN (held) and an AppArmor profile
-		// that permits mount. The gVisor worker runs AppArmor-unconfined, which
-		// runsc's own mounts require anyway; on nodes that do enforce the default
-		// profile (GKE COS) this mount is otherwise denied with EPERM.
-		if err := unix.Mount("none", root, "", unix.MS_BIND|unix.MS_REMOUNT, ""); err != nil {
-			return fmt.Errorf("while remounting %q read-write: %w", root, err)
-		}
-		if err := os.Mkdir(leaf, 0o755); err != nil && !os.IsExist(err) {
-			return fmt.Errorf("while creating cgroup leaf %q: %w", leaf, err)
-		}
-	}
-
-	if err := moveProcs(ctx, root+"/cgroup.procs", leaf+"/cgroup.procs"); err != nil {
-		return fmt.Errorf("while moving worker processes into %q: %w", leaf, err)
-	}
-
-	avail, err := os.ReadFile(root + "/cgroup.controllers")
-	if err != nil {
-		return fmt.Errorf("while reading available cgroup controllers: %w", err)
-	}
-	// Enable controllers one at a time so a single controller the node cannot
-	// delegate (for example cpuset without an assigned cpu set) does not prevent
-	// the others from being enabled.
-	var enabled []string
-	for _, c := range strings.Fields(string(avail)) {
-		if err := os.WriteFile(root+"/cgroup.subtree_control", []byte("+"+c), 0o644); err != nil {
-			slog.WarnContext(ctx, "could not enable cgroup controller for delegation", slog.String("controller", c), slog.Any("err", err))
-			continue
-		}
-		enabled = append(enabled, c)
-	}
-	slog.InfoContext(ctx, "cgroup delegation ready", slog.Any("controllers", enabled))
-	return nil
-}
-
-// inPrivateCgroupNamespace reports whether the process sits at the root of its
-// own cgroup namespace. The cgroup v2 line of /proc/self/cgroup ("0::<path>")
-// reports the path relative to the namespace root, so it reads exactly "/" only
-// when /sys/fs/cgroup is the namespace's own (pod-scoped) cgroup. A privileged
-// worker inheriting the host cgroup namespace instead sees its full host path
-// (for example "/kubepods.slice/.../cri-containerd-<id>.scope").
-func inPrivateCgroupNamespace() (bool, error) {
-	b, err := os.ReadFile("/proc/self/cgroup")
-	if err != nil {
-		return false, fmt.Errorf("while reading /proc/self/cgroup: %w", err)
-	}
-	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
-		if path, ok := strings.CutPrefix(line, "0::"); ok {
-			return path == "/", nil
-		}
-	}
-	return false, fmt.Errorf("no cgroup v2 (0::) entry in /proc/self/cgroup")
-}
-
-// moveProcs relocates every process listed in srcProcs into dstProcs. cgroup.procs
-// only ever lists processes that are not already in a child cgroup, and the list
-// shrinks as we drain it, so loop until the source is empty.
-func moveProcs(ctx context.Context, srcProcs, dstProcs string) error {
-	// One pass moves everything it saw, but a process can fork between the read
-	// and the writes, so re-read until the source reads empty. 100 is an
-	// arbitrary generous bound (one or two passes suffice in practice) so a
-	// process that can never be moved fails startup with a clear error instead
-	// of looping forever.
-	for range 100 {
-		b, err := os.ReadFile(srcProcs)
-		if err != nil {
-			return fmt.Errorf("while reading %q: %w", srcProcs, err)
-		}
-		pids := strings.Fields(string(b))
-		if len(pids) == 0 {
-			return nil
-		}
-		for _, pid := range pids {
-			// Writing a TGID moves the whole thread group. A process can exit
-			// between the read and the write, so a failure here is not fatal.
-			if err := os.WriteFile(dstProcs, []byte(pid), 0o644); err != nil {
-				slog.WarnContext(ctx, "could not move process into cgroup leaf", slog.String("pid", pid), slog.Any("err", err))
-			}
-		}
-	}
-	return fmt.Errorf("%q did not drain after 100 iterations", srcProcs)
 }
