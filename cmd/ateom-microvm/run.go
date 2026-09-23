@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"time"
 
 	"github.com/agent-substrate/substrate/internal/ateomstats"
@@ -452,7 +453,12 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 	// host upper, mounted into the shared dir) + durable-dir and CSI volumes (if any),
 	// and start the ONE virtiofsd that serves them all. CH connects to it at vm.create
 	// and demand-pages for the actor's lifetime, so ateom owns the process (killed in teardownActor).
-	vfsdCmd, err := s.stageMergedRootfs(ctx, rr, actorUID, ctrs, containers)
+	leaf, err := s.actorLeaf(actorUID, p.size)
+	if err != nil {
+		return err
+	}
+	defer leaf.Close()
+	vfsdCmd, err := s.stageMergedRootfs(ctx, rr, actorUID, ctrs, containers, leaf.SysProcAttr())
 	if err != nil {
 		return err
 	}
@@ -466,10 +472,11 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 	// Launch a bare VMM (CH + api-socket); ateom owns this process for teardown.
 	apiSocket := filepath.Join(kata.VMDir(actorUID), "clh-api.sock")
 	chCmd, client, err := ch.LaunchVMM(ctx, ch.LaunchVMMOptions{
-		Binary:    rr.chBinary,
-		APISocket: apiSocket,
-		Stdout:    slogWriter{ctx},
-		Stderr:    slogWriter{ctx},
+		Binary:      rr.chBinary,
+		APISocket:   apiSocket,
+		Stdout:      slogWriter{ctx},
+		Stderr:      slogWriter{ctx},
+		SysProcAttr: leaf.SysProcAttr(),
 	})
 	if err != nil {
 		return fmt.Errorf("while launching VMM: %w", err)
@@ -641,7 +648,7 @@ func (s *AteomService) buildActorContainers(actorUID string, containers []*ateom
 // upper contents). The returned virtiofsd cmd outlives this call (CH
 // demand-pages from it); the caller owns it (tracked on runningActor, killed
 // in teardownActor).
-func (s *AteomService) stageMergedRootfs(ctx context.Context, rr resolvedRuntime, id string, ctrs []actorContainer, containers []*ateompb.Container) (*exec.Cmd, error) {
+func (s *AteomService) stageMergedRootfs(ctx context.Context, rr resolvedRuntime, id string, ctrs []actorContainer, containers []*ateompb.Container, procAttr *syscall.SysProcAttr) (*exec.Cmd, error) {
 	upperBase := rootfsUpperDir(id)
 	for _, c := range ctrs {
 		if err := kata.StageMergedRootfs(ctx, c.bundleRootfs, upperBase, id, c.name); err != nil {
@@ -671,10 +678,11 @@ func (s *AteomService) stageMergedRootfs(ctx context.Context, rr resolvedRuntime
 	}
 	vfsdLog, _ := os.OpenFile(virtiofsdLogPath(id), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	vfsdCmd, err := kata.StartVirtiofsd(ctx, kata.VirtiofsdOptions{
-		Binary:     rr.virtiofsd,
-		SocketPath: kata.VirtiofsdSocketPath(id),
-		SharedDir:  kata.SharedDir(id),
-		Log:        vfsdLog,
+		Binary:      rr.virtiofsd,
+		SocketPath:  kata.VirtiofsdSocketPath(id),
+		SharedDir:   kata.SharedDir(id),
+		Log:         vfsdLog,
+		SysProcAttr: procAttr,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("while starting virtiofsd: %w", err)
