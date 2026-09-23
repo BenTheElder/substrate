@@ -441,7 +441,7 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 	}
 
 	// Clean stale per-sandbox state + create the runtime dir for the sockets.
-	kata.CleanupSandboxState(ctx, actorUID)
+	s.cleanupSandboxState(ctx, actorUID)
 	if err := os.MkdirAll(kata.VMDir(actorUID), 0o700); err != nil {
 		return fmt.Errorf("while creating VM dir: %w", err)
 	}

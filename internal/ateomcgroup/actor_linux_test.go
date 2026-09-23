@@ -17,12 +17,14 @@
 package ateomcgroup
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/agent-substrate/substrate/internal/roottest"
 )
@@ -54,6 +56,36 @@ func TestActorLeafStartsProcessesInside(t *testing.T) {
 	}
 	if err := removeActorLeaf(root, "ateomcgroup-test"); err != nil {
 		t.Errorf("removing the leaf after its process exited: %v", err)
+	}
+}
+
+// Killing the leaf takes down everything in it, and leaves it removable.
+func TestKillActorLeaf(t *testing.T) {
+	roottest.Require(t, "creates cgroups")
+	root := ownCgroup(t)
+	leaf, err := openActorLeaf(root, "ateomcgroup-kill-test", 0)
+	if err != nil {
+		t.Skipf("cannot create a cgroup here: %v", err)
+	}
+	// A parent that forks a child, as virtiofsd does.
+	cmd := exec.Command("sh", "-c", "sleep 30 & wait")
+	cmd.SysProcAttr = leaf.SysProcAttr()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	_ = leaf.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := KillLeafUnder(ctx, root, "ateomcgroup-kill-test"); err != nil {
+		t.Fatalf("KillLeafUnder: %v", err)
+	}
+	_ = cmd.Wait()
+	if err := removeActorLeaf(root, "ateomcgroup-kill-test"); err != nil {
+		t.Errorf("removing the killed leaf: %v", err)
+	}
+	// Already gone: nothing to kill.
+	if err := KillLeafUnder(ctx, root, "ateomcgroup-kill-test"); err != nil {
+		t.Errorf("KillLeafUnder on a removed leaf: %v", err)
 	}
 }
 

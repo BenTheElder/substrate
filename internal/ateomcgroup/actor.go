@@ -17,6 +17,7 @@
 package ateomcgroup
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -24,6 +25,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 const (
@@ -101,6 +103,43 @@ func (l *ActorLeaf) Close() error {
 		return nil
 	}
 	return l.dir.Close()
+}
+
+// KillActorLeaf kills every process in the named leaf, including any they
+// forked, and waits until the leaf is empty or ctx is done. A missing leaf, or a
+// kernel without cgroup.kill, has nothing done.
+func KillActorLeaf(ctx context.Context, name string) error {
+	return KillLeafUnder(ctx, Root, name)
+}
+
+// KillLeafUnder is KillActorLeaf for a leaf under root rather than Root.
+func KillLeafUnder(ctx context.Context, root, name string) error {
+	path, err := actorLeafPath(root, name)
+	if err != nil {
+		return err
+	}
+	if err := writeExisting(filepath.Join(path, "cgroup.kill"), "1"); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("while killing cgroup %q: %w", path, err)
+	}
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		events, err := os.ReadFile(filepath.Join(path, "cgroup.events"))
+		if err != nil {
+			return fmt.Errorf("while waiting for cgroup %q to empty: %w", path, err)
+		}
+		if strings.Contains(string(events), "populated 0") {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("while waiting for cgroup %q to empty: %w", path, ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 // RemoveActorLeaf deletes the actor's leaf. Its processes must have exited.

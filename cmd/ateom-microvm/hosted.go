@@ -21,11 +21,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"time"
 
 	"github.com/vishvananda/netns"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/kata"
 	"github.com/agent-substrate/substrate/internal/ateomcgroup"
 	"github.com/agent-substrate/substrate/internal/ateomnet"
 	"github.com/agent-substrate/substrate/internal/atunnel"
@@ -107,6 +109,19 @@ func (s *AteomService) actorLeaf(actorUID string, size sizing.SandboxSize) (*ate
 		return nil, nil
 	}
 	return ateomcgroup.OpenActorLeaf(actorUID, size.MilliCPU)
+}
+
+// cleanupSandboxState kills what is left of the actor's host processes and
+// clears its sandbox directories.
+func (s *AteomService) cleanupSandboxState(ctx context.Context, actorUID string) {
+	if s.actorCgroups {
+		killCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		if err := ateomcgroup.KillActorLeaf(killCtx, actorUID); err != nil {
+			slog.WarnContext(ctx, "Failed to kill the actor's leftover processes", slog.Any("err", err))
+		}
+		cancel()
+	}
+	kata.CleanupSandboxState(ctx, actorUID)
 }
 
 // unhostActor removes an actor, its network, and its cgroup. Repeated calls are
