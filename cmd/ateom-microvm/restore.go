@@ -183,7 +183,7 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 	if err != nil {
 		return err
 	}
-	kata.CleanupSandboxState(ctx, actorUID)
+	s.cleanupSandboxState(ctx, actorUID)
 
 	// Repoint the snapshot's vsock socket to this actor's VMDir (the disk + kernel
 	// paths are content-addressed/per-actor and already line up on the same node).
@@ -326,6 +326,7 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 	defer func() {
 		if retErr != nil && chCmd.Process != nil {
 			_ = chCmd.Process.Kill()
+			_, _ = chCmd.Process.Wait()
 		}
 	}()
 	// How guest RAM comes back depends on the VMM (see restoreMemMode), and the rest

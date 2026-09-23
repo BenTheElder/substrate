@@ -335,7 +335,7 @@ func (s *AteomService) teardownActor(ctx context.Context, id string, ra *running
 	// it also drops the merged rootfs overlay mounts, which MUST come before
 	// the upper-dir removal below (removing a live overlay's upperdir would
 	// corrupt the mount rather than delete the files).
-	kata.CleanupSandboxState(ctx, id)
+	s.cleanupSandboxState(ctx, id)
 
 	// Remove the rootfs upper dir: ateom owns it — atelet's actor-dir reset
 	// doesn't know it — and its absence is what marks a worker as holding no
