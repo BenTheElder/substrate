@@ -19,7 +19,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
+	"syscall"
 	"testing"
 
 	"google.golang.org/grpc/codes"
@@ -27,7 +32,9 @@ import (
 	"time"
 
 	"github.com/agent-substrate/substrate/internal/actorlock"
+	"github.com/agent-substrate/substrate/internal/ocispec"
 	"github.com/agent-substrate/substrate/internal/resources"
+	"github.com/agent-substrate/substrate/internal/roottest"
 )
 
 func TestAdmitActorEnforcesTheCeilingConcurrently(t *testing.T) {
@@ -163,5 +170,45 @@ func TestBeginRPCRegistersBeforeCheckingForADrain(t *testing.T) {
 	}
 	if got := s.inFlight.Names(); len(got) != 0 {
 		t.Errorf("a refused RPC stayed registered: %v", got)
+	}
+}
+
+// A sandbox left by an earlier activation is killed through the pause
+// container's leaf, which holds the sentry and gofers, with no runsc record.
+func TestKillLeftoverSandbox(t *testing.T) {
+	roottest.Require(t, "creates cgroups")
+	b, err := os.ReadFile("/proc/self/cgroup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	self, ok := strings.CutPrefix(strings.TrimSpace(string(b)), "0::")
+	if !ok || strings.Contains(self, "\n") {
+		t.Skip("no unified cgroup v2 hierarchy")
+	}
+	s := &AteomService{actorCgroups: true, cgroupRoot: filepath.Join("/sys/fs/cgroup", self)}
+	leaf := filepath.Join(s.cgroupRoot, ocispec.GVisorCgroupLeaf("uid-leftover", sandboxCgroupContainer))
+	if err := os.Mkdir(leaf, 0o755); err != nil {
+		t.Skipf("cannot create a cgroup here: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(leaf) })
+	dir, err := os.Open(leaf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sleep", "30")
+	cmd.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: int(dir.Fd())}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	_ = dir.Close()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	s.killLeftoverSandbox(context.Background(), "uid-leftover")
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatal("the leftover sandbox process survived")
 	}
 }

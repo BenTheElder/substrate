@@ -191,7 +191,8 @@ func do(ctx context.Context) error {
 
 	// Prepare the pod cgroup so runsc can create per-actor-container leaves under
 	// it with real accounting.
-	if _, err := ateomcgroup.Delegate(ctx); err != nil {
+	actorCgroups, err := ateomcgroup.Delegate(ctx)
+	if err != nil {
 		return fmt.Errorf("while setting up cgroup delegation: %w", err)
 	}
 
@@ -227,6 +228,7 @@ func do(ctx context.Context) error {
 
 	// Construct the service first so atunnel can use its namespace dialer.
 	ateomService := NewService(dnsRelay, actorLogger, *maxActors, *workerCredentialBundle, *podIdentityTrustBundle, *egressGatewayTrustBundle, *ateletIdentity)
+	ateomService.actorCgroups = actorCgroups
 
 	atunnelIngress, atunnelEgress, atunnelEgressPort, err := runAtunnel(ctx, upstream)
 	if err != nil {
@@ -358,6 +360,9 @@ type AteomService struct {
 	// Actors undergoing network cleanup still count against capacity.
 	draining  int
 	maxActors int
+	// actorCgroups is set when the worker's cgroup is delegated, so each
+	// actor's sandbox has a leaf that can be killed as a whole.
+	actorCgroups bool
 
 	actorLogger    *actorlog.ActorLogger
 	atunnelIngress *atunnel.Server
@@ -616,6 +621,9 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	if err != nil {
 		return nil, err
 	}
+	// A sandbox left by an earlier activation of this actor would keep running
+	// beside the new one, with no runsc record left to stop it by.
+	s.killLeftoverSandbox(ctx, req.GetActorUid())
 	// Publish attribution before boot so stats can include startup usage.
 	if _, err := s.hostActor(ctx, attribution); err != nil {
 		return nil, err
@@ -895,6 +903,9 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	if err != nil {
 		return nil, err
 	}
+	// A sandbox left by an earlier activation of this actor would keep running
+	// beside the new one, with no runsc record left to stop it by.
+	s.killLeftoverSandbox(ctx, req.GetActorUid())
 	if _, err := s.hostActor(ctx, attribution); err != nil {
 		return nil, err
 	}
@@ -1096,6 +1107,9 @@ func (s *AteomService) terminateWorkload(ctx context.Context, actorRef resources
 	if err := cleanupContainers(cleanupCtx, rcmd, containers); err != nil {
 		errs = append(errs, fmt.Errorf("while cleaning up runsc containers: %w", err))
 	}
+
+	// Whatever runsc could not stop, having lost or never had a record of it.
+	s.killLeftoverSandbox(cleanupCtx, actorUID)
 
 	// Detach the overlay rootfs mounts before atelet wipes the bundle dirs
 	// (deleting a bundle out from under a live mount in this namespace would

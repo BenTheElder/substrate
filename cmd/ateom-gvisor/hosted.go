@@ -21,12 +21,15 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/agent-substrate/substrate/internal/ateomcgroup"
 	"github.com/agent-substrate/substrate/internal/ateomnet"
 	"github.com/agent-substrate/substrate/internal/atunnel"
+	"github.com/agent-substrate/substrate/internal/ocispec"
 	"github.com/agent-substrate/substrate/internal/resources"
 )
 
@@ -101,6 +104,19 @@ func (s *AteomService) hostActor(ctx context.Context, attribution resources.Acto
 	hosted.network = session
 	s.actorsMu.Unlock()
 	return hosted, nil
+}
+
+// killLeftoverSandbox kills every process in the actor's sandbox leaf: the
+// sentry and gofers all run in the pause container's.
+func (s *AteomService) killLeftoverSandbox(ctx context.Context, actorUID string) {
+	if !s.actorCgroups {
+		return
+	}
+	killCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := ateomcgroup.KillLeafUnder(killCtx, s.cgroupRoot, ocispec.GVisorCgroupLeaf(actorUID, sandboxCgroupContainer)); err != nil {
+		slog.WarnContext(ctx, "Failed to kill the actor's leftover sandbox", slog.String("actorUID", actorUID), slog.Any("err", err))
+	}
 }
 
 // unhostActor removes an actor and its network. Repeated calls are safe.
