@@ -19,6 +19,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -336,6 +337,35 @@ func (r *runsc) cmdState(ctx context.Context, containerName string) error {
 		return fmt.Errorf("while running `runsc state`: %w", err)
 	}
 	return nil
+}
+
+// cmdSandboxPID returns the PID of the sandbox process, read from the pause
+// container's state.
+func (r *runsc) cmdSandboxPID(ctx context.Context) (int, error) {
+	cmd := exec.CommandContext(
+		ctx,
+		r.path,
+		"-log-format", "json",
+		"-root", ateompath.RunSCStateDir(r.actorUID),
+		"state",
+		ocispec.PauseContainer,
+	)
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = os.Stderr
+	if err := reaper.RunCommand(cmd); err != nil {
+		return 0, fmt.Errorf("while running `runsc state`: %w", err)
+	}
+	var state struct {
+		Pid int `json:"pid"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &state); err != nil {
+		return 0, fmt.Errorf("while parsing `runsc state`: %w", err)
+	}
+	if state.Pid <= 0 {
+		return 0, fmt.Errorf("`runsc state` reported no sandbox PID")
+	}
+	return state.Pid, nil
 }
 
 // cmdList returns the container IDs runsc has a record of.

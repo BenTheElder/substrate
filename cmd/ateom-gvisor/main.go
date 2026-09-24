@@ -104,6 +104,19 @@ const workloadGracePeriod = 30 * time.Minute
 // resumeTimeout is the conservative ceiling for unpausing a paused sandbox.
 const resumeTimeout = 30 * time.Second
 
+// sandboxExitTimeout bounds the wait for a checkpointed sandbox's process to
+// exit and be reaped.
+const sandboxExitTimeout = 10 * time.Second
+
+// watchSandbox follows the actor's sandbox process by pidfd.
+func watchSandbox(ctx context.Context, rcmd *runsc) (*childreap.Watch, error) {
+	pid, err := rcmd.cmdSandboxPID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return childreap.WatchPID(pid)
+}
+
 func main() {
 	pflag.Parse()
 	if *showVersion {
@@ -771,10 +784,25 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 			return nil, fmt.Errorf("while archiving durable-dir volumes: %w", tarErr)
 		}
 	case ateompb.SnapshotScope_SNAPSHOT_SCOPE_FULL:
+		// The checkpoint ends the sandbox, and its process then lingers as a
+		// zombie until reaped, which runsc mistakes for a live sandbox. Follow
+		// it so teardown can wait for it to go.
+		sandbox, err := watchSandbox(ctx, rcmd)
+		if err != nil {
+			slog.WarnContext(ctx, "Cannot follow the sandbox process; teardown may race its exit", slog.Any("err", err))
+		}
 		// Checkpoint pause container (root of the sandbox)
 		// TODO: Consider pause -> tar -> resume -> checkpoint order for better failure handling.
 		if err := rcmd.cmdCheckpoint(ctx, ocispec.PauseContainer, checkpointPath); err != nil {
 			return nil, fmt.Errorf("while checkpointing pause: %w", err)
+		}
+		if sandbox != nil {
+			waitCtx, cancelWait := context.WithTimeout(context.WithoutCancel(ctx), sandboxExitTimeout)
+			if err := sandbox.WaitGone(waitCtx); err != nil {
+				slog.WarnContext(ctx, "Sandbox process did not exit after checkpoint", slog.Any("err", err))
+			}
+			cancelWait()
+			_ = sandbox.Close()
 		}
 		if hasDurableVolumes(req.GetSpec().GetContainers()) {
 			if err := tarDurableVolumes(ctx, ateompath.DurableDirVolumeMountsDir(req.GetActorUid()), checkpointPath); err != nil {
