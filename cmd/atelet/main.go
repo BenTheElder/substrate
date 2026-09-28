@@ -744,22 +744,30 @@ func toAteomSnapshotScope(scope ateletpb.SnapshotScope) ateompb.SnapshotScope {
 }
 
 func (s *AteomHerder) moveLocalCheckpoint(ctx context.Context, req *ateletpb.CheckpointRequest, rec *sandboxAssetsRecord) error {
-	root, err := os.OpenRoot(ateletpath.ActorPath(req.GetActorUid()))
+	actorDir := ateletpath.ActorPath(req.GetActorUid())
+	root, err := os.OpenRoot(actorDir)
 	if err != nil {
 		return fmt.Errorf("while opening actor directory: %w", err)
 	}
 	defer root.Close()
 
-	localDir := filepath.Join("local-checkpoint", req.GetLocalConfig().GetSnapshotName())
+	checkpointDir, err := filepath.Rel(actorDir, ateletpath.CheckpointStateDir(req.GetActorUid()))
+	if err != nil {
+		return err
+	}
+	localDir, err := filepath.Rel(actorDir, ateletpath.LocalSnapshotDir(req.GetActorUid(), req.GetLocalConfig().GetSnapshotName()))
+	if err != nil {
+		return err
+	}
 	if err := root.MkdirAll(localDir, 0o700); err != nil {
 		return fmt.Errorf("while creating local checkpoint directory: %w", err)
 	}
 
 	// Move exactly the files ateom reported.
 	for _, fileName := range rec.SnapshotFiles {
-		src := filepath.Join("checkpoint-state", fileName)
+		src := filepath.Join(checkpointDir, fileName)
 		dst := filepath.Join(localDir, fileName)
-		info, err := root.Stat(src)
+		info, err := root.Lstat(src)
 		if err != nil {
 			return fmt.Errorf("while inspecting checkpoint file %s: %w", fileName, err)
 		}
@@ -1414,7 +1422,7 @@ func (s *AteomHerder) copyLocalCheckpoint(ctx context.Context, actorDir, snapsho
 		}
 		slog.WarnContext(ctx, "local checkpoint and restore dir are on different filesystems; copying instead of linking",
 			slog.String("src", src), slog.String("dst", dst))
-		if _, err := copyRootFile(root, src, root, dst); err != nil {
+		if _, err := copyRootFile(root, src, dst); err != nil {
 			return fmt.Errorf("failed to copy %s to %s: %w", src, dst, err)
 		}
 	}
@@ -1426,21 +1434,21 @@ func (s *AteomHerder) copyLocalCheckpoint(ctx context.Context, actorDir, snapsho
 // fallback in copyLocalCheckpoint without mounting a second filesystem.
 var linkFile = (*os.Root).Link
 
-func copyRootFile(sourceRoot *os.Root, sourceName string, destinationRoot *os.Root, destinationName string) (int64, error) {
-	source, err := sourceRoot.Open(sourceName)
+func copyRootFile(root *os.Root, src, dst string) (int64, error) {
+	source, err := root.Open(src)
 	if err != nil {
 		return 0, err
 	}
 	defer source.Close()
-	sourceFileStat, err := source.Stat()
+	info, err := source.Stat()
 	if err != nil {
 		return 0, err
 	}
-	if !sourceFileStat.Mode().IsRegular() {
-		return 0, fmt.Errorf("%s is not a regular file", sourceName)
+	if !info.Mode().IsRegular() {
+		return 0, fmt.Errorf("%s is not a regular file", src)
 	}
 
-	destination, err := destinationRoot.OpenFile(destinationName, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o666)
+	destination, err := root.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o666)
 	if err != nil {
 		return 0, err
 	}
