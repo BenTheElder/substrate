@@ -237,19 +237,29 @@ func TestSnapshotManifestRejectsNonLocalFile(t *testing.T) {
 	}
 }
 
-func TestCheckpointResponseRejectsNonLocalFile(t *testing.T) {
-	_, err := checkpointSnapshotFiles(&ateompb.CheckpointWorkloadResponse{
-		SnapshotFiles: []string{"../outside"},
-	}, true)
-	if err == nil {
-		t.Fatal("checkpointSnapshotFiles() accepted a path outside the checkpoint directory")
-	}
-}
-
-func TestCheckpointSnapshotFilesAllowsOptionalEmptyResult(t *testing.T) {
-	files, err := checkpointSnapshotFiles(&ateompb.CheckpointWorkloadResponse{}, false)
-	if err != nil || len(files) != 0 {
-		t.Fatalf("checkpointSnapshotFiles() = %v, %v; want empty result", files, err)
+func TestCheckpointSnapshotFiles(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		files    []string
+		required bool
+		wantErr  bool
+	}{
+		{name: "required and present", files: []string{"checkpoint.img"}, required: true},
+		{name: "optional and empty", required: false},
+		{name: "required and empty", required: true, wantErr: true},
+		{name: "escapes the directory", files: []string{"../outside"}, required: true, wantErr: true},
+		{name: "nested", files: []string{"a/b"}, required: true, wantErr: true},
+		{name: "dot", files: []string{"."}, required: true, wantErr: true},
+		{name: "unclean alias", files: []string{"checkpoint.img", "./checkpoint.img"}, required: true, wantErr: true},
+		{name: "duplicate", files: []string{"checkpoint.img", "checkpoint.img"}, required: true, wantErr: true},
+		{name: "manifest name", files: []string{"checkpoint.img", sandboxManifestName}, required: true, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			files, err := checkpointSnapshotFiles(&ateompb.CheckpointWorkloadResponse{SnapshotFiles: tc.files}, tc.required)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("checkpointSnapshotFiles() = %v, %v; wantErr %v", files, err, tc.wantErr)
+			}
+		})
 	}
 }
 
