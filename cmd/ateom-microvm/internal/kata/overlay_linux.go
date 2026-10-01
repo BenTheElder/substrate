@@ -220,15 +220,11 @@ func StageMergedRootfs(ctx context.Context, bundleRootfs, upperBase, restoreID, 
 	if err := reaper.Run(exec.Command("umount", dst)); err != nil {
 		_ = reaper.Run(exec.Command("umount", "-l", dst))
 	}
-	// The workdir is scratch: wipe it so a volatile mount is never refused by a
-	// dirty marker left behind by the previous activation.
-	if err := os.RemoveAll(work); err != nil {
-		return fmt.Errorf("clearing overlay workdir %q: %w", work, err)
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return fmt.Errorf("creating %q: %w", dst, err)
 	}
-	for _, d := range []string{dst, upper, work} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			return fmt.Errorf("creating %q: %w", d, err)
-		}
+	if err := prepareUpperWorkDirs(upperBase, cid); err != nil {
+		return fmt.Errorf("preparing overlay upper/work dirs under %q: %w", upperBase, err)
 	}
 	// metacopy=off,index=off: pinned rather than inherited from the host's
 	// overlay module defaults. Both features record file-handle references to
@@ -259,6 +255,53 @@ func StageMergedRootfs(ctx context.Context, bundleRootfs, upperBase, restoreID, 
 	// they land in the upper (and ride the snapshot tar) rather than dirtying the image.
 	if err := ensureOCIMountpoints(dst); err != nil {
 		return fmt.Errorf("creating OCI mountpoints under %q: %w", dst, err)
+	}
+	return nil
+}
+
+// prepareUpperWorkDirs makes <cid>/fs and <cid>/work real directories under
+// upperBase, with the workdir emptied. upperBase is restored from the snapshot
+// tar, which is untrusted, and the overlay mount resolves these paths
+// normally: a symlink planted at <cid>, <cid>/fs or <cid>/work would point the
+// overlay upper (or the workdir wipe) anywhere on the worker pod. So all of it
+// goes through os.Root and a non-directory at any of them is refused.
+func prepareUpperWorkDirs(upperBase, cid string) error {
+	if cid == "." || strings.Contains(cid, "/") || !filepath.IsLocal(cid) {
+		return fmt.Errorf("invalid container id %q", cid)
+	}
+	root, err := os.OpenRoot(upperBase)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	if err := mkdirNoFollow(root, cid); err != nil {
+		return err
+	}
+	upper, work := filepath.Join(cid, "fs"), filepath.Join(cid, "work")
+	if err := mkdirNoFollow(root, upper); err != nil {
+		return err
+	}
+	// The workdir is scratch: wipe it so a volatile mount is never refused by a
+	// dirty marker left behind by the previous activation. RemoveAll removes a
+	// symlink itself, not its target.
+	if err := root.RemoveAll(work); err != nil {
+		return fmt.Errorf("clearing overlay workdir %q: %w", work, err)
+	}
+	return mkdirNoFollow(root, work)
+}
+
+// mkdirNoFollow creates name under root, or accepts it if it already is a
+// directory. A symlink or other file at name is an error.
+func mkdirNoFollow(root *os.Root, name string) error {
+	if err := root.Mkdir(name, 0o755); err == nil || !errors.Is(err, fs.ErrExist) {
+		return err
+	}
+	fi, err := root.Lstat(name)
+	if err != nil {
+		return err
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("%q is not a directory (type %v)", name, fi.Mode().Type())
 	}
 	return nil
 }

@@ -100,3 +100,60 @@ func TestVirtiofsdArgs(t *testing.T) {
 		t.Errorf("args %v do not set --migration-on-error guest-error", args)
 	}
 }
+
+// The upper base is restored from the snapshot tar, so a symlink at <cid> or
+// <cid>/fs must be refused, and one at the scratch <cid>/work replaced, rather
+// than followed by the workdir wipe, the mkdirs, or the overlay mount.
+func TestPrepareUpperWorkDirsRefusesSymlinks(t *testing.T) {
+	for _, link := range []string{"app", "app/fs", "app/work"} {
+		t.Run(link, func(t *testing.T) {
+			dir := t.TempDir()
+			victim := filepath.Join(dir, "victim")
+			if err := os.MkdirAll(filepath.Join(victim, "work"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			base := filepath.Join(dir, "upper")
+			if err := os.MkdirAll(filepath.Join(base, filepath.Dir(link)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(victim, filepath.Join(base, link)); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := prepareUpperWorkDirs(base, "app"); err == nil && link != "app/work" {
+				t.Errorf("prepareUpperWorkDirs with a symlink at %q = nil, want an error", link)
+			}
+			if _, err := os.Stat(filepath.Join(victim, "work")); err != nil {
+				t.Errorf("victim/work: Stat = %v; want it left alone", err)
+			}
+			if _, err := os.Stat(filepath.Join(victim, "fs")); !os.IsNotExist(err) {
+				t.Errorf("victim/fs: Stat = %v; want it never created", err)
+			}
+		})
+	}
+}
+
+func TestPrepareUpperWorkDirs(t *testing.T) {
+	base := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(base, "app", "fs", "keep"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(base, "app", "work", "stale"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareUpperWorkDirs(base, "app"); err != nil {
+		t.Fatalf("prepareUpperWorkDirs = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "app", "fs", "keep")); err != nil {
+		t.Errorf("upper contents: Stat = %v; want them kept", err)
+	}
+	entries, err := os.ReadDir(filepath.Join(base, "app", "work"))
+	if err != nil || len(entries) != 0 {
+		t.Errorf("workdir: ReadDir = %v, %v; want an empty directory", entries, err)
+	}
+	for _, cid := range []string{"", ".", "..", "a/b", "/abs"} {
+		if err := prepareUpperWorkDirs(base, cid); err == nil {
+			t.Errorf("prepareUpperWorkDirs(%q) = nil, want an error", cid)
+		}
+	}
+}
