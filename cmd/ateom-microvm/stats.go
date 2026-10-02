@@ -28,6 +28,7 @@ import (
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/agentstats"
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/third_party/kata/agentpb"
 	"github.com/agent-substrate/substrate/internal/apierror"
+	"github.com/agent-substrate/substrate/internal/ateomstats"
 	"github.com/agent-substrate/substrate/internal/proto/ateompb"
 	"github.com/agent-substrate/substrate/internal/resources"
 )
@@ -171,7 +172,7 @@ func (s *AteomService) GetActiveWorkloadStats(ctx context.Context, req *ateompb.
 // when it is no longer hosted. A guest not reached before ctx is done, or that
 // does not answer, is pending.
 func (s *AteomService) sampleHostedGuest(ctx context.Context, h *hostedActor, slots chan struct{}, stale *atomic.Bool) *ateompb.WorkloadStatsSample {
-	sample := pendingSample(&h.attribution)
+	sample := ateomstats.PendingSample(&h.attribution, ateompb.SandboxClass_SANDBOX_CLASS_MICROVM)
 	select {
 	case slots <- struct{}{}:
 		measured, err := s.sampleGuest(ctx, &h.attribution)
@@ -193,27 +194,9 @@ func (s *AteomService) sampleHostedGuest(ctx context.Context, h *hostedActor, sl
 	case latest == nil:
 		return nil
 	case latest != h:
-		return pendingSample(&latest.attribution)
+		return ateomstats.PendingSample(&latest.attribution, ateompb.SandboxClass_SANDBOX_CLASS_MICROVM)
 	}
 	return sample
-}
-
-// pendingSample is a workload with no numbers to give yet, as the discovery
-// read reports it: attribution and the runtime family, measurements absent --
-// source stays STATS_SOURCE_UNSPECIFIED, which the sample's contract defines
-// as "not measured" rather than "measured as zero".
-func pendingSample(active *resources.ActorAttribution) *ateompb.WorkloadStatsSample {
-	return &ateompb.WorkloadStatsSample{
-		Atespace:              active.Ref.Atespace,
-		ActorName:             active.Ref.Name,
-		ActorUid:              active.UID,
-		ActorTemplateAtespace: active.TemplateAtespace,
-		ActorTemplateName:     active.TemplateName,
-
-		SandboxClass: ateompb.SandboxClass_SANDBOX_CLASS_MICROVM,
-
-		ObservedAtUnixNano: time.Now().UnixNano(),
-	}
 }
 
 // errStaleGuestTarget is the one bug-shaped failure sampleGuest can return:

@@ -26,6 +26,7 @@ import (
 
 	"github.com/agent-substrate/substrate/cmd/ateom-gvisor/internal/cgroupstats"
 	"github.com/agent-substrate/substrate/internal/apierror"
+	"github.com/agent-substrate/substrate/internal/ateomstats"
 	"github.com/agent-substrate/substrate/internal/ocispec"
 	"github.com/agent-substrate/substrate/internal/proto/ateompb"
 	"github.com/agent-substrate/substrate/internal/resources"
@@ -146,7 +147,7 @@ func (s *AteomService) GetActiveWorkloadStats(ctx context.Context, req *ateompb.
 			if !errors.Is(err, fs.ErrNotExist) {
 				slog.WarnContext(ctx, "Failed to read sandbox cgroup", slog.String("actorUID", h.attribution.UID), slog.Any("err", err))
 			}
-			sample = pendingSample(&h.attribution)
+			sample = ateomstats.PendingSample(&h.attribution, ateompb.SandboxClass_SANDBOX_CLASS_GVISOR)
 		}
 		// The read holds no lock, and the cgroup is found by UID alone. If the
 		// actor was re-hosted meanwhile, perhaps on another template, the
@@ -155,7 +156,7 @@ func (s *AteomService) GetActiveWorkloadStats(ctx context.Context, req *ateompb.
 		case latest == nil:
 			continue
 		case latest != h:
-			sample = pendingSample(&latest.attribution)
+			sample = ateomstats.PendingSample(&latest.attribution, ateompb.SandboxClass_SANDBOX_CLASS_GVISOR)
 		}
 		samples = append(samples, sample)
 	}
@@ -163,24 +164,6 @@ func (s *AteomService) GetActiveWorkloadStats(ctx context.Context, req *ateompb.
 	// An empty list is "available", per the proto: a normal answer for a
 	// scraper to get, not an error.
 	return &ateompb.GetActiveWorkloadStatsResponse{Samples: samples}, nil
-}
-
-// pendingSample is a workload with no numbers to give yet, as the discovery
-// read reports it: attribution and the runtime family, measurements absent --
-// source stays STATS_SOURCE_UNSPECIFIED, which the sample's contract defines
-// as "not measured" rather than "measured as zero".
-func pendingSample(active *resources.ActorAttribution) *ateompb.WorkloadStatsSample {
-	return &ateompb.WorkloadStatsSample{
-		Atespace:              active.Ref.Atespace,
-		ActorName:             active.Ref.Name,
-		ActorUid:              active.UID,
-		ActorTemplateAtespace: active.TemplateAtespace,
-		ActorTemplateName:     active.TemplateName,
-
-		SandboxClass: ateompb.SandboxClass_SANDBOX_CLASS_GVISOR,
-
-		ObservedAtUnixNano: time.Now().UnixNano(),
-	}
 }
 
 // sampleSandbox reads the sandbox cgroup and builds the sample attributed to
