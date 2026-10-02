@@ -109,7 +109,13 @@ func CreateFiltered(ctx context.Context, tarPath, srcDir string, skip SkipFunc) 
 // CreateWithRoot is Create plus a "./" entry carrying srcDir's own mode,
 // ownership, modification time, and xattrs, which Extract applies to dstDir.
 func CreateWithRoot(ctx context.Context, tarPath, srcDir string) error {
-	return create(ctx, tarPath, srcDir, nil, true)
+	return CreateFilteredWithRoot(ctx, tarPath, srcDir, nil)
+}
+
+// CreateFilteredWithRoot is CreateWithRoot with entries omitted where skip
+// returns true. The root entry is never skipped.
+func CreateFilteredWithRoot(ctx context.Context, tarPath, srcDir string, skip SkipFunc) error {
+	return create(ctx, tarPath, srcDir, skip, true)
 }
 
 func create(ctx context.Context, tarPath, srcDir string, skip SkipFunc, includeRoot bool) error {
