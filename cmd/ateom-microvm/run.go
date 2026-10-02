@@ -263,7 +263,7 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 		size:             sizing.FromLimits(req.GetCpuMilli(), req.GetMemoryBytes()),
 	}
 
-	attribution := p.actorAttribution()
+	attribution := p.attribution()
 	s.actorLogger.EmitLifecycleLog(ctx, "Actor starting", attribution)
 
 	// A VM still running for this actor would be dropped from tracking by the
@@ -314,18 +314,9 @@ type actorBootParams struct {
 	size sizing.SandboxSize
 }
 
-func (p actorBootParams) attribution() resources.ActorAttribution {
-	return resources.ActorAttribution{
-		Ref:              p.actorRef,
-		UID:              p.actorUID,
-		TemplateAtespace: p.templateAtespace,
-		TemplateName:     p.templateName,
-	}
-}
-
-// actorAttribution regroups the actor fields that arrived on the Run/Restore
+// attribution regroups the actor fields that arrived on the Run/Restore
 // request.
-func (p actorBootParams) actorAttribution() resources.ActorAttribution {
+func (p actorBootParams) attribution() resources.ActorAttribution {
 	return resources.ActorAttribution{
 		Ref:              p.actorRef,
 		UID:              p.actorUID,
@@ -600,7 +591,7 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 	// over ac for the actor's lifetime and exit (io.EOF) when teardownActor
 	// closes ac.
 	workloadIDs := make([]string, 0, len(ctrs))
-	attribution := p.actorAttribution()
+	attribution := p.attribution()
 	for _, c := range ctrs {
 		s.startActorLogForwarding(ac, attribution, c.name, c.name)
 		workloadIDs = append(workloadIDs, c.name)

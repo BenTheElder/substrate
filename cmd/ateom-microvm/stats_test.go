@@ -72,8 +72,8 @@ func TestActorBootParamsAttribution(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if diff := cmp.Diff(tc.want, tc.p.actorAttribution()); diff != "" {
-				t.Errorf("actorBootParams.actorAttribution() mismatch (-want +got):\n%s", diff)
+			if diff := cmp.Diff(tc.want, tc.p.attribution()); diff != "" {
+				t.Errorf("actorBootParams.attribution() mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}
@@ -101,7 +101,7 @@ func TestActorBootParamsAttributionMatchesRequest(t *testing.T) {
 		templateName:     req.GetActorTemplateName(),
 	}
 
-	if diff := cmp.Diff(ateomstats.ActorAttributionFromRequest(req), p.actorAttribution()); diff != "" {
+	if diff := cmp.Diff(ateomstats.ActorAttributionFromRequest(req), p.attribution()); diff != "" {
 		t.Errorf("attribution via actorBootParams differs from attribution via request (-request +params):\n%s", diff)
 	}
 }

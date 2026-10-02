@@ -136,7 +136,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	durableDir := p.actorDirs.GetDurableDirVolumeMountsDir()
 	tStart := time.Now()
 
-	attribution := p.actorAttribution()
+	attribution := p.attribution()
 	s.actorLogger.EmitLifecycleLog(ctx, "Actor restoring", attribution)
 
 	// A VM still running for this actor would be dropped from tracking by the
@@ -445,7 +445,7 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 	// The joinable per-actor record the benchmarking tooling aggregates. The
 	// durable delta is not carried: tDurable is pinned to tLowers today, so it
 	// would always be the zero a record skips.
-	logSnapshotPhases(ctx, "Restore timing breakdown", p.actorAttribution(), scope,
+	logSnapshotPhases(ctx, "Restore timing breakdown", p.attribution(), scope,
 		restoreDurationKey, nil, []phase{
 			{phasePrep, tPrep.Sub(tStart)},
 			{phaseBundles, tBundles.Sub(tPrep)},
@@ -473,7 +473,7 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 	// Re-attach stdout/stderr forwarding for each container over the agent
 	// connection dialed after resume: the restored guest's containers are alive, so
 	// ReadStdout/ReadStderr pick up where they left off.
-	attribution := p.actorAttribution()
+	attribution := p.attribution()
 	for _, c := range containers {
 		s.startActorLogForwarding(guestAC, attribution, c.GetName(), c.GetName())
 	}
