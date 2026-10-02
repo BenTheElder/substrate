@@ -738,3 +738,55 @@ func TestExtractIgnoresNonDirRootEntry(t *testing.T) {
 		t.Errorf("dst: Lstat = %v, %v; want it still a directory", fi, err)
 	}
 }
+
+// A directory swapped for a symlink out of srcDir mid-walk must not pull the
+// outside directory's contents into the archive.
+func TestCreateDoesNotFollowSwappedDir(t *testing.T) {
+	base := t.TempDir()
+	outside := filepath.Join(base, "outside")
+	if err := os.Mkdir(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "secret"), []byte("host data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(base, "src")
+	if err := os.MkdirAll(filepath.Join(src, "d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "d", "f"), []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The skip callback runs after the walk listed "d" as a directory and
+	// before it is read: swap it for a symlink to outside there.
+	swap := func(rel string) bool {
+		if rel == "d" {
+			if err := os.RemoveAll(filepath.Join(src, "d")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outside, filepath.Join(src, "d")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return false
+	}
+	tarPath := filepath.Join(t.TempDir(), "swap.tar")
+	_ = CreateFiltered(t.Context(), tarPath, src, swap)
+
+	f, err := os.Open(tarPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	tr := tar.NewReader(f)
+	for {
+		hdr, err := tr.Next()
+		if err != nil {
+			break
+		}
+		if strings.HasSuffix(hdr.Name, "secret") {
+			t.Errorf("archive captured %q from outside srcDir", hdr.Name)
+		}
+	}
+}

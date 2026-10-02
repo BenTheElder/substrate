@@ -97,12 +97,24 @@ func untarDurableVolumes(dir, snapshotDir string, volumes []string) error {
 		if err := tarutil.Extract(tarPath, volDir); err != nil {
 			return fmt.Errorf("while restoring durable-dir volume %q: %w", vol, err)
 		}
-		_ = filepath.Walk(volDir, func(p string, info os.FileInfo, err error) error {
-			if err == nil && !info.IsDir() && strings.HasPrefix(info.Name(), ".gvisor.") {
-				_ = os.Remove(p)
-			}
-			return nil
-		})
+		removeGVisorFiles(volDir)
 	}
 	return nil
+}
+
+// removeGVisorFiles deletes gVisor internal files (.gvisor.*) under dir,
+// best-effort, through an os.Root so the restored tree's symlinks are never
+// followed.
+func removeGVisorFiles(dir string) {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return
+	}
+	defer root.Close()
+	_ = fs.WalkDir(root.FS(), ".", func(rel string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.HasPrefix(d.Name(), ".gvisor.") {
+			_ = root.Remove(rel)
+		}
+		return nil
+	})
 }

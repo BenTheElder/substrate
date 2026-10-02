@@ -151,34 +151,42 @@ func create(ctx context.Context, tarPath, srcDir string, skip SkipFunc, includeR
 	return nil
 }
 
-// writeTree walks srcDir in lexical order (filepath.WalkDir) and writes one
-// entry per path, omitting entries (and, for directories, subtrees) that skip
-// selects. srcDir itself is written as "./" only if includeRoot is set. The deterministic order keeps archives of identical trees
-// byte-comparable, which makes snapshot diffs meaningful.
+// writeTree walks srcDir in lexical order and writes one entry per path,
+// omitting entries (and, for directories, subtrees) that skip selects. srcDir
+// itself is written as "./" only if includeRoot is set. The deterministic
+// order keeps archives of identical trees byte-comparable, which makes
+// snapshot diffs meaningful.
+//
+// Every read goes through an os.Root rooted at srcDir, so an entry swapped for
+// a symlink mid-walk cannot make the archive capture a file outside srcDir.
 func writeTree(ctx context.Context, tw *tar.Writer, srcDir string, skip SkipFunc, includeRoot bool) error {
+	root, err := os.OpenRoot(srcDir)
+	if err != nil {
+		return fmt.Errorf("opening %q: %w", srcDir, err)
+	}
+	defer root.Close()
+
 	// Maps an already-archived multi-link inode to the name it was archived
 	// under, so later links become tar hardlink entries instead of copies.
 	linked := map[inodeKey]string{}
 
-	return filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(srcDir, path)
+	return fs.WalkDir(root.FS(), ".", func(rel string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if rel == "." && !includeRoot {
 			return nil
 		}
-		if rel != "." && skip != nil && skip(filepath.ToSlash(rel)) {
+		if rel != "." && skip != nil && skip(rel) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
 			return nil
 		}
+		path := filepath.Join(srcDir, rel)
 
-		info, err := d.Info()
+		// Not d.Info(): that re-stats by full path, outside the root.
+		info, err := root.Lstat(rel)
 		if err != nil {
 			return err
 		}
@@ -200,7 +208,7 @@ func writeTree(ctx context.Context, tw *tar.Writer, srcDir string, skip SkipFunc
 
 		link := ""
 		if info.Mode()&os.ModeSymlink != 0 {
-			if link, err = os.Readlink(path); err != nil {
+			if link, err = root.Readlink(rel); err != nil {
 				return fmt.Errorf("reading symlink %q: %w", path, err)
 			}
 		}
@@ -208,8 +216,8 @@ func writeTree(ctx context.Context, tw *tar.Writer, srcDir string, skip SkipFunc
 		if err != nil {
 			return fmt.Errorf("building tar header for %q: %w", path, err)
 		}
-		hdr.Name = filepath.ToSlash(rel)
-		if d.IsDir() {
+		hdr.Name = rel
+		if info.IsDir() {
 			hdr.Name += "/"
 		}
 		setOwner(hdr, info)
@@ -221,7 +229,7 @@ func writeTree(ctx context.Context, tw *tar.Writer, srcDir string, skip SkipFunc
 		// Symlinks are exempt: Linux refuses user.* xattrs on them, and
 		// overlay metadata never targets them.
 		if info.Mode()&os.ModeSymlink == 0 {
-			xattrs, err := readOverlayXattrs(path)
+			xattrs, err := readOverlayXattrs(root, rel)
 			if err != nil {
 				return fmt.Errorf("reading xattrs of %q: %w", path, err)
 			}
@@ -246,12 +254,20 @@ func writeTree(ctx context.Context, tw *tar.Writer, srcDir string, skip SkipFunc
 				}
 				linked[key] = hdr.Name
 			}
+			in, err := openRegular(root, rel)
+			if err != nil {
+				return fmt.Errorf("opening %q: %w", path, err)
+			}
+			defer in.Close()
 			if err := tw.WriteHeader(hdr); err != nil {
 				return fmt.Errorf("writing tar header for %q: %w", path, err)
 			}
-			return copyFileInto(tw, path)
+			if _, err := copyPooled(tw, in); err != nil {
+				return fmt.Errorf("archiving contents of %q: %w", path, err)
+			}
+			return nil
 
-		case d.IsDir(), info.Mode()&os.ModeSymlink != 0, info.Mode()&os.ModeNamedPipe != 0,
+		case info.IsDir(), info.Mode()&os.ModeSymlink != 0, info.Mode()&os.ModeNamedPipe != 0,
 			info.Mode()&os.ModeDevice != 0:
 			// FileInfoHeader already populated the Typeflag (and, for devices,
 			// the major/minor) with size 0. Devices are archived rather than
@@ -265,17 +281,24 @@ func writeTree(ctx context.Context, tw *tar.Writer, srcDir string, skip SkipFunc
 	})
 }
 
-// copyFileInto streams path's contents into the archive.
-func copyFileInto(tw *tar.Writer, path string) error {
-	in, err := os.Open(path)
+// openRegular opens name under root for reading without following a symlink
+// at it, and fails unless it is still a regular file. O_NONBLOCK keeps a FIFO
+// swapped in since the walk from blocking the open.
+func openRegular(root *os.Root, name string) (*os.File, error) {
+	f, err := root.OpenFile(name, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
-		return fmt.Errorf("opening %q: %w", path, err)
+		return nil, err
 	}
-	defer in.Close()
-	if _, err := copyPooled(tw, in); err != nil {
-		return fmt.Errorf("archiving contents of %q: %w", path, err)
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
 	}
-	return nil
+	if !fi.Mode().IsRegular() {
+		f.Close()
+		return nil, fmt.Errorf("no longer a regular file (%v)", fi.Mode().Type())
+	}
+	return f, nil
 }
 
 // Extract unpacks tarPath into dstDir, which must already exist. Modes,
@@ -533,13 +556,27 @@ func restoreOverlayXattrs(root *os.Root, name string, hdr *tar.Header) error {
 	return nil
 }
 
-// readOverlayXattrs returns path's user.* and trusted.overlay.* extended
-// attributes. Filesystems without xattr support report none rather than
-// failing: tarutil archives arbitrary workload trees, and only those two
-// namespaces carry state the round trip must preserve (trusted.overlay.* is
-// the host kernel's overlay deletion metadata; reading it requires root,
-// which archiving in ateom always has).
-func readOverlayXattrs(path string) (map[string]string, error) {
+// readOverlayXattrs returns the user.* and trusted.overlay.* extended
+// attributes of name under root. Filesystems without xattr support report none
+// rather than failing: tarutil archives arbitrary workload trees, and only
+// those two namespaces carry state the round trip must preserve
+// (trusted.overlay.* is the host kernel's overlay deletion metadata; reading it
+// requires root, which archiving in ateom always has).
+//
+// name is addressed through its parent directory opened via root, like
+// restoreOverlayXattrs, and the L* calls do not follow a final symlink.
+func readOverlayXattrs(root *os.Root, name string) (map[string]string, error) {
+	dir, base := filepath.Split(name)
+	if dir == "" {
+		dir = "."
+	}
+	parent, err := root.Open(filepath.Clean(dir))
+	if err != nil {
+		return nil, fmt.Errorf("opening parent directory of %q: %w", name, err)
+	}
+	defer parent.Close()
+	path := fmt.Sprintf("/proc/self/fd/%d/%s", parent.Fd(), base)
+
 	sz, err := unix.Llistxattr(path, nil)
 	if err != nil {
 		if errors.Is(err, unix.ENOTSUP) || errors.Is(err, unix.EOPNOTSUPP) {
