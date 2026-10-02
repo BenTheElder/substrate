@@ -554,13 +554,21 @@ func (s *Store) pull(ctx context.Context, parsedRef name.Reference, digest v1.Ha
 		return img, nil
 	}
 
-	tStart := time.Now()
-	digestRef := parsedRef.Context().Digest(digest.String())
-	var img v1.Image
+	// Retry the whole pull per credential: the config and layer blobs are
+	// fetched after the manifest, and finished layers are reused.
+	var out *Image
 	err := s.withCredentials(ctx, parsedRef, func(opts []remote.Option) (err error) {
-		img, err = remote.Image(digestRef, opts...)
+		out, err = s.pullWith(ctx, parsedRef, digest, opts)
 		return err
 	})
+	return out, err
+}
+
+// pullWith is pull with the given remote options.
+func (s *Store) pullWith(ctx context.Context, parsedRef name.Reference, digest v1.Hash, opts []remote.Option) (*Image, error) {
+	tStart := time.Now()
+	digestRef := parsedRef.Context().Digest(digest.String())
+	img, err := remote.Image(digestRef, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("in remote.Image: %w", err)
 	}

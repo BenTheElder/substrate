@@ -367,6 +367,30 @@ func TestKeychainCandidatesDeduplicate(t *testing.T) {
 	}
 }
 
+func TestKeychainCandidatesSkipInvalidAuthKey(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	fakePlugin(t, dir, "first-provider", `{
+  "kind": "CredentialProviderResponse",
+  "apiVersion": "credentialprovider.kubelet.k8s.io/v1",
+  "cacheKeyType": "Registry",
+  "auth": {"gcr.io": {"username": "first", "password": "p"}}
+}`)
+	fakePlugin(t, dir, "second-provider", `{
+  "kind": "CredentialProviderResponse",
+  "apiVersion": "credentialprovider.kubelet.k8s.io/v1",
+  "cacheKeyType": "Registry",
+  "auth": {"gcr.io:badport": {"username": "second", "password": "p"}}
+}`)
+	kc, err := New(writeConfig(t, dir, twoProviderConfig), dir)
+	if err != nil {
+		t.Fatalf("New returned unexpected error: %v", err)
+	}
+	if got, want := candidateUsernames(t, kc, "gcr.io/proj/img"), []string{"first"}; !slices.Equal(got, want) {
+		t.Errorf("Candidates = %q, want %q", got, want)
+	}
+}
+
 func TestKeychainCandidatesSkipFailingProvider(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

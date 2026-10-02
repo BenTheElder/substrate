@@ -111,7 +111,9 @@ func (k *Keychain) Candidates(ctx context.Context, target authn.Resource) ([]aut
 		}
 		keys, err := matchingAuthKeys(authMap, image)
 		if err != nil {
-			return nil, err
+			slog.WarnContext(ctx, "Image credential provider returned an invalid auth key; skipping it",
+				slog.String("provider", p.name), slog.String("image", image), slog.Any("err", err))
+			continue
 		}
 		if len(keys) == 0 {
 			slog.Debug("Image credential provider returned no credentials",

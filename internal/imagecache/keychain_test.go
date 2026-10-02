@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -149,5 +150,37 @@ func TestEnsureImage_TriesCandidatesInOrder(t *testing.T) {
 				t.Error("keychain was never consulted")
 			}
 		})
+	}
+}
+
+// The first credential can read the manifest but not the blobs.
+func TestEnsureImage_RetriesCandidateRejectedOnBlobs(t *testing.T) {
+	inner := registry.New(registry.Logger(log.New(io.Discard, "", 0)))
+	var locked atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if locked.Load() {
+			_, p, ok := r.BasicAuth()
+			if !ok || (strings.Contains(r.URL.Path, "/blobs/") && p != "s3cret") {
+				w.Header().Set("WWW-Authenticate", `Basic realm="test"`)
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+		}
+		inner.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	host := strings.TrimPrefix(srv.URL, "http://")
+	ref := host + "/test/app:latest"
+	pushImage(t, ref, v1.Config{}, layerFromEntries(t, []tarEntry{
+		{name: "app", typeflag: tar.TypeReg, mode: 0o644, body: "app"},
+	}))
+	locked.Store(true)
+
+	kc := &candidateKeychain{auths: []authn.Authenticator{
+		authn.FromConfig(authn.AuthConfig{Username: "robot", Password: "manifests-only"}),
+		authn.FromConfig(authn.AuthConfig{Username: "robot", Password: "s3cret"}),
+	}}
+	if _, err := newTestStore(t, WithKeychain(kc)).EnsureImage(context.Background(), ref); err != nil {
+		t.Fatalf("EnsureImage: %v", err)
 	}
 }
