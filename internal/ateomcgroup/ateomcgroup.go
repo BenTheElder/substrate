@@ -14,8 +14,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package ateomcgroup delegates the worker pod's cgroup to the ateom so each
-// actor can get a leaf of its own.
+// Package ateomcgroup delegates the worker container's cgroup to the ateom so
+// each actor can get a leaf of its own.
 package ateomcgroup
 
 import (
@@ -28,25 +28,25 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Root is the worker pod's cgroup scope inside its private cgroup namespace.
+// Root is the worker container's cgroup inside its private cgroup namespace.
 const Root = "/sys/fs/cgroup"
 
 // workerLeaf holds the ateom's own processes, since a cgroup that delegates
 // controllers may not hold processes itself.
 const workerLeaf = "ateom"
 
-// Delegate prepares the worker pod's cgroup so the runtime can create per-actor
-// leaves under it with real cpu/memory/pids accounting. It reports whether it
-// did: a worker outside a private cgroup namespace is left alone.
+// Delegate prepares the worker container's cgroup so the runtime can create
+// per-actor leaves under it with real cpu/memory/pids accounting. It reports
+// whether it did: a worker outside a private cgroup namespace is left alone.
 //
 // The unprivileged worker runs in a private cgroup namespace, so /sys/fs/cgroup
-// is the pod's own cgroup scope rather than the host root. Two things must be
-// arranged before runsc can nest container cgroups here:
+// is the worker container's own cgroup rather than the host root. Two things
+// must be arranged before runsc can nest container cgroups here:
 //
 //   - The cgroup v2 "no internal processes" rule forbids a cgroup from holding
-//     processes directly while also delegating controllers to children. The pod
-//     scope is not the true cgroup root, so the exemption does not apply: we move
-//     the worker's own processes into a dedicated "ateom" leaf.
+//     processes directly while also delegating controllers to children. The
+//     container cgroup is not the true cgroup root, so the exemption does not
+//     apply: we move the worker's own processes into a dedicated "ateom" leaf.
 //   - Controllers are only available to children if enabled in the scope's
 //     cgroup.subtree_control. We enable everything the parent delegated to us.
 //

@@ -32,9 +32,9 @@ import (
 	"github.com/agent-substrate/substrate/internal/resources"
 )
 
-// defaultCgroupRoot is the worker pod's own cgroup scope. The worker runs in a
-// private cgroup namespace, so this path is the pod's cgroup rather than the
-// host root, and runsc's per-container leaves are its direct children (see
+// defaultCgroupRoot is the worker container's own cgroup. The worker runs in a
+// private cgroup namespace, so this path is the container's cgroup rather than
+// the host root, and runsc's per-container leaves are its direct children (see
 // ateomcgroup.Delegate).
 const defaultCgroupRoot = "/sys/fs/cgroup"
 
@@ -74,7 +74,7 @@ const defaultCgroupRoot = "/sys/fs/cgroup"
 // container's and the actor container's — in the pause cgroup. Those runs
 // predate #496, so they establish the leaf name and the fact that everything
 // lands in one leaf, not the absolute path, which #496's delegation moved under
-// the pod scope.
+// the worker container's cgroup.
 //
 // So this measures the sandbox, not the actor's processes in isolation, which
 // is what the proto means by "the unit of measurement is the SANDBOX". Sizing

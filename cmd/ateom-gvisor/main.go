@@ -185,8 +185,8 @@ func do(ctx context.Context) error {
 		}
 	}()
 
-	// Prepare the pod cgroup so runsc can create per-actor-container leaves under
-	// it with real accounting.
+	// Prepare the container cgroup so runsc can create per-actor-container leaves
+	// under it with real accounting.
 	if _, err := ateomcgroup.Delegate(ctx); err != nil {
 		return fmt.Errorf("while setting up cgroup delegation: %w", err)
 	}
