@@ -78,6 +78,22 @@ func UpperWorkDirs(upperBase, containerID string) (upper, work string) {
 	return filepath.Join(upperBase, containerID, "fs"), filepath.Join(upperBase, containerID, "work")
 }
 
+// MkdirUpperWorkDirs creates UpperWorkDirs under upperBase, which must exist.
+// Only root uses <cid> and the workdir, so they are 0700. The upperdir is
+// 0755: overlayfs presents its mode as the container's /.
+func MkdirUpperWorkDirs(upperBase, containerID string) (upper, work string, err error) {
+	upper, work = UpperWorkDirs(upperBase, containerID)
+	for _, d := range []struct {
+		path string
+		mode os.FileMode
+	}{{filepath.Dir(upper), 0o700}, {upper, 0o755}, {work, 0o700}} {
+		if err := os.Mkdir(d.path, d.mode); err != nil && !errors.Is(err, fs.ErrExist) {
+			return "", "", fmt.Errorf("creating %q: %w", d.path, err)
+		}
+	}
+	return upper, work, nil
+}
+
 // GuestSharedRootfs is the in-guest path the kataShared mount exposes a container's
 // merged rootfs at. A container with this as Root.Path makes the agent's setup_bundle
 // bind it to /run/kata-containers/<cid>/rootfs and run the container there — the
@@ -216,7 +232,7 @@ func StageMergedRootfs(ctx context.Context, bundleRootfs, upperBase, restoreID, 
 		return fmt.Errorf("StageMergedRootfs: empty container id")
 	}
 	dst := filepath.Join(SharedDir(restoreID), cid, "rootfs")
-	upper, work := UpperWorkDirs(upperBase, cid)
+	_, work := UpperWorkDirs(upperBase, cid)
 	// Drop any stale mount first (lazy if busy), then ensure clean mountpoints.
 	if err := reaper.Run(exec.Command("umount", dst)); err != nil {
 		_ = reaper.Run(exec.Command("umount", "-l", dst))
@@ -226,10 +242,12 @@ func StageMergedRootfs(ctx context.Context, bundleRootfs, upperBase, restoreID, 
 	if err := os.RemoveAll(work); err != nil {
 		return fmt.Errorf("clearing overlay workdir %q: %w", work, err)
 	}
-	for _, d := range []string{dst, upper, work} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			return fmt.Errorf("creating %q: %w", d, err)
-		}
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return fmt.Errorf("creating %q: %w", dst, err)
+	}
+	upper, work, err := MkdirUpperWorkDirs(upperBase, cid)
+	if err != nil {
+		return err
 	}
 	// metacopy=off,index=off: pinned rather than inherited from the host's
 	// overlay module defaults. Both features record file-handle references to

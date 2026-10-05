@@ -89,7 +89,7 @@ func resetRootfsUpperDir(actorDirs *ateompb.ActorDirs) error {
 	if err := os.RemoveAll(dir); err != nil {
 		return fmt.Errorf("while clearing rootfs upper dir %q: %w", dir, err)
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("while creating rootfs upper dir %q: %w", dir, err)
 	}
 	return nil
@@ -124,7 +124,7 @@ func untarRootfsUpper(dir, snapshotDir string, containers []string) error {
 	if err := os.RemoveAll(dir); err != nil {
 		return fmt.Errorf("while clearing rootfs upper dir %q: %w", dir, err)
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("while creating rootfs upper dir %q: %w", dir, err)
 	}
 	for _, cid := range containers {
@@ -132,9 +132,9 @@ func untarRootfsUpper(dir, snapshotDir string, containers []string) error {
 		if err != nil {
 			return err
 		}
-		upper, _ := kata.UpperWorkDirs(dir, cid)
-		if err := os.MkdirAll(upper, 0o755); err != nil {
-			return fmt.Errorf("while creating rootfs upper %q: %w", upper, err)
+		upper, _, err := kata.MkdirUpperWorkDirs(dir, cid)
+		if err != nil {
+			return fmt.Errorf("while creating rootfs upper for %q: %w", cid, err)
 		}
 		if err := tarutil.Extract(filepath.Join(snapshotDir, name), upper); err != nil {
 			return fmt.Errorf("while restoring rootfs upper %q: %w", upper, err)

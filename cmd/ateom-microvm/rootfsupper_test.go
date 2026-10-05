@@ -86,10 +86,10 @@ func TestRootfsUpperRoundTrip(t *testing.T) {
 	if fi, err := os.Stat(filepath.Join(dst, "app_ovl/fs")); err != nil || fi.Mode().Perm() != 0o750 {
 		t.Errorf("restored upperdir: Stat = %v, %v; want mode 0750", fi, err)
 	}
-	// The workdirs must NOT survive the round trip: they are excluded from the
-	// archive (dead weight; overlayfs rebuilds them at mount).
-	if _, err := os.Stat(filepath.Join(dst, "app_ovl/work")); !os.IsNotExist(err) {
-		t.Errorf("workdir survived the snapshot round trip (stat err = %v), want it excluded", err)
+	// The workdirs' contents must NOT survive the round trip: they are excluded
+	// from the archive (dead weight; overlayfs rebuilds them at mount).
+	if entries, err := os.ReadDir(filepath.Join(dst, "app_ovl/work")); err != nil || len(entries) != 0 {
+		t.Errorf("workdir after the snapshot round trip: ReadDir = %v, %v; want an empty directory", entries, err)
 	}
 	if _, err := os.Stat(filepath.Join(dst, "app_ovl/fs/stale.txt")); !os.IsNotExist(err) {
 		t.Errorf("stale pre-restore content survived untarRootfsUpper (stat err = %v), want it wiped", err)
@@ -124,8 +124,28 @@ func TestUntarRootfsUpperCannotPlantLayout(t *testing.T) {
 	if fi, err := os.Lstat(filepath.Join(dst, "app", "fs")); err != nil || !fi.IsDir() {
 		t.Errorf("app/fs: Lstat = %v, %v; want a real directory", fi, err)
 	}
-	if _, err := os.Lstat(filepath.Join(dst, "app", "work")); !os.IsNotExist(err) {
-		t.Errorf("app/work: Lstat = %v; want it absent (created by the overlay staging)", err)
+	if fi, err := os.Lstat(filepath.Join(dst, "app", "work")); err != nil || !fi.IsDir() {
+		t.Errorf("app/work: Lstat = %v, %v; want a real directory", fi, err)
+	}
+}
+
+// Only root uses the layout above the upperdir, and the workdir; the upperdir
+// is the container's / and must stay traversable.
+func TestUntarRootfsUpperModes(t *testing.T) {
+	src := upperDirWith(t, map[string]string{"f": "x"})
+	snapshotDir := t.TempDir()
+	if err := tarutil.Create(t.Context(), filepath.Join(snapshotDir, "rootfs-upper-app.tar"), src); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(t.TempDir(), "upper")
+	if err := untarRootfsUpper(dst, snapshotDir, []string{"app"}); err != nil {
+		t.Fatalf("untarRootfsUpper: %v", err)
+	}
+	for rel, want := range map[string]os.FileMode{".": 0o700, "app": 0o700, "app/fs": 0o755, "app/work": 0o700} {
+		fi, err := os.Stat(filepath.Join(dst, rel))
+		if err != nil || fi.Mode().Perm() != want {
+			t.Errorf("%s: Stat = %v, %v; want mode %v", rel, fi, err, want)
+		}
 	}
 }
 
