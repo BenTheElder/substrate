@@ -67,34 +67,34 @@ func TestResolveSandboxAssets(t *testing.T) {
 	}{{
 		name: "named config",
 		sandbox: &ateapipb.SandboxConfig{
-			SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR,
+			SandboxClass: "gvisor",
 			ConfigName:   "gvisor-custom",
 		},
 		wantPauseImage: namedPause,
 	}, {
 		name: "named config class mismatch",
 		sandbox: &ateapipb.SandboxConfig{
-			SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_MICROVM,
+			SandboxClass: "microvm",
 			ConfigName:   "gvisor-custom",
 		},
 		wantErr: `has class "gvisor"`,
 	}, {
 		name: "missing named config",
 		sandbox: &ateapipb.SandboxConfig{
-			SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR,
+			SandboxClass: "gvisor",
 			ConfigName:   "does-not-exist",
 		},
 		wantErr: `SandboxConfig "does-not-exist" not found`,
 	}, {
-		name: "unrecognized sandbox class",
+		name: "empty sandbox class",
 		sandbox: &ateapipb.SandboxConfig{
-			SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_UNSPECIFIED,
+			SandboxClass: "",
 			ConfigName:   "gvisor-custom",
 		},
-		wantErr: "unrecognized sandbox_class",
+		wantErr: "no sandbox_config.sandbox_class",
 	}, {
 		name:    "empty config name",
-		sandbox: &ateapipb.SandboxConfig{SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR},
+		sandbox: &ateapipb.SandboxConfig{SandboxClass: "gvisor"},
 		wantErr: "names no sandbox_config.config_name",
 	}}
 	for _, tt := range tests {

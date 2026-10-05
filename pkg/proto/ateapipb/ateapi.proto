@@ -928,15 +928,6 @@ message ObjectRef {
   string name = 2;
 }
 
-// SandboxClass selects the sandbox runtime family. Snapshots are not portable
-// across classes.
-enum SandboxClass {
-  SANDBOX_CLASS_UNSPECIFIED = 0;
-  SANDBOX_CLASS_GVISOR = 1;
-  SANDBOX_CLASS_MICROVM = 2;
-  // Keep this in sync with SandboxConfig.sandbox_class's maximum.
-}
-
 message ActorTemplate {
   // Common resource metadata: atespace, name, uid, version, timestamps.
   //
@@ -1033,12 +1024,14 @@ message ActorTemplateStatus {
 
 // SandboxConfig selects the sandbox runtime for an ActorTemplate.
 message SandboxConfig {
-  // sandbox_class selects the sandbox runtime family.
+  // sandbox_class selects the sandbox runtime family, matching the
+  // SandboxConfig and WorkerPool sandboxClass. Snapshots are not portable
+  // across classes.
   //
   // +k8s:required
-  // +k8s:minimum=1
-  // +k8s:maximum=2 # keep this in sync with the SandboxClass enum
-  SandboxClass sandbox_class = 1;
+  // +k8s:maxLength=63
+  // +k8s:customValidation # "gvisor" or "microvm" for now
+  string sandbox_class = 1;
 
   // config_name names the cluster-scoped SandboxConfig Kubernetes object
   // supplying the sandbox binaries. Required; must match sandbox_class.

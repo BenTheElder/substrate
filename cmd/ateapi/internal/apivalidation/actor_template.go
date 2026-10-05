@@ -24,6 +24,7 @@ import (
 
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/internal/volumepath"
+	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"k8s.io/apimachinery/pkg/api/operation"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -233,6 +234,24 @@ func ValidateCustom_ExternalVolumeTemplate_Capacity(_ context.Context, _ operati
 func ValidateCustom_SnapshotConfig_StorageLocation(_ context.Context, _ operation.Operation, fldPath *field.Path, value, _ *string) field.ErrorList {
 	if err := resources.ValidateSnapshotLocation(*value); err != nil {
 		return field.ErrorList{field.Invalid(fldPath, *value, err.Error())}
+	}
+	return nil
+}
+
+// supportedSandboxClasses are the sandbox classes an ActorTemplate may name.
+// The field is a string so new classes need no API change, but the WorkerPool
+// and SandboxConfig CRDs, atelet, and the worker images all need changes
+// before another value can work.
+var supportedSandboxClasses = sets.New(
+	string(atev1alpha1.SandboxClassGvisor),
+	string(atev1alpha1.SandboxClassMicroVM),
+)
+
+// ValidateCustom_SandboxConfig_SandboxClass restricts sandbox_class to the
+// supported classes.
+func ValidateCustom_SandboxConfig_SandboxClass(_ context.Context, _ operation.Operation, fldPath *field.Path, value, _ *string) field.ErrorList {
+	if !supportedSandboxClasses.Has(*value) {
+		return field.ErrorList{field.NotSupported(fldPath, *value, sets.List(supportedSandboxClasses))}
 	}
 	return nil
 }

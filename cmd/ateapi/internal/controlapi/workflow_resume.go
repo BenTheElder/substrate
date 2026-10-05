@@ -421,7 +421,7 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 	pool := ""
 	class := ""
 	if actorTemplate != nil {
-		class = sandboxClassString(actorTemplate.GetSandboxConfig().GetSandboxClass())
+		class = actorTemplate.GetSandboxConfig().GetSandboxClass()
 	}
 	defer func() {
 		if schedulerRecordable(err) {
@@ -560,7 +560,7 @@ func schedulingConstraints(actor *ateapipb.Actor, tmpl *ateapipb.ActorTemplate) 
 		return scheduling.Constraints{}, fmt.Errorf("invalid template resource limits: %w", err)
 	}
 	c := scheduling.Constraints{
-		SandboxClass:  sandboxClassString(tmpl.GetSandboxConfig().GetSandboxClass()),
+		SandboxClass:  tmpl.GetSandboxConfig().GetSandboxClass(),
 		ActorSelector: labels.SelectorFromSet(labels.Set(actor.GetWorkerSelector().GetMatchLabels())),
 		RequiredNodes: actor.GetStatus().GetLocalSnapshot().GetNodeVmsWithLocalSnapshots(),
 		Limits:        limits.Proto(),

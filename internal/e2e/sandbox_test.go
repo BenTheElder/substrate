@@ -138,7 +138,7 @@ func TestRenderSubstrateFixtures_GVisor(t *testing.T) {
 			}
 			for _, tmpl := range templates {
 				name := tmpl.GetMetadata().GetName()
-				if got := tmpl.GetSandboxConfig().GetSandboxClass(); got != ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR {
+				if got := tmpl.GetSandboxConfig().GetSandboxClass(); got != "gvisor" {
 					t.Errorf("template %s sandboxClass = %v, want GVISOR", name, got)
 				}
 				// The templates name the cluster-wide gvisor-default
@@ -187,7 +187,7 @@ func TestRenderSubstrateFixtures_MicroVM(t *testing.T) {
 			}
 			for _, tmpl := range templates {
 				name := tmpl.GetMetadata().GetName()
-				if got := tmpl.GetSandboxConfig().GetSandboxClass(); got != ateapipb.SandboxClass_SANDBOX_CLASS_MICROVM {
+				if got := tmpl.GetSandboxConfig().GetSandboxClass(); got != "microvm" {
 					t.Errorf("template %s sandboxClass = %v, want MICROVM — it must match the pool's or no worker is eligible", name, got)
 				}
 				// Named explicitly (see fixture.go), so a missing or stale

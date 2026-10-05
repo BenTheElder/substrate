@@ -41,7 +41,7 @@ func substrateTemplateSubstitutions(bucket, name string, trustBundle bool) (inli
 		// gvisor-default is the cluster-wide SandboxConfig
 		// manifests/ate-install ships; config_name is required, so the
 		// fixtures name it explicitly.
-		"${TEMPLATE_SANDBOX_CONFIG}": "sandboxConfig:\n  sandboxClass: SANDBOX_CLASS_GVISOR\n  configName: gvisor-default",
+		"${TEMPLATE_SANDBOX_CONFIG}": "sandboxConfig:\n  sandboxClass: gvisor\n  configName: gvisor-default",
 		"${TEMPLATE_RESOURCES}":      "",
 		// Off unless the caller opts in; see WithTrustBundle.
 		"${TEMPLATE_TRUST_BUNDLE}": "",
@@ -58,7 +58,7 @@ func substrateTemplateSubstitutions(bucket, name string, trustBundle bool) (inli
 	inline["${FIXTURE_SUFFIX}"] = "-" + SandboxClassMicroVM + "-" + name
 	// The cluster-wide SandboxConfig hack/install-microvm-deps.sh installs;
 	// a missing or stale one fails loudly at template creation.
-	blocks["${TEMPLATE_SANDBOX_CONFIG}"] = "sandboxConfig:\n  sandboxClass: SANDBOX_CLASS_MICROVM\n  configName: microvm"
+	blocks["${TEMPLATE_SANDBOX_CONFIG}"] = "sandboxConfig:\n  sandboxClass: microvm\n  configName: microvm"
 	// Only for fixtures that declare no limits of their own. Without them the
 	// guest boots at ateom's default size (2GiB), and several of those
 	// do not fit beside the demo pools on CI's single kind node. These size

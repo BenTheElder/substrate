@@ -216,7 +216,7 @@ func lifecycleOpAttrs(actor *ateapipb.Actor, template *ateapipb.ActorTemplate, s
 	ass := actor.GetStatus().GetWorkerAssignment()
 	attrs = append(attrs, ateattr.WorkerPoolAttributes(ass.GetWorkerNamespace(), ass.GetWorkerPool())...)
 	if template != nil {
-		attrs = append(attrs, ateattr.SandboxClassAttribute(sandboxClassString(template.GetSandboxConfig().GetSandboxClass())))
+		attrs = append(attrs, ateattr.SandboxClassAttribute(template.GetSandboxConfig().GetSandboxClass()))
 	}
 	if snapshotKind != "" {
 		attrs = append(attrs, ateattr.SnapshotKindKey.String(snapshotKind))

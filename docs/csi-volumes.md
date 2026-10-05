@@ -178,7 +178,7 @@ containers:
       path: /readyz
       port: 8080
 sandboxConfig:
-  sandboxClass: SANDBOX_CLASS_GVISOR
+  sandboxClass: gvisor
   configName: gvisor-default
 snapshotConfig:
   storageLocation: gs://my-snapshots-bucket/stateful-agent

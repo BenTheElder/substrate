@@ -47,7 +47,7 @@ func validActorTemplate(mutations ...func(*ateapipb.ActorTemplate)) *ateapipb.Ac
 			OnPause:         ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
 			OnCommit:        ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
 		},
-		SandboxConfig: &ateapipb.SandboxConfig{SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR, ConfigName: "gvisor-default"},
+		SandboxConfig: &ateapipb.SandboxConfig{SandboxClass: "gvisor", ConfigName: "gvisor-default"},
 	}
 	for _, m := range mutations {
 		m(template)
@@ -87,19 +87,19 @@ func TestCreateActorTemplate_SandboxConfigChecks(t *testing.T) {
 		wantCode codes.Code
 	}{{
 		name:     "named config exists and matches",
-		sandbox:  &ateapipb.SandboxConfig{SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR, ConfigName: "gvisor-default"},
+		sandbox:  &ateapipb.SandboxConfig{SandboxClass: "gvisor", ConfigName: "gvisor-default"},
 		wantCode: codes.OK,
 	}, {
 		name:     "empty config_name is rejected",
-		sandbox:  &ateapipb.SandboxConfig{SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_MICROVM},
+		sandbox:  &ateapipb.SandboxConfig{SandboxClass: "microvm"},
 		wantCode: codes.InvalidArgument,
 	}, {
 		name:     "named config missing",
-		sandbox:  &ateapipb.SandboxConfig{SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR, ConfigName: "does-not-exist"},
+		sandbox:  &ateapipb.SandboxConfig{SandboxClass: "gvisor", ConfigName: "does-not-exist"},
 		wantCode: codes.FailedPrecondition,
 	}, {
 		name:     "named config class mismatch",
-		sandbox:  &ateapipb.SandboxConfig{SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_MICROVM, ConfigName: "gvisor-default"},
+		sandbox:  &ateapipb.SandboxConfig{SandboxClass: "microvm", ConfigName: "gvisor-default"},
 		wantCode: codes.FailedPrecondition,
 	}}
 	for i, tt := range tests {
@@ -339,7 +339,7 @@ func seedSubstrateTemplate(t *testing.T, ctx context.Context, persistence store.
 			StorageLocation: "gs://ate-snapshots/team-a/",
 		},
 		SandboxConfig: &ateapipb.SandboxConfig{
-			SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR,
+			SandboxClass: "gvisor",
 			ConfigName:   "gvisor",
 		},
 	})

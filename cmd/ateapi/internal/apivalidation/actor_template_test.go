@@ -165,7 +165,7 @@ func TestValidateCreateActorTemplateRequest(t *testing.T) {
 	}, {
 		"unspecified sandbox_config.sandbox_class",
 		&ateapipb.CreateActorTemplateRequest{ActorTemplate: validActorTemplate(func(tmpl *ateapipb.ActorTemplate) {
-			tmpl.SandboxConfig.SandboxClass = ateapipb.SandboxClass_SANDBOX_CLASS_UNSPECIFIED
+			tmpl.SandboxConfig.SandboxClass = ""
 		})},
 		field.ErrorList{field.Required(field.NewPath("actor_template", "sandbox_config", "sandbox_class"), "")},
 	}, {
@@ -312,17 +312,27 @@ func TestValidateActorTemplate(t *testing.T) {
 	}, {
 		name: "unspecified sandbox_class",
 		mutate: func(tmpl *ateapipb.ActorTemplate) {
-			tmpl.SandboxConfig.SandboxClass = ateapipb.SandboxClass_SANDBOX_CLASS_UNSPECIFIED
+			tmpl.SandboxConfig.SandboxClass = ""
 		},
 		want: field.ErrorList{field.Required(field.NewPath("sandbox_config", "sandbox_class"), "")},
 	}, {
-		name:   "sandbox_class outside the enum",
-		mutate: func(tmpl *ateapipb.ActorTemplate) { tmpl.SandboxConfig.SandboxClass = ateapipb.SandboxClass(99) },
-		want:   field.ErrorList{field.Invalid(field.NewPath("sandbox_config", "sandbox_class"), nil, "").WithOrigin("maximum")},
+		name:   "microvm sandbox_class",
+		mutate: func(tmpl *ateapipb.ActorTemplate) { tmpl.SandboxConfig.SandboxClass = "microvm" },
 	}, {
-		name:   "negative sandbox_class",
-		mutate: func(tmpl *ateapipb.ActorTemplate) { tmpl.SandboxConfig.SandboxClass = ateapipb.SandboxClass(-1) },
-		want:   field.ErrorList{field.Invalid(field.NewPath("sandbox_config", "sandbox_class"), nil, "").WithOrigin("minimum")},
+		name:   "unsupported sandbox_class",
+		mutate: func(tmpl *ateapipb.ActorTemplate) { tmpl.SandboxConfig.SandboxClass = "firecracker" },
+		want:   field.ErrorList{field.NotSupported[string](field.NewPath("sandbox_config", "sandbox_class"), nil, nil)},
+	}, {
+		name:   "sandbox_class is case sensitive",
+		mutate: func(tmpl *ateapipb.ActorTemplate) { tmpl.SandboxConfig.SandboxClass = "GVISOR" },
+		want:   field.ErrorList{field.NotSupported[string](field.NewPath("sandbox_config", "sandbox_class"), nil, nil)},
+	}, {
+		name:   "sandbox_class too long",
+		mutate: func(tmpl *ateapipb.ActorTemplate) { tmpl.SandboxConfig.SandboxClass = strings.Repeat("a", 64) },
+		want: field.ErrorList{
+			field.TooLong(field.NewPath("sandbox_config", "sandbox_class"), nil, 63).WithOrigin("maxLength"),
+			field.NotSupported[string](field.NewPath("sandbox_config", "sandbox_class"), nil, nil),
+		},
 	}, {
 		name:   "missing config_name",
 		mutate: func(tmpl *ateapipb.ActorTemplate) { tmpl.SandboxConfig.ConfigName = "" },
@@ -999,7 +1009,7 @@ func validActorTemplate(mutations ...func(*ateapipb.ActorTemplate)) *ateapipb.Ac
 			OnPause:         ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
 			OnCommit:        ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
 		},
-		SandboxConfig: &ateapipb.SandboxConfig{SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR, ConfigName: "gvisor-default"},
+		SandboxConfig: &ateapipb.SandboxConfig{SandboxClass: "gvisor", ConfigName: "gvisor-default"},
 	}
 	for _, m := range mutations {
 		m(template)

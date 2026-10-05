@@ -438,7 +438,7 @@ func createTemplateWithContainersAndVolumes(t *testing.T, tc *testContext, ns st
 				StorageLocation: testStorageLocation,
 			},
 			SandboxConfig: &ateapipb.SandboxConfig{
-				SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR,
+				SandboxClass: "gvisor",
 				ConfigName:   "gvisor-default",
 			},
 			Containers: containers,
@@ -579,7 +579,7 @@ func createTemplateWithSelector(t *testing.T, tc *testContext, name string, sele
 				StorageLocation: testStorageLocation,
 			},
 			SandboxConfig: &ateapipb.SandboxConfig{
-				SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR,
+				SandboxClass: "gvisor",
 				ConfigName:   "gvisor-default",
 			},
 			Containers: []*ateapipb.Container{

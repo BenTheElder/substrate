@@ -43,7 +43,7 @@ func TestActorTemplateCRUD(t *testing.T) {
 			Containers:     []*ateapipb.Container{{Name: "main", Image: "example.com/app:v1@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}},
 			SnapshotConfig: &ateapipb.SnapshotConfig{StorageLocation: "gs://my-bucket/snapshots"},
 			SandboxConfig: &ateapipb.SandboxConfig{
-				SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR,
+				SandboxClass: "gvisor",
 				ConfigName:   "gvisor-default",
 			},
 			Resources: &ateapipb.Resources{Limits: []*ateapipb.Limits{{Name: "memory", Quantity: "1Gi"}}},
@@ -67,7 +67,7 @@ func TestActorTemplateCRUD(t *testing.T) {
 			OnCommit:        ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
 		},
 		SandboxConfig: &ateapipb.SandboxConfig{
-			SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR,
+			SandboxClass: "gvisor",
 			ConfigName:   "gvisor-default",
 		},
 		Resources: &ateapipb.Resources{Limits: []*ateapipb.Limits{{Name: "memory", Quantity: "1Gi"}}},
@@ -82,7 +82,7 @@ func TestActorTemplateCRUD(t *testing.T) {
 			Metadata:       &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "tmpl-a"},
 			Containers:     []*ateapipb.Container{{Name: "main", Image: "example.com/app:v1@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}},
 			SnapshotConfig: &ateapipb.SnapshotConfig{StorageLocation: "gs://my-bucket/snapshots"},
-			SandboxConfig:  &ateapipb.SandboxConfig{SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR, ConfigName: "gvisor-default"},
+			SandboxConfig:  &ateapipb.SandboxConfig{SandboxClass: "gvisor", ConfigName: "gvisor-default"},
 		},
 	})
 	assertGrpcError(t, err, codes.AlreadyExists, "ActorTemplate "+testAtespace+"/tmpl-a already exists")
@@ -138,7 +138,7 @@ func TestActorTemplateCRUD(t *testing.T) {
 			Metadata:       &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "tmpl-unnamed-config"},
 			Containers:     []*ateapipb.Container{{Name: "main", Image: "example.com/app:v1@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}},
 			SnapshotConfig: &ateapipb.SnapshotConfig{StorageLocation: "gs://my-bucket/snapshots"},
-			SandboxConfig:  &ateapipb.SandboxConfig{SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR},
+			SandboxConfig:  &ateapipb.SandboxConfig{SandboxClass: "gvisor"},
 		},
 	})
 	assertGrpcErrorRegex(t, err, codes.InvalidArgument, `sandbox_config\.config_name`)
