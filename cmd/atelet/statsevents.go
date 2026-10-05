@@ -173,7 +173,7 @@ func (e *statsEventEmitter) emit(ctx context.Context, kind string, s *ateompb.Wo
 	e.log.LogAttrs(ctx, slog.LevelInfo, usageSampleMsg,
 		slog.Any(e.labelsKey(), labels),
 		slog.String("kind", kind),
-		slog.String("sandbox_class", sandboxClassLabel(s.GetSandboxClass())),
+		slog.String("sandbox_class", ateattr.NormalizeSandboxClass(s.GetSandboxClass())),
 		slog.String("source", statsSourceLabel(s.GetSource())),
 		slog.Uint64("memory_current_bytes", s.GetMemoryCurrentBytes()),
 		slog.Uint64("memory_peak_bytes", s.GetMemoryPeakBytes()),

@@ -90,60 +90,6 @@ func (SnapshotScope) EnumDescriptor() ([]byte, []int) {
 	return file_ateom_proto_rawDescGZIP(), []int{0}
 }
 
-// SandboxClass is the sandbox runtime family that produced a sample. Mirrors
-// the ate.dev/v1alpha1 SandboxClass the WorkerPool and ActorTemplate are
-// configured with; an ateom binary only ever reports its own.
-type SandboxClass int32
-
-const (
-	SandboxClass_SANDBOX_CLASS_UNSPECIFIED SandboxClass = 0
-	// gVisor / runsc (cmd/ateom-gvisor).
-	SandboxClass_SANDBOX_CLASS_GVISOR SandboxClass = 1
-	// Micro-VM (cmd/ateom-microvm).
-	SandboxClass_SANDBOX_CLASS_MICROVM SandboxClass = 2
-)
-
-// Enum value maps for SandboxClass.
-var (
-	SandboxClass_name = map[int32]string{
-		0: "SANDBOX_CLASS_UNSPECIFIED",
-		1: "SANDBOX_CLASS_GVISOR",
-		2: "SANDBOX_CLASS_MICROVM",
-	}
-	SandboxClass_value = map[string]int32{
-		"SANDBOX_CLASS_UNSPECIFIED": 0,
-		"SANDBOX_CLASS_GVISOR":      1,
-		"SANDBOX_CLASS_MICROVM":     2,
-	}
-)
-
-func (x SandboxClass) Enum() *SandboxClass {
-	p := new(SandboxClass)
-	*p = x
-	return p
-}
-
-func (x SandboxClass) String() string {
-	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
-}
-
-func (SandboxClass) Descriptor() protoreflect.EnumDescriptor {
-	return file_ateom_proto_enumTypes[1].Descriptor()
-}
-
-func (SandboxClass) Type() protoreflect.EnumType {
-	return &file_ateom_proto_enumTypes[1]
-}
-
-func (x SandboxClass) Number() protoreflect.EnumNumber {
-	return protoreflect.EnumNumber(x)
-}
-
-// Deprecated: Use SandboxClass.Descriptor instead.
-func (SandboxClass) EnumDescriptor() ([]byte, []int) {
-	return file_ateom_proto_rawDescGZIP(), []int{1}
-}
-
 // StatsSource is how a sample's measurements were obtained. The two are not
 // measured the same way and should not be compared against each other as though
 // they were.
@@ -188,11 +134,11 @@ func (x StatsSource) String() string {
 }
 
 func (StatsSource) Descriptor() protoreflect.EnumDescriptor {
-	return file_ateom_proto_enumTypes[2].Descriptor()
+	return file_ateom_proto_enumTypes[1].Descriptor()
 }
 
 func (StatsSource) Type() protoreflect.EnumType {
-	return &file_ateom_proto_enumTypes[2]
+	return &file_ateom_proto_enumTypes[1]
 }
 
 func (x StatsSource) Number() protoreflect.EnumNumber {
@@ -201,7 +147,7 @@ func (x StatsSource) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use StatsSource.Descriptor instead.
 func (StatsSource) EnumDescriptor() ([]byte, []int) {
-	return file_ateom_proto_rawDescGZIP(), []int{2}
+	return file_ateom_proto_rawDescGZIP(), []int{1}
 }
 
 // ActorDirs is the set of per-actor directories atelet prepares on the volume
@@ -1601,8 +1547,10 @@ type WorkloadStatsSample struct {
 	ActorUid              string `protobuf:"bytes,3,opt,name=actor_uid,json=actorUid,proto3" json:"actor_uid,omitempty"`
 	ActorTemplateAtespace string `protobuf:"bytes,4,opt,name=actor_template_atespace,json=actorTemplateAtespace,proto3" json:"actor_template_atespace,omitempty"`
 	ActorTemplateName     string `protobuf:"bytes,5,opt,name=actor_template_name,json=actorTemplateName,proto3" json:"actor_template_name,omitempty"`
-	// The sandbox runtime family that produced this sample.
-	SandboxClass SandboxClass `protobuf:"varint,6,opt,name=sandbox_class,json=sandboxClass,proto3,enum=ateom.SandboxClass" json:"sandbox_class,omitempty"`
+	// The sandbox runtime family that produced this sample, spelled as the
+	// ate.dev/v1alpha1 SandboxClass (e.g. "gvisor"). An ateom binary only ever
+	// reports its own.
+	SandboxClass string `protobuf:"bytes,6,opt,name=sandbox_class,json=sandboxClass,proto3" json:"sandbox_class,omitempty"`
 	// How the measurements below were obtained.
 	Source StatsSource `protobuf:"varint,7,opt,name=source,proto3,enum=ateom.StatsSource" json:"source,omitempty"`
 	// Measurements. All four are zero when source is STATS_SOURCE_UNSPECIFIED,
@@ -1700,11 +1648,11 @@ func (x *WorkloadStatsSample) GetActorTemplateName() string {
 	return ""
 }
 
-func (x *WorkloadStatsSample) GetSandboxClass() SandboxClass {
+func (x *WorkloadStatsSample) GetSandboxClass() string {
 	if x != nil {
 		return x.SandboxClass
 	}
-	return SandboxClass_SANDBOX_CLASS_UNSPECIFIED
+	return ""
 }
 
 func (x *WorkloadStatsSample) GetSource() StatsSource {
@@ -2025,15 +1973,15 @@ const file_ateom_proto_rawDesc = "" +
 	"\x0f_egress_gateway\"\x19\n" +
 	"\x17RestoreWorkloadResponse\"6\n" +
 	"\x17GetWorkloadStatsRequest\x12\x1b\n" +
-	"\tactor_uid\x18\x01 \x01(\tR\bactorUid\"\xd3\x04\n" +
+	"\tactor_uid\x18\x01 \x01(\tR\bactorUid\"\xbe\x04\n" +
 	"\x13WorkloadStatsSample\x12\x1a\n" +
 	"\batespace\x18\x01 \x01(\tR\batespace\x12\x1d\n" +
 	"\n" +
 	"actor_name\x18\x02 \x01(\tR\tactorName\x12\x1b\n" +
 	"\tactor_uid\x18\x03 \x01(\tR\bactorUid\x126\n" +
 	"\x17actor_template_atespace\x18\x04 \x01(\tR\x15actorTemplateAtespace\x12.\n" +
-	"\x13actor_template_name\x18\x05 \x01(\tR\x11actorTemplateName\x128\n" +
-	"\rsandbox_class\x18\x06 \x01(\x0e2\x13.ateom.SandboxClassR\fsandboxClass\x12*\n" +
+	"\x13actor_template_name\x18\x05 \x01(\tR\x11actorTemplateName\x12#\n" +
+	"\rsandbox_class\x18\x06 \x01(\tR\fsandboxClass\x12*\n" +
 	"\x06source\x18\a \x01(\x0e2\x12.ateom.StatsSourceR\x06source\x120\n" +
 	"\x14memory_current_bytes\x18\b \x01(\x04R\x12memoryCurrentBytes\x12*\n" +
 	"\x11memory_peak_bytes\x18\t \x01(\x04R\x0fmemoryPeakBytes\x127\n" +
@@ -2051,10 +1999,6 @@ const file_ateom_proto_rawDesc = "" +
 	"\x1aSNAPSHOT_SCOPE_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13SNAPSHOT_SCOPE_FULL\x10\x01\x12\x17\n" +
 	"\x13SNAPSHOT_SCOPE_DATA\x10\x02*b\n" +
-	"\fSandboxClass\x12\x1d\n" +
-	"\x19SANDBOX_CLASS_UNSPECIFIED\x10\x00\x12\x18\n" +
-	"\x14SANDBOX_CLASS_GVISOR\x10\x01\x12\x19\n" +
-	"\x15SANDBOX_CLASS_MICROVM\x10\x02*b\n" +
 	"\vStatsSource\x12\x1c\n" +
 	"\x18STATS_SOURCE_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13STATS_SOURCE_CGROUP\x10\x01\x12\x1c\n" +
@@ -2079,83 +2023,81 @@ func file_ateom_proto_rawDescGZIP() []byte {
 	return file_ateom_proto_rawDescData
 }
 
-var file_ateom_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_ateom_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
 var file_ateom_proto_msgTypes = make([]protoimpl.MessageInfo, 26)
 var file_ateom_proto_goTypes = []any{
 	(SnapshotScope)(0),                     // 0: ateom.SnapshotScope
-	(SandboxClass)(0),                      // 1: ateom.SandboxClass
-	(StatsSource)(0),                       // 2: ateom.StatsSource
-	(*ActorDirs)(nil),                      // 3: ateom.ActorDirs
-	(*TerminateWorkloadRequest)(nil),       // 4: ateom.TerminateWorkloadRequest
-	(*TerminateWorkloadResponse)(nil),      // 5: ateom.TerminateWorkloadResponse
-	(*RunWorkloadRequest)(nil),             // 6: ateom.RunWorkloadRequest
-	(*EgressGateway)(nil),                  // 7: ateom.EgressGateway
-	(*WorkloadSpec)(nil),                   // 8: ateom.WorkloadSpec
-	(*Container)(nil),                      // 9: ateom.Container
-	(*VolumeMount)(nil),                    // 10: ateom.VolumeMount
-	(*DurableDirVolumeMount)(nil),          // 11: ateom.DurableDirVolumeMount
-	(*SystemInfoVolumeMount)(nil),          // 12: ateom.SystemInfoVolumeMount
-	(*ImageVolumeMount)(nil),               // 13: ateom.ImageVolumeMount
-	(*WakeupProbe)(nil),                    // 14: ateom.WakeupProbe
-	(*HTTPGetAction)(nil),                  // 15: ateom.HTTPGetAction
-	(*RunWorkloadResponse)(nil),            // 16: ateom.RunWorkloadResponse
-	(*CheckpointWorkloadRequest)(nil),      // 17: ateom.CheckpointWorkloadRequest
-	(*CheckpointWorkloadResponse)(nil),     // 18: ateom.CheckpointWorkloadResponse
-	(*RestoreWorkloadRequest)(nil),         // 19: ateom.RestoreWorkloadRequest
-	(*RestoreWorkloadResponse)(nil),        // 20: ateom.RestoreWorkloadResponse
-	(*GetWorkloadStatsRequest)(nil),        // 21: ateom.GetWorkloadStatsRequest
-	(*WorkloadStatsSample)(nil),            // 22: ateom.WorkloadStatsSample
-	(*GetWorkloadStatsResponse)(nil),       // 23: ateom.GetWorkloadStatsResponse
-	(*GetActiveWorkloadStatsRequest)(nil),  // 24: ateom.GetActiveWorkloadStatsRequest
-	(*GetActiveWorkloadStatsResponse)(nil), // 25: ateom.GetActiveWorkloadStatsResponse
-	nil,                                    // 26: ateom.RunWorkloadRequest.RuntimeAssetPathsEntry
-	nil,                                    // 27: ateom.CheckpointWorkloadRequest.RuntimeAssetPathsEntry
-	nil,                                    // 28: ateom.RestoreWorkloadRequest.RuntimeAssetPathsEntry
+	(StatsSource)(0),                       // 1: ateom.StatsSource
+	(*ActorDirs)(nil),                      // 2: ateom.ActorDirs
+	(*TerminateWorkloadRequest)(nil),       // 3: ateom.TerminateWorkloadRequest
+	(*TerminateWorkloadResponse)(nil),      // 4: ateom.TerminateWorkloadResponse
+	(*RunWorkloadRequest)(nil),             // 5: ateom.RunWorkloadRequest
+	(*EgressGateway)(nil),                  // 6: ateom.EgressGateway
+	(*WorkloadSpec)(nil),                   // 7: ateom.WorkloadSpec
+	(*Container)(nil),                      // 8: ateom.Container
+	(*VolumeMount)(nil),                    // 9: ateom.VolumeMount
+	(*DurableDirVolumeMount)(nil),          // 10: ateom.DurableDirVolumeMount
+	(*SystemInfoVolumeMount)(nil),          // 11: ateom.SystemInfoVolumeMount
+	(*ImageVolumeMount)(nil),               // 12: ateom.ImageVolumeMount
+	(*WakeupProbe)(nil),                    // 13: ateom.WakeupProbe
+	(*HTTPGetAction)(nil),                  // 14: ateom.HTTPGetAction
+	(*RunWorkloadResponse)(nil),            // 15: ateom.RunWorkloadResponse
+	(*CheckpointWorkloadRequest)(nil),      // 16: ateom.CheckpointWorkloadRequest
+	(*CheckpointWorkloadResponse)(nil),     // 17: ateom.CheckpointWorkloadResponse
+	(*RestoreWorkloadRequest)(nil),         // 18: ateom.RestoreWorkloadRequest
+	(*RestoreWorkloadResponse)(nil),        // 19: ateom.RestoreWorkloadResponse
+	(*GetWorkloadStatsRequest)(nil),        // 20: ateom.GetWorkloadStatsRequest
+	(*WorkloadStatsSample)(nil),            // 21: ateom.WorkloadStatsSample
+	(*GetWorkloadStatsResponse)(nil),       // 22: ateom.GetWorkloadStatsResponse
+	(*GetActiveWorkloadStatsRequest)(nil),  // 23: ateom.GetActiveWorkloadStatsRequest
+	(*GetActiveWorkloadStatsResponse)(nil), // 24: ateom.GetActiveWorkloadStatsResponse
+	nil,                                    // 25: ateom.RunWorkloadRequest.RuntimeAssetPathsEntry
+	nil,                                    // 26: ateom.CheckpointWorkloadRequest.RuntimeAssetPathsEntry
+	nil,                                    // 27: ateom.RestoreWorkloadRequest.RuntimeAssetPathsEntry
 }
 var file_ateom_proto_depIdxs = []int32{
-	8,  // 0: ateom.TerminateWorkloadRequest.spec:type_name -> ateom.WorkloadSpec
-	3,  // 1: ateom.TerminateWorkloadRequest.actor_dirs:type_name -> ateom.ActorDirs
-	8,  // 2: ateom.RunWorkloadRequest.spec:type_name -> ateom.WorkloadSpec
-	26, // 3: ateom.RunWorkloadRequest.runtime_asset_paths:type_name -> ateom.RunWorkloadRequest.RuntimeAssetPathsEntry
-	7,  // 4: ateom.RunWorkloadRequest.egress_gateway:type_name -> ateom.EgressGateway
-	3,  // 5: ateom.RunWorkloadRequest.actor_dirs:type_name -> ateom.ActorDirs
-	9,  // 6: ateom.WorkloadSpec.containers:type_name -> ateom.Container
-	14, // 7: ateom.Container.wakeup_probe:type_name -> ateom.WakeupProbe
-	11, // 8: ateom.Container.durable_dir_volume_mounts:type_name -> ateom.DurableDirVolumeMount
-	10, // 9: ateom.Container.csi_volume_mounts:type_name -> ateom.VolumeMount
-	12, // 10: ateom.Container.system_info_volume_mounts:type_name -> ateom.SystemInfoVolumeMount
-	13, // 11: ateom.Container.image_volume_mounts:type_name -> ateom.ImageVolumeMount
-	15, // 12: ateom.WakeupProbe.http_get:type_name -> ateom.HTTPGetAction
-	8,  // 13: ateom.CheckpointWorkloadRequest.spec:type_name -> ateom.WorkloadSpec
-	27, // 14: ateom.CheckpointWorkloadRequest.runtime_asset_paths:type_name -> ateom.CheckpointWorkloadRequest.RuntimeAssetPathsEntry
+	7,  // 0: ateom.TerminateWorkloadRequest.spec:type_name -> ateom.WorkloadSpec
+	2,  // 1: ateom.TerminateWorkloadRequest.actor_dirs:type_name -> ateom.ActorDirs
+	7,  // 2: ateom.RunWorkloadRequest.spec:type_name -> ateom.WorkloadSpec
+	25, // 3: ateom.RunWorkloadRequest.runtime_asset_paths:type_name -> ateom.RunWorkloadRequest.RuntimeAssetPathsEntry
+	6,  // 4: ateom.RunWorkloadRequest.egress_gateway:type_name -> ateom.EgressGateway
+	2,  // 5: ateom.RunWorkloadRequest.actor_dirs:type_name -> ateom.ActorDirs
+	8,  // 6: ateom.WorkloadSpec.containers:type_name -> ateom.Container
+	13, // 7: ateom.Container.wakeup_probe:type_name -> ateom.WakeupProbe
+	10, // 8: ateom.Container.durable_dir_volume_mounts:type_name -> ateom.DurableDirVolumeMount
+	9,  // 9: ateom.Container.csi_volume_mounts:type_name -> ateom.VolumeMount
+	11, // 10: ateom.Container.system_info_volume_mounts:type_name -> ateom.SystemInfoVolumeMount
+	12, // 11: ateom.Container.image_volume_mounts:type_name -> ateom.ImageVolumeMount
+	14, // 12: ateom.WakeupProbe.http_get:type_name -> ateom.HTTPGetAction
+	7,  // 13: ateom.CheckpointWorkloadRequest.spec:type_name -> ateom.WorkloadSpec
+	26, // 14: ateom.CheckpointWorkloadRequest.runtime_asset_paths:type_name -> ateom.CheckpointWorkloadRequest.RuntimeAssetPathsEntry
 	0,  // 15: ateom.CheckpointWorkloadRequest.scope:type_name -> ateom.SnapshotScope
-	3,  // 16: ateom.CheckpointWorkloadRequest.actor_dirs:type_name -> ateom.ActorDirs
-	8,  // 17: ateom.RestoreWorkloadRequest.spec:type_name -> ateom.WorkloadSpec
-	28, // 18: ateom.RestoreWorkloadRequest.runtime_asset_paths:type_name -> ateom.RestoreWorkloadRequest.RuntimeAssetPathsEntry
+	2,  // 16: ateom.CheckpointWorkloadRequest.actor_dirs:type_name -> ateom.ActorDirs
+	7,  // 17: ateom.RestoreWorkloadRequest.spec:type_name -> ateom.WorkloadSpec
+	27, // 18: ateom.RestoreWorkloadRequest.runtime_asset_paths:type_name -> ateom.RestoreWorkloadRequest.RuntimeAssetPathsEntry
 	0,  // 19: ateom.RestoreWorkloadRequest.scope:type_name -> ateom.SnapshotScope
-	7,  // 20: ateom.RestoreWorkloadRequest.egress_gateway:type_name -> ateom.EgressGateway
-	3,  // 21: ateom.RestoreWorkloadRequest.actor_dirs:type_name -> ateom.ActorDirs
-	1,  // 22: ateom.WorkloadStatsSample.sandbox_class:type_name -> ateom.SandboxClass
-	2,  // 23: ateom.WorkloadStatsSample.source:type_name -> ateom.StatsSource
-	22, // 24: ateom.GetWorkloadStatsResponse.sample:type_name -> ateom.WorkloadStatsSample
-	22, // 25: ateom.GetActiveWorkloadStatsResponse.samples:type_name -> ateom.WorkloadStatsSample
-	6,  // 26: ateom.Ateom.RunWorkload:input_type -> ateom.RunWorkloadRequest
-	17, // 27: ateom.Ateom.CheckpointWorkload:input_type -> ateom.CheckpointWorkloadRequest
-	19, // 28: ateom.Ateom.RestoreWorkload:input_type -> ateom.RestoreWorkloadRequest
-	21, // 29: ateom.Ateom.GetWorkloadStats:input_type -> ateom.GetWorkloadStatsRequest
-	24, // 30: ateom.Ateom.GetActiveWorkloadStats:input_type -> ateom.GetActiveWorkloadStatsRequest
-	4,  // 31: ateom.Ateom.TerminateWorkload:input_type -> ateom.TerminateWorkloadRequest
-	16, // 32: ateom.Ateom.RunWorkload:output_type -> ateom.RunWorkloadResponse
-	18, // 33: ateom.Ateom.CheckpointWorkload:output_type -> ateom.CheckpointWorkloadResponse
-	20, // 34: ateom.Ateom.RestoreWorkload:output_type -> ateom.RestoreWorkloadResponse
-	23, // 35: ateom.Ateom.GetWorkloadStats:output_type -> ateom.GetWorkloadStatsResponse
-	25, // 36: ateom.Ateom.GetActiveWorkloadStats:output_type -> ateom.GetActiveWorkloadStatsResponse
-	5,  // 37: ateom.Ateom.TerminateWorkload:output_type -> ateom.TerminateWorkloadResponse
-	32, // [32:38] is the sub-list for method output_type
-	26, // [26:32] is the sub-list for method input_type
-	26, // [26:26] is the sub-list for extension type_name
-	26, // [26:26] is the sub-list for extension extendee
-	0,  // [0:26] is the sub-list for field type_name
+	6,  // 20: ateom.RestoreWorkloadRequest.egress_gateway:type_name -> ateom.EgressGateway
+	2,  // 21: ateom.RestoreWorkloadRequest.actor_dirs:type_name -> ateom.ActorDirs
+	1,  // 22: ateom.WorkloadStatsSample.source:type_name -> ateom.StatsSource
+	21, // 23: ateom.GetWorkloadStatsResponse.sample:type_name -> ateom.WorkloadStatsSample
+	21, // 24: ateom.GetActiveWorkloadStatsResponse.samples:type_name -> ateom.WorkloadStatsSample
+	5,  // 25: ateom.Ateom.RunWorkload:input_type -> ateom.RunWorkloadRequest
+	16, // 26: ateom.Ateom.CheckpointWorkload:input_type -> ateom.CheckpointWorkloadRequest
+	18, // 27: ateom.Ateom.RestoreWorkload:input_type -> ateom.RestoreWorkloadRequest
+	20, // 28: ateom.Ateom.GetWorkloadStats:input_type -> ateom.GetWorkloadStatsRequest
+	23, // 29: ateom.Ateom.GetActiveWorkloadStats:input_type -> ateom.GetActiveWorkloadStatsRequest
+	3,  // 30: ateom.Ateom.TerminateWorkload:input_type -> ateom.TerminateWorkloadRequest
+	15, // 31: ateom.Ateom.RunWorkload:output_type -> ateom.RunWorkloadResponse
+	17, // 32: ateom.Ateom.CheckpointWorkload:output_type -> ateom.CheckpointWorkloadResponse
+	19, // 33: ateom.Ateom.RestoreWorkload:output_type -> ateom.RestoreWorkloadResponse
+	22, // 34: ateom.Ateom.GetWorkloadStats:output_type -> ateom.GetWorkloadStatsResponse
+	24, // 35: ateom.Ateom.GetActiveWorkloadStats:output_type -> ateom.GetActiveWorkloadStatsResponse
+	4,  // 36: ateom.Ateom.TerminateWorkload:output_type -> ateom.TerminateWorkloadResponse
+	31, // [31:37] is the sub-list for method output_type
+	25, // [25:31] is the sub-list for method input_type
+	25, // [25:25] is the sub-list for extension type_name
+	25, // [25:25] is the sub-list for extension extendee
+	0,  // [0:25] is the sub-list for field type_name
 }
 
 func init() { file_ateom_proto_init() }
@@ -2170,7 +2112,7 @@ func file_ateom_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_ateom_proto_rawDesc), len(file_ateom_proto_rawDesc)),
-			NumEnums:      3,
+			NumEnums:      2,
 			NumMessages:   26,
 			NumExtensions: 0,
 			NumServices:   1,

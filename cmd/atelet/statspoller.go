@@ -303,7 +303,7 @@ func (p *statsPoller) collect(ctx context.Context) map[templateKey]*templateAggr
 				key := templateKey{
 					templateNamespace: sample.GetActorTemplateAtespace(),
 					templateName:      sample.GetActorTemplateName(),
-					sandboxClass:      sandboxClassLabel(sample.GetSandboxClass()),
+					sandboxClass:      ateattr.NormalizeSandboxClass(sample.GetSandboxClass()),
 					source:            statsSourceLabel(sample.GetSource()),
 					workerPool:        pools[podUID],
 				}
@@ -363,19 +363,6 @@ func addSat(agg int64, v uint64) int64 {
 		return math.MaxInt64
 	}
 	return agg + int64(v)
-}
-
-// sandboxClassLabel maps the wire enum to the ate.sandbox.class label values
-// the rest of the system uses.
-func sandboxClassLabel(c ateompb.SandboxClass) string {
-	switch c {
-	case ateompb.SandboxClass_SANDBOX_CLASS_GVISOR:
-		return "gvisor"
-	case ateompb.SandboxClass_SANDBOX_CLASS_MICROVM:
-		return "microvm"
-	default:
-		return ateattr.SandboxClassUnknown
-	}
 }
 
 // statsSourceLabel maps the wire enum to the ate.stats.source label values.

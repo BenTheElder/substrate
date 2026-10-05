@@ -30,6 +30,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/apierror"
 	"github.com/agent-substrate/substrate/internal/proto/ateompb"
 	"github.com/agent-substrate/substrate/internal/resources"
+	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 )
 
 // statsCallTimeout bounds one container's guest-agent call. The RPC is polled
@@ -210,7 +211,7 @@ func pendingSample(active *resources.ActorAttribution) *ateompb.WorkloadStatsSam
 		ActorTemplateAtespace: active.TemplateAtespace,
 		ActorTemplateName:     active.TemplateName,
 
-		SandboxClass: ateompb.SandboxClass_SANDBOX_CLASS_MICROVM,
+		SandboxClass: string(atev1alpha1.SandboxClassMicroVM),
 
 		ObservedAtUnixNano: time.Now().UnixNano(),
 	}
@@ -264,7 +265,7 @@ func (s *AteomService) sampleGuest(ctx context.Context, active *resources.ActorA
 		ActorTemplateAtespace: active.TemplateAtespace,
 		ActorTemplateName:     active.TemplateName,
 
-		SandboxClass: ateompb.SandboxClass_SANDBOX_CLASS_MICROVM,
+		SandboxClass: string(atev1alpha1.SandboxClassMicroVM),
 		Source:       ateompb.StatsSource_STATS_SOURCE_GUEST_AGENT,
 
 		MemoryCurrentBytes:    sample.MemoryCurrentBytes,

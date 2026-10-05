@@ -36,7 +36,7 @@ func eventSample() *ateompb.WorkloadStatsSample {
 		ActorUid:              "uid-a",
 		ActorTemplateAtespace: "ns-a",
 		ActorTemplateName:     "template-a",
-		SandboxClass:          ateompb.SandboxClass_SANDBOX_CLASS_MICROVM,
+		SandboxClass:          "microvm",
 		Source:                ateompb.StatsSource_STATS_SOURCE_GUEST_AGENT,
 		MemoryCurrentBytes:    1000,
 		MemoryPeakBytes:       2000,
