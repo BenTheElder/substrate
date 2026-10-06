@@ -55,6 +55,9 @@ jobs:
     # this guards, and that happens on the push to main, not on the PR.
     - name: Verify immutable PostgreSQL migrations
       run: hack/verify/postgresql-migrations.sh
+    # we only test on amd64, make sure everything still builds for arm64
+    - name: build for arm64
+      run: GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build ./...
     # gotestsum wraps go test to emit JUnit; the go test arguments are unchanged.
     - name: unit tests
       run: hack/run-tool.sh gotestsum --junitfile "${ARTIFACTS}/unit.xml"
