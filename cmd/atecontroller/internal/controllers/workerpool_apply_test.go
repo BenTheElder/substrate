@@ -820,7 +820,7 @@ func expectedDeploymentApplyConfig(mutatePodSpec func(*corev1ac.PodSpecApplyConf
 				),
 		).
 		WithContainers(corev1ac.Container().
-			WithName("ateom").
+			WithName("worker").
 			WithImage(wp.Spec.WorkerImage).
 			WithArgs(
 				"--pod-uid=$(POD_UID)",
