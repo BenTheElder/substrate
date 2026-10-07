@@ -1842,15 +1842,15 @@ type WorkerServiceClient interface {
 	// RegisterWorker records what a Worker can hold and its hardware identity in
 	// one write, so a Worker is never schedulable without hardware to match
 	// snapshots against. Capacity and hardware are the Worker's to report rather
-	// than the control plane's to infer: they are what the ateom can actually
+	// than the control plane's to infer: they are what the worker can actually
 	// supply and expose, only its node can observe them, and a fleet may run
-	// mixed ateom versions.
+	// mixed worker versions.
 	//
 	// atelet calls this with its own client certificate, as it does for
 	// MintCert. Idempotent: re-sending the same capacity and hardware is not a
 	// write.
 	RegisterWorker(ctx context.Context, in *RegisterWorkerRequest, opts ...grpc.CallOption) (*RegisterWorkerResponse, error)
-	// Create a Substrate-issued SPIFFE certificate that asserts an ateom acting
+	// Create a Substrate-issued SPIFFE certificate that asserts a worker acting
 	// on behalf of a particular actor.
 	//
 	// SPIFFE URI: spiffe://${trustdomain}/worker-for-actor/${atespace}/${actor}
@@ -1927,15 +1927,15 @@ type WorkerServiceServer interface {
 	// RegisterWorker records what a Worker can hold and its hardware identity in
 	// one write, so a Worker is never schedulable without hardware to match
 	// snapshots against. Capacity and hardware are the Worker's to report rather
-	// than the control plane's to infer: they are what the ateom can actually
+	// than the control plane's to infer: they are what the worker can actually
 	// supply and expose, only its node can observe them, and a fleet may run
-	// mixed ateom versions.
+	// mixed worker versions.
 	//
 	// atelet calls this with its own client certificate, as it does for
 	// MintCert. Idempotent: re-sending the same capacity and hardware is not a
 	// write.
 	RegisterWorker(context.Context, *RegisterWorkerRequest) (*RegisterWorkerResponse, error)
-	// Create a Substrate-issued SPIFFE certificate that asserts an ateom acting
+	// Create a Substrate-issued SPIFFE certificate that asserts a worker acting
 	// on behalf of a particular actor.
 	//
 	// SPIFFE URI: spiffe://${trustdomain}/worker-for-actor/${atespace}/${actor}

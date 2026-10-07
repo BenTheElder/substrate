@@ -6704,10 +6704,10 @@ type Worker struct {
 	// +k8s:eachKey=+k8s:format=k8s-label-key
 	// +k8s:eachVal=+k8s:format=k8s-label-value
 	Labels map[string]string `protobuf:"bytes,9,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	// epoch counts the runs of the worker pod's ateom container: 1 for its first
+	// epoch counts the runs of the worker pod's worker container: 1 for its first
 	// run and one more for each restart. 0 means it has not been reported.
 	//
-	// A restarted ateom has lost the sandboxes of the Actors it was hosting, so
+	// A restarted worker has lost the sandboxes of the Actors it was hosting, so
 	// once epoch rises the control plane crashes every Actor placed during an
 	// earlier epoch; status.observed_epoch reports when that is done. It may only
 	// increase.
@@ -6859,7 +6859,7 @@ type WorkerStatus struct {
 	Allocated *WorkerResources `protobuf:"bytes,3,opt,name=allocated,proto3" json:"allocated,omitempty"`
 	// observed_epoch is the latest epoch whose earlier Actors the control plane
 	// has crashed and released. While it is below epoch, Actors placed before
-	// the ateom's last restart may still be reported as running.
+	// the worker's last restart may still be reported as running.
 	//
 	// +k8s:optional
 	// +k8s:minimum=0

@@ -42,10 +42,10 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// WorkerSupport provides callouts for ateom.
+// WorkerSupport provides callouts for worker implementations.
 //
-// Called by individual ateom pods over a local connection, authenticated with
-// ateom's k8s pod identity mTLS certificate.
+// Called by individual worker pods over a local connection, authenticated with
+// the worker's k8s pod identity mTLS certificate.
 type WorkerSupportClient interface {
 	// Request an atunnel certificate for the given actor.
 	//
@@ -63,7 +63,7 @@ type WorkerSupportClient interface {
 	// passed through as it was given, so a worker can tell a decision from a
 	// failure to ask. Callers must not hold a lock the resulting Checkpoint
 	// would need: the control plane answers this by driving a suspend back
-	// through atelet into the calling ateom.
+	// through atelet into the calling worker.
 	RequestActorSuspend(ctx context.Context, in *RequestActorSuspendRequest, opts ...grpc.CallOption) (*RequestActorSuspendResponse, error)
 }
 
@@ -109,10 +109,10 @@ func (c *workerSupportClient) RequestActorSuspend(ctx context.Context, in *Reque
 // All implementations must embed UnimplementedWorkerSupportServer
 // for forward compatibility.
 //
-// WorkerSupport provides callouts for ateom.
+// WorkerSupport provides callouts for worker implementations.
 //
-// Called by individual ateom pods over a local connection, authenticated with
-// ateom's k8s pod identity mTLS certificate.
+// Called by individual worker pods over a local connection, authenticated with
+// the worker's k8s pod identity mTLS certificate.
 type WorkerSupportServer interface {
 	// Request an atunnel certificate for the given actor.
 	//
@@ -130,7 +130,7 @@ type WorkerSupportServer interface {
 	// passed through as it was given, so a worker can tell a decision from a
 	// failure to ask. Callers must not hold a lock the resulting Checkpoint
 	// would need: the control plane answers this by driving a suspend back
-	// through atelet into the calling ateom.
+	// through atelet into the calling worker.
 	RequestActorSuspend(context.Context, *RequestActorSuspendRequest) (*RequestActorSuspendResponse, error)
 	mustEmbedUnimplementedWorkerSupportServer()
 }
@@ -267,17 +267,17 @@ const (
 // Called by ate-api-server over cluster networking.  ate-api-server
 // authenticates with its k8s pod identity mTLS certificate.
 type AteletClient interface {
-	// Run tells atelet to create a new containerized workload from scratch on an
-	// ateom.
+	// Run tells atelet to create a new containerized workload from scratch on a
+	// worker.
 	Run(ctx context.Context, in *RunRequest, opts ...grpc.CallOption) (*RunResponse, error)
-	// Checkpoint tells atelet to save the current state of the workload on an
-	// ateom to object storage, and then completely the ateom to a blank state
+	// Checkpoint tells atelet to save the current state of the workload on a
+	// worker to object storage, and then completely the worker to a blank state
 	// (back to "available" state.)
 	Checkpoint(ctx context.Context, in *CheckpointRequest, opts ...grpc.CallOption) (*CheckpointResponse, error)
-	// Restore restores a workload from checkpoint onto an ateom.
+	// Restore restores a workload from checkpoint onto a worker.
 	Restore(ctx context.Context, in *RestoreRequest, opts ...grpc.CallOption) (*RestoreResponse, error)
 	// UploadPausedCheckpoint copies a local (pause) checkpoint from this node's
-	// disk to object storage. Unlike Checkpoint it drives no ateom: the actor is
+	// disk to object storage. Unlike Checkpoint it drives no worker: the actor is
 	// paused, its sandbox is gone; the checkpoint files plus their manifest
 	// already sit under the actor's local-checkpoints directory.
 	UploadPausedCheckpoint(ctx context.Context, in *UploadPausedCheckpointRequest, opts ...grpc.CallOption) (*UploadPausedCheckpointResponse, error)
@@ -353,17 +353,17 @@ func (c *ateletClient) Terminate(ctx context.Context, in *TerminateRequest, opts
 // Called by ate-api-server over cluster networking.  ate-api-server
 // authenticates with its k8s pod identity mTLS certificate.
 type AteletServer interface {
-	// Run tells atelet to create a new containerized workload from scratch on an
-	// ateom.
+	// Run tells atelet to create a new containerized workload from scratch on a
+	// worker.
 	Run(context.Context, *RunRequest) (*RunResponse, error)
-	// Checkpoint tells atelet to save the current state of the workload on an
-	// ateom to object storage, and then completely the ateom to a blank state
+	// Checkpoint tells atelet to save the current state of the workload on a
+	// worker to object storage, and then completely the worker to a blank state
 	// (back to "available" state.)
 	Checkpoint(context.Context, *CheckpointRequest) (*CheckpointResponse, error)
-	// Restore restores a workload from checkpoint onto an ateom.
+	// Restore restores a workload from checkpoint onto a worker.
 	Restore(context.Context, *RestoreRequest) (*RestoreResponse, error)
 	// UploadPausedCheckpoint copies a local (pause) checkpoint from this node's
-	// disk to object storage. Unlike Checkpoint it drives no ateom: the actor is
+	// disk to object storage. Unlike Checkpoint it drives no worker: the actor is
 	// paused, its sandbox is gone; the checkpoint files plus their manifest
 	// already sit under the actor's local-checkpoints directory.
 	UploadPausedCheckpoint(context.Context, *UploadPausedCheckpointRequest) (*UploadPausedCheckpointResponse, error)
