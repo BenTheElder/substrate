@@ -15,7 +15,7 @@
 # limitations under the License.
 
 # Assemble the micro-VM (kata + cloud-hypervisor) runtime asset set that
-# ateom-microvm fetches at runtime (fetch-not-bake). Run this on a Linux
+# ateworker-microvm fetches at runtime (fetch-not-bake). Run this on a Linux
 # host of the TARGET arch.
 #
 # Produces, under $OUT, the four assets named as the SandboxConfig expects:

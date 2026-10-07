@@ -97,9 +97,9 @@ type SandboxClass int32
 
 const (
 	SandboxClass_SANDBOX_CLASS_UNSPECIFIED SandboxClass = 0
-	// gVisor / runsc (cmd/ateom-gvisor).
+	// gVisor / runsc (cmd/ateworker-gvisor).
 	SandboxClass_SANDBOX_CLASS_GVISOR SandboxClass = 1
-	// Micro-VM (cmd/ateom-microvm).
+	// Micro-VM (cmd/ateworker-microvm).
 	SandboxClass_SANDBOX_CLASS_MICROVM SandboxClass = 2
 )
 

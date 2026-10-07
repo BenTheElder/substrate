@@ -1223,7 +1223,7 @@ groups:
       has it on the gRPC interface that atelet calls.
     annotations:
       substrate:
-        emitted_by: [ateapi, atelet, atenet-router, ateom-gvisor, ateom-microvm]
+        emitted_by: [ateapi, atelet, atenet-router, ateworker-gvisor, ateworker-microvm]
         golden_signals: [latency, traffic, errors]
         source: external
         instrumentation: go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc

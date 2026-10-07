@@ -366,9 +366,9 @@ message GetWorkloadStatsRequest {
 // configured with; an ateom binary only ever reports its own.
 enum SandboxClass {
   SANDBOX_CLASS_UNSPECIFIED = 0;
-  // gVisor / runsc (cmd/ateom-gvisor).
+  // gVisor / runsc (cmd/ateworker-gvisor).
   SANDBOX_CLASS_GVISOR = 1;
-  // Micro-VM (cmd/ateom-microvm).
+  // Micro-VM (cmd/ateworker-microvm).
   SANDBOX_CLASS_MICROVM = 2;
 }
 
