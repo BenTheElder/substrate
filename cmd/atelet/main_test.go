@@ -508,7 +508,7 @@ func validRunRequest() *ateletpb.RunRequest {
 		ActorName:             "counter-1",
 		ActorTemplateAtespace: "ate-demo",
 		ActorTemplateName:     "counter",
-		TargetAteomUid:        "422938ba-8860-4983-a25d-d6bcb0a69d4e",
+		TargetWorkerPodUid:    "422938ba-8860-4983-a25d-d6bcb0a69d4e",
 		ActorUid:              "123e4567-e89b-12d3-a456-426614174000",
 		Spec:                  &ateletpb.WorkloadSpec{Containers: []*ateletpb.Container{{Name: "worker"}}},
 	}
@@ -520,7 +520,7 @@ func validCheckpointRequest() *ateletpb.CheckpointRequest {
 		ActorName:             "counter-1",
 		ActorTemplateAtespace: "ate-demo",
 		ActorTemplateName:     "counter",
-		TargetAteomUid:        "422938ba-8860-4983-a25d-d6bcb0a69d4e",
+		TargetWorkerPodUid:    "422938ba-8860-4983-a25d-d6bcb0a69d4e",
 		ActorUid:              "123e4567-e89b-12d3-a456-426614174000",
 		Spec:                  &ateletpb.WorkloadSpec{Containers: []*ateletpb.Container{{Name: "worker"}}},
 		Type:                  ateletpb.CheckpointType_CHECKPOINT_TYPE_EXTERNAL,
@@ -539,7 +539,7 @@ func validRestoreRequest() *ateletpb.RestoreRequest {
 		ActorName:             "counter-1",
 		ActorTemplateAtespace: "ate-demo",
 		ActorTemplateName:     "counter",
-		TargetAteomUid:        "422938ba-8860-4983-a25d-d6bcb0a69d4e",
+		TargetWorkerPodUid:    "422938ba-8860-4983-a25d-d6bcb0a69d4e",
 		ActorUid:              "123e4567-e89b-12d3-a456-426614174000",
 		Spec:                  &ateletpb.WorkloadSpec{Containers: []*ateletpb.Container{{Name: "worker"}}},
 		Type:                  ateletpb.CheckpointType_CHECKPOINT_TYPE_EXTERNAL,
@@ -563,7 +563,7 @@ func TestValidateRunRequest(t *testing.T) {
 		wantErr bool
 	}{
 		{"valid", func(*ateletpb.RunRequest) {}, false},
-		{"invalid ateom uid", func(r *ateletpb.RunRequest) { r.TargetAteomUid = "../escape" }, true},
+		{"invalid ateom uid", func(r *ateletpb.RunRequest) { r.TargetWorkerPodUid = "../escape" }, true},
 		{"invalid atespace", func(r *ateletpb.RunRequest) { r.Atespace = "../escape" }, true},
 		{"invalid actor name", func(r *ateletpb.RunRequest) { r.ActorName = "../escape" }, true},
 		{"invalid actor uid", func(r *ateletpb.RunRequest) { r.ActorUid = "../escape" }, true},
@@ -603,7 +603,7 @@ func TestValidateCheckpointRequest(t *testing.T) {
 		{"valid", makeReq(), false},
 		{"empty snapshot uri", makeReq(func(r *ateletpb.CheckpointRequest) { r.GetExternalConfig().SnapshotUri = "" }), true},
 		{"bucketless snapshot uri", makeReq(func(r *ateletpb.CheckpointRequest) { r.GetExternalConfig().SnapshotUri = "relative/path" }), true},
-		{"invalid ateom uid", makeReq(func(r *ateletpb.CheckpointRequest) { r.TargetAteomUid = "../escape" }), true},
+		{"invalid ateom uid", makeReq(func(r *ateletpb.CheckpointRequest) { r.TargetWorkerPodUid = "../escape" }), true},
 		{"invalid atespace", makeReq(func(r *ateletpb.CheckpointRequest) { r.Atespace = "../escape" }), true},
 		{"invalid actor name", makeReq(func(r *ateletpb.CheckpointRequest) { r.ActorName = "../escape" }), true},
 		{"invalid actor uid", makeReq(func(r *ateletpb.CheckpointRequest) { r.ActorUid = "../escape" }), true},
@@ -661,7 +661,7 @@ func TestValidateRestoreRequest(t *testing.T) {
 		{"missing sandbox assets", makeReq(func(r *ateletpb.RestoreRequest) { r.SandboxAssets = nil }), true},
 		{"empty snapshot uri", makeReq(func(r *ateletpb.RestoreRequest) { r.GetExternalConfig().SnapshotUri = "" }), true},
 		{"bucketless snapshot uri", makeReq(func(r *ateletpb.RestoreRequest) { r.GetExternalConfig().SnapshotUri = "relative/path" }), true},
-		{"invalid ateom uid", makeReq(func(r *ateletpb.RestoreRequest) { r.TargetAteomUid = "../escape" }), true},
+		{"invalid ateom uid", makeReq(func(r *ateletpb.RestoreRequest) { r.TargetWorkerPodUid = "../escape" }), true},
 		{"invalid atespace", makeReq(func(r *ateletpb.RestoreRequest) { r.Atespace = "../escape" }), true},
 		{"invalid actor name", makeReq(func(r *ateletpb.RestoreRequest) { r.ActorName = "../escape" }), true},
 		{"invalid actor uid", makeReq(func(r *ateletpb.RestoreRequest) { r.ActorUid = "../escape" }), true},
@@ -879,21 +879,21 @@ func TestRPCBoundariesReject(t *testing.T) {
 	t.Run("Run", func(t *testing.T) {
 		_, err := s.Run(ctx, &ateletpb.RunRequest{
 			Atespace: okAtespace, ActorName: okID,
-			ActorUid: okActorUID, TargetAteomUid: badUID, Spec: okSpec,
+			ActorUid: okActorUID, TargetWorkerPodUid: badUID, Spec: okSpec,
 		})
 		wantInvalidArgument(t, "Run", err)
 	})
 	t.Run("Checkpoint", func(t *testing.T) {
 		_, err := s.Checkpoint(ctx, &ateletpb.CheckpointRequest{
 			Atespace: okAtespace, ActorName: okID,
-			ActorUid: okActorUID, TargetAteomUid: badUID, Spec: okSpec,
+			ActorUid: okActorUID, TargetWorkerPodUid: badUID, Spec: okSpec,
 		})
 		wantInvalidArgument(t, "Checkpoint", err)
 	})
 	t.Run("Restore", func(t *testing.T) {
 		_, err := s.Restore(ctx, &ateletpb.RestoreRequest{
 			Atespace: okAtespace, ActorName: okID,
-			ActorUid: okActorUID, TargetAteomUid: badUID, Spec: okSpec,
+			ActorUid: okActorUID, TargetWorkerPodUid: badUID, Spec: okSpec,
 		})
 		wantInvalidArgument(t, "Restore", err)
 	})
@@ -901,7 +901,7 @@ func TestRPCBoundariesReject(t *testing.T) {
 		_, err := s.Terminate(ctx, &ateletpb.TerminateRequest{
 			Atespace: okAtespace, ActorName: okID,
 			ActorUid: okActorUID, ActorTemplateAtespace: "default", ActorTemplateName: "template",
-			TargetAteomUid: badUID, Spec: okSpec,
+			TargetWorkerPodUid: badUID, Spec: okSpec,
 		})
 		wantInvalidArgument(t, "Terminate", err)
 	})
