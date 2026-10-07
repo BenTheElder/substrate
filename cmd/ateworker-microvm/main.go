@@ -170,7 +170,7 @@ func do(ctx context.Context) error {
 	// Clean up the ateom directory during graceful shutdown (#1677).
 	defer func() {
 		if err := os.RemoveAll(ateomDir); err != nil {
-			slog.ErrorContext(ctx, "Failed to remove the ateom directory on shutdown", slog.Any("err", err))
+			slog.ErrorContext(ctx, "Failed to remove the worker directory on shutdown", slog.Any("err", err))
 		}
 	}()
 

@@ -94,7 +94,7 @@ func IsValidResourceName(name string) bool {
 // check accepts every legitimate value while rejecting separators and "..".
 func ValidateAteomUID(targetAteomUID string) error {
 	if errs := content.IsDNS1123Label(targetAteomUID); len(errs) > 0 {
-		return fmt.Errorf("invalid target ateom UID %q: %s", targetAteomUID, strings.Join(errs, "; "))
+		return fmt.Errorf("invalid target worker pod UID %q: %s", targetAteomUID, strings.Join(errs, "; "))
 	}
 	return nil
 }

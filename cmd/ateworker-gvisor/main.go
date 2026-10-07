@@ -112,7 +112,7 @@ func do(ctx context.Context) error {
 		return err
 	}
 
-	slog.InfoContext(ctx, "ateom booting", slog.String("version", version.Version))
+	slog.InfoContext(ctx, "ateworker booting", slog.String("version", version.Version))
 	if *maxActors < 0 {
 		return fmt.Errorf("--max-actors must not be negative, got %d", *maxActors)
 	}
@@ -181,7 +181,7 @@ func do(ctx context.Context) error {
 	// Clean up the ateom directory during graceful shutdown (#1677).
 	defer func() {
 		if err := os.RemoveAll(ateomDir); err != nil {
-			slog.ErrorContext(ctx, "Failed to remove the ateom directory on shutdown", slog.Any("err", err))
+			slog.ErrorContext(ctx, "Failed to remove the worker directory on shutdown", slog.Any("err", err))
 		}
 	}()
 
