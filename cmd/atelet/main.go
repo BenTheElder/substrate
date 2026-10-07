@@ -572,7 +572,7 @@ func (s *AteomHerder) Run(ctx context.Context, req *ateletpb.RunRequest) (resp *
 		CpuMilli:              req.GetCpuMilli(),
 		MemoryBytes:           req.GetMemoryBytes(),
 	}); err != nil {
-		return nil, fmt.Errorf("while calling ateom.RunWorkload: %w", err)
+		return nil, fmt.Errorf("while calling worker RunWorkload: %w", err)
 	}
 
 	return &ateletpb.RunResponse{}, nil
@@ -706,7 +706,7 @@ func (s *AteomHerder) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRe
 	if err != nil {
 		// TODO: Ateom should classify checkpoint failures, and set "should-crash"
 		// in the metadata if the error is not retriable.
-		return nil, fmt.Errorf("while calling ateom.CheckpointWorkload: %w", err)
+		return nil, fmt.Errorf("while calling worker CheckpointWorkload: %w", err)
 	}
 
 	s.systemInfoVolumes.Deregister(actorUID)
@@ -774,14 +774,14 @@ func (s *AteomHerder) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRe
 func checkpointSnapshotFiles(resp *ateworkerpb.CheckpointWorkloadResponse, required bool) (files, dataFiles []string, err error) {
 	files = resp.GetSnapshotFiles()
 	if len(files) == 0 && required {
-		return nil, nil, errors.New("ateom reported no snapshot files for checkpoint")
+		return nil, nil, errors.New("worker reported no snapshot files for checkpoint")
 	}
 	if err := validateSnapshotFiles(files); err != nil {
-		return nil, nil, fmt.Errorf("ateom reported invalid snapshot files: %w", err)
+		return nil, nil, fmt.Errorf("worker reported invalid snapshot files: %w", err)
 	}
 	dataFiles = resp.GetDataSnapshotFiles()
 	if err := validateDataSnapshotFiles(files, dataFiles); err != nil {
-		return nil, nil, fmt.Errorf("ateom reported invalid data snapshot files: %w", err)
+		return nil, nil, fmt.Errorf("worker reported invalid data snapshot files: %w", err)
 	}
 	return files, dataFiles, nil
 }
@@ -1283,7 +1283,7 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 	dAteom = time.Since(tAteom)
 	if err != nil {
 		// TODO: classify the errors returned by Ateom and crash the actor if needed.
-		return nil, fmt.Errorf("while calling ateom.RestoreWorkload: %w", err)
+		return nil, fmt.Errorf("while calling worker RestoreWorkload: %w", err)
 	}
 
 	// Record the sandbox binaries actually running the guest on-node so a
@@ -1321,7 +1321,7 @@ func (s *AteomHerder) Terminate(ctx context.Context, req *ateletpb.TerminateRequ
 
 		client, err := s.dialAteom(ctx, req.GetTargetWorkerPodUid())
 		if err != nil {
-			return nil, fmt.Errorf("failed to dial ateom for terminate (actor: %s, actorUID: %s): %w", actorRef, actorUID, err)
+			return nil, fmt.Errorf("failed to dial worker for terminate (actor: %s, actorUID: %s): %w", actorRef, actorUID, err)
 		}
 
 		spec, err := buildAteomWorkloadSpec(req.GetSpec())
@@ -1341,7 +1341,7 @@ func (s *AteomHerder) Terminate(ctx context.Context, req *ateletpb.TerminateRequ
 			if status.Code(err) == codes.NotFound {
 				slog.InfoContext(ctx, "workload not found on ateom during terminate", slog.Any("actor", actorRef), slog.String("actorUID", actorUID))
 			} else {
-				return nil, fmt.Errorf("failed calling ateom.TerminateWorkload (actor: %s, actorUID: %s): %w", actorRef, actorUID, err)
+				return nil, fmt.Errorf("failed calling worker TerminateWorkload (actor: %s, actorUID: %s): %w", actorRef, actorUID, err)
 			}
 		}
 	}
@@ -1596,7 +1596,7 @@ func (s *AteomHerder) prepareOCIBundles(
 func (s *AteomHerder) dialAteom(ctx context.Context, targetAteomUid string) (ateworkerpb.WorkerClient, error) {
 	conn, err := s.ateomDialer.DialAteomPod(ctx, targetAteomUid)
 	if err != nil {
-		return nil, fmt.Errorf("while getting ateom conn for %s: %w", targetAteomUid, err)
+		return nil, fmt.Errorf("while getting worker conn for %s: %w", targetAteomUid, err)
 	}
 	return ateworkerpb.NewWorkerClient(conn), nil
 }

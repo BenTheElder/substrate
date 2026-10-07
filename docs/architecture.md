@@ -273,7 +273,7 @@ classDiagram
         }
         class Deployment
         class WorkerPod {
-            ateom
+            ateworker
             runsc
         }
     }
@@ -317,21 +317,21 @@ manage actor lifecycles.
   * **Workflow Engine**: Orchestrates the multi-step Resume/Suspend sequences
     (lock acquisition, storage download, sandbox restore).
 
-### Node Supervisor (`atelet` + `ateom`)
+### Node Supervisor (`atelet` + `ateworker`)
 
 The node-level subsystem manages the physical execution of sandboxes and the movement of snapshots.
 
   * **atelet**: A lightweight supervisor running on each node as a DaemonSet. It acts as the "Herder," managing a pool of physical pods and communicating with the Control Plane.
 
-  * **ateom**: A specialized sandbox-herder container image — one per sandbox class (`ateworker-gvisor`, `ateworker-microvm`) — that runs inside the physical worker pods. It provides a gRPC interface for `atelet` to trigger `RunWorkload`, `CheckpointWorkload`, and `RestoreWorkload` operations. This separation ensures that the physical pod lifecycle remains decoupled from the sandboxed agent process.
+  * **ateworker**: A specialized sandbox-herder container image — one per sandbox class (`ateworker-gvisor`, `ateworker-microvm`) — that runs inside the physical worker pods. It provides a gRPC interface for `atelet` to trigger `RunWorkload`, `CheckpointWorkload`, and `RestoreWorkload` operations. This separation ensures that the physical pod lifecycle remains decoupled from the sandboxed agent process.
 
-  * **Lifecycle Management**: The `ateom` process invokes the sandbox runtime to checkpoint or restore processes within the physical pod boundaries — `runsc` for gVisor, or the Kata + Cloud Hypervisor stack for micro-VMs. (Note: the gVisor backend currently requires a `runsc` version with the `--allow-connected-on-save` flag to work around a bug in networking resumption during checkpointing.)
+  * **Lifecycle Management**: The `ateworker` process invokes the sandbox runtime to checkpoint or restore processes within the physical pod boundaries — `runsc` for gVisor, or the Kata + Cloud Hypervisor stack for micro-VMs. (Note: the gVisor backend currently requires a `runsc` version with the `--allow-connected-on-save` flag to work around a bug in networking resumption during checkpointing.)
 
   * **Storage Mover**: The `atelet` streams snapshots to and from GCS/S3, ensuring process state is persistent and portable across the cluster.
 
 ### Sandbox Classes
 
-A `WorkerPool` selects a **sandbox class** (`spec.sandboxClass`), and each class has a matching `ateom` herder image. The sandbox binaries themselves are not baked into the worker image — they, and the pause image holding the sandbox's namespaces, come at runtime from a cluster-scoped [`SandboxConfig`](api-guide.md#3-sandboxconfig-the-sandbox-itself) the `ActorTemplate` names in its sandbox config (naming one is currently required; per-class cluster defaults are planned) and are pinned into each snapshot's manifest so restores stay reproducible across runtime upgrades.
+A `WorkerPool` selects a **sandbox class** (`spec.sandboxClass`), and each class has a matching `ateworker` herder image. The sandbox binaries themselves are not baked into the worker image — they, and the pause image holding the sandbox's namespaces, come at runtime from a cluster-scoped [`SandboxConfig`](api-guide.md#3-sandboxconfig-the-sandbox-itself) the `ActorTemplate` names in its sandbox config (naming one is currently required; per-class cluster defaults are planned) and are pinned into each snapshot's manifest so restores stay reproducible across runtime upgrades.
 
   * **gVisor** (`ateworker-gvisor`, the default): Runs the workload under `runsc` for kernel-level sandboxing. Suspend and resume leverage gVisor's native checkpoint/restore of the sandboxed process tree.
 
@@ -350,7 +350,7 @@ Handles actor-aware routing and automatic re-animation.
 
   * **Worker Tunnel**: After resolving the assignment, `atenet-router` opens an
     authenticated TLS tunnel to the worker's `atunnel` listener on port 443.
-    `atunnel`, hosted by `ateom`, forwards the request to the active Actor over
+    `atunnel`, hosted by `ateworker`, forwards the request to the active Actor over
     its private veth interface. Worker pod port 80 is not a direct Actor ingress
     path.
 
@@ -390,7 +390,7 @@ sequenceDiagram
     participant Gateway as atenet-router
     participant API as ate-api-server
     participant Atelet as atelet
-    participant Tunnel as ateom / atunnel
+    participant Tunnel as ateworker / atunnel
     participant A as Actor
     participant Store as snapshot storage
 
@@ -450,7 +450,7 @@ Triggered by an inbound request at the Gateway or an explicit API call.
   2. **Assignment**: The Control Plane claims a warm worker from the
      `WorkerPool`.
 
-  3. **Hydration**: The `atelet` supervisor coordinates with the `ateom` process inside the worker pod to restore the ActorTemplate's golden external snapshot (for first-run) or the Actor's own external snapshot (for recurring runs) into the sandbox.
+  3. **Hydration**: The `atelet` supervisor coordinates with the `ateworker` process inside the worker pod to restore the ActorTemplate's golden external snapshot (for first-run) or the Actor's own external snapshot (for recurring runs) into the sandbox.
 
   4. **State**: State transitions to `ACTOR_STATE_RUNNING`. The actor now has an
      active Worker IP.
@@ -463,7 +463,7 @@ Triggered by an inbound request at the Gateway or an explicit API call.
 
 Triggered by an explicit `SuspendActor` call.
 
-  1. **Checkpoint**: The `atelet` instructs `ateom` to freeze the process and capture a memory+disk snapshot.
+  1. **Checkpoint**: The `atelet` instructs `ateworker` to freeze the process and capture a memory+disk snapshot.
 
   2. **Persistence**: The `atelet` streams the snapshot from the pod to durable storage (e.g., GCS).
 

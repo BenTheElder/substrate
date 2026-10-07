@@ -376,7 +376,7 @@ else, including the `metadata.labels` the scheduler matches actors
 by, carries over as is.
 
 ```bash
-NEW_IMAGE=<the ateom ref from step 3, for this pool's sandboxClass>
+NEW_IMAGE=<the ateworker ref from step 3, for this pool's sandboxClass>
 
 kubectl -n $NS get workerpool $OLD_WORKERPOOL -o json \
   | jq --arg name "$NEW_WORKERPOOL" --arg image "$NEW_IMAGE" --arg version "$NEW_VERSION" '

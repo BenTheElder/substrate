@@ -106,7 +106,7 @@ groups:
     stability: development
     brief: A measurement of the CPU and the memory of one actor.
     note: >
-      The ateom that runs the actor writes one record per actor on a timer,
+      The ateworker that runs the actor writes one record per actor on a timer,
       plus an initial and a final record per activation. ate.stats.kind tells
       them apart.
 
