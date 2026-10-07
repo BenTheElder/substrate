@@ -257,11 +257,11 @@ spec:
       containers:
       - name: hostpath
         volumeMounts:
-        - name: ateom-dir
+        - name: ate-base
           mountPath: %s
           mountPropagation: Bidirectional
       volumes:
-      - name: ateom-dir
+      - name: ate-base
         hostPath:
           path: %s
           type: DirectoryOrCreate
@@ -345,11 +345,11 @@ spec:
       containers:
       - name: nfs
         volumeMounts:
-        - name: ateom-dir
+        - name: ate-base
           mountPath: %s
           mountPropagation: Bidirectional
       volumes:
-      - name: ateom-dir
+      - name: ate-base
         hostPath:
           path: %s
           type: DirectoryOrCreate

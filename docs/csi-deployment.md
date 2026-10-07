@@ -333,7 +333,7 @@ spec:
         - name: socket-dir
           mountPath: /csi
         # Target directory with bidirectional mount propagation
-        - name: ateom-dir
+        - name: ate-base
           mountPath: /var/lib/ate
           mountPropagation: Bidirectional
       volumes:
@@ -341,7 +341,7 @@ spec:
         hostPath:
           path: /var/lib/kubelet/plugins/csi-nfsplugin
           type: DirectoryOrCreate
-      - name: ateom-dir
+      - name: ate-base
         hostPath:
           path: /var/lib/ate
           type: DirectoryOrCreate

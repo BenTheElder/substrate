@@ -32,7 +32,7 @@ var StaticFilesDir = filepath.Join(BasePath, "static-files")
 
 // AteomSupportSocket is the node-local atelet socket used by atunnel
 // to request credentials for the worker's current actor assignment.
-var AteomSupportSocket = filepath.Join(BasePath, "ateom-support.sock")
+var AteomSupportSocket = filepath.Join(BasePath, "worker-support.sock")
 
 // AteletOTLPSocketPath is the node-scoped unix socket atelet serves the OTLP
 // relay on (see internal/otlprelay). It is node-scoped rather than per-pod
@@ -60,7 +60,7 @@ func AteletOTLPSocketPath() string {
 // AteomPath(podUID) under it when it boots, so listing this directory is how a
 // scraper with no prior knowledge discovers the node's ateoms.
 func AteomsDir() string {
-	return filepath.Join(BasePath, "ateoms")
+	return filepath.Join(BasePath, "workers")
 }
 
 func AteomPath(podUID string) string {
@@ -70,7 +70,7 @@ func AteomPath(podUID string) string {
 func AteomSocketPath(podUID string) string {
 	return filepath.Join(
 		AteomPath(podUID),
-		"ateom.sock",
+		"worker.sock",
 	)
 }
 
