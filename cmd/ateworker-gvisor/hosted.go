@@ -25,7 +25,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/apierror"
 	"github.com/agent-substrate/substrate/internal/ateomnet"
 	"github.com/agent-substrate/substrate/internal/atunnel"
-	"github.com/agent-substrate/substrate/internal/proto/ateompb"
+	"github.com/agent-substrate/substrate/internal/proto/ateworkerpb"
 	"github.com/agent-substrate/substrate/internal/resources"
 )
 
@@ -57,7 +57,7 @@ func (s *AteomService) admitActor(attribution resources.ActorAttribution) (*host
 }
 
 // hostActor sets up the actor's network, replacing any stale one.
-func (s *AteomService) hostActor(ctx context.Context, attribution resources.ActorAttribution, actorDirs *ateompb.ActorDirs) (*hostedActor, error) {
+func (s *AteomService) hostActor(ctx context.Context, attribution resources.ActorAttribution, actorDirs *ateworkerpb.ActorDirs) (*hostedActor, error) {
 	uid := attribution.UID
 	if uid == "" {
 		return nil, fmt.Errorf("actor UID is required")

@@ -38,7 +38,7 @@ import (
 
 	"github.com/agent-substrate/substrate/internal/ateattr"
 	"github.com/agent-substrate/substrate/internal/nodepath"
-	"github.com/agent-substrate/substrate/internal/proto/ateompb"
+	"github.com/agent-substrate/substrate/internal/proto/ateworkerpb"
 )
 
 // workerPoolLabel is the label the pool controller stamps on every worker pod
@@ -80,9 +80,9 @@ func clampActorStatsPollInterval(ctx context.Context, configured time.Duration) 
 }
 
 // activeStatsClient is the one RPC the poller makes, as a narrow interface so
-// tests can fake an ateom without a socket. ateompb.AteomClient satisfies it.
+// tests can fake an ateom without a socket. ateworkerpb.AteomClient satisfies it.
 type activeStatsClient interface {
-	GetActiveWorkloadStats(ctx context.Context, req *ateompb.GetActiveWorkloadStatsRequest, opts ...grpc.CallOption) (*ateompb.GetActiveWorkloadStatsResponse, error)
+	GetActiveWorkloadStats(ctx context.Context, req *ateworkerpb.GetActiveWorkloadStatsRequest, opts ...grpc.CallOption) (*ateworkerpb.GetActiveWorkloadStatsResponse, error)
 }
 
 // statsPoller discovers the node's ateoms from the filesystem and turns their
@@ -276,7 +276,7 @@ func (p *statsPoller) collect(ctx context.Context) map[templateKey]*templateAggr
 			}
 			defer closer.Close()
 
-			resp, err := client.GetActiveWorkloadStats(callCtx, &ateompb.GetActiveWorkloadStatsRequest{})
+			resp, err := client.GetActiveWorkloadStats(callCtx, &ateworkerpb.GetActiveWorkloadStatsRequest{})
 			if err != nil {
 				slog.DebugContext(ctx, "Actor stats sweep: skipping ateom", slog.String("pod_uid", podUID), slog.Any("err", err))
 				return nil
@@ -285,7 +285,7 @@ func (p *statsPoller) collect(ctx context.Context) map[templateKey]*templateAggr
 			// One entry per workload the ateom is hosting; empty when it is
 			// available.
 			for _, sample := range resp.GetSamples() {
-				if sample.GetSource() == ateompb.StatsSource_STATS_SOURCE_UNSPECIFIED {
+				if sample.GetSource() == ateworkerpb.StatsSource_STATS_SOURCE_UNSPECIFIED {
 					// Pending: hosted but not measured, so it adds nothing
 					// and its CPU baseline carries forward. A measured value
 					// from another worker this sweep (restore in flight) wins.
@@ -330,7 +330,7 @@ func (p *statsPoller) collect(ctx context.Context) map[templateKey]*templateAggr
 					switch {
 					case last <= cpu:
 						agg.cpuDeltaUsec = addSat(agg.cpuDeltaUsec, cpu-last)
-					case sample.GetSource() == ateompb.StatsSource_STATS_SOURCE_CGROUP:
+					case sample.GetSource() == ateworkerpb.StatsSource_STATS_SOURCE_CGROUP:
 						agg.cpuDeltaUsec = addSat(agg.cpuDeltaUsec, cpu)
 					}
 				}
@@ -367,11 +367,11 @@ func addSat(agg int64, v uint64) int64 {
 
 // sandboxClassLabel maps the wire enum to the ate.sandbox.class label values
 // the rest of the system uses.
-func sandboxClassLabel(c ateompb.SandboxClass) string {
+func sandboxClassLabel(c ateworkerpb.SandboxClass) string {
 	switch c {
-	case ateompb.SandboxClass_SANDBOX_CLASS_GVISOR:
+	case ateworkerpb.SandboxClass_SANDBOX_CLASS_GVISOR:
 		return "gvisor"
-	case ateompb.SandboxClass_SANDBOX_CLASS_MICROVM:
+	case ateworkerpb.SandboxClass_SANDBOX_CLASS_MICROVM:
 		return "microvm"
 	default:
 		return ateattr.SandboxClassUnknown
@@ -379,11 +379,11 @@ func sandboxClassLabel(c ateompb.SandboxClass) string {
 }
 
 // statsSourceLabel maps the wire enum to the ate.stats.source label values.
-func statsSourceLabel(s ateompb.StatsSource) string {
+func statsSourceLabel(s ateworkerpb.StatsSource) string {
 	switch s {
-	case ateompb.StatsSource_STATS_SOURCE_CGROUP:
+	case ateworkerpb.StatsSource_STATS_SOURCE_CGROUP:
 		return ateattr.StatsSourceCgroup
-	case ateompb.StatsSource_STATS_SOURCE_GUEST_AGENT:
+	case ateworkerpb.StatsSource_STATS_SOURCE_GUEST_AGENT:
 		return ateattr.StatsSourceGuestAgent
 	default:
 		return ateattr.StatsSourceUnspecified
@@ -596,7 +596,7 @@ func startStatsPoller(ctx context.Context, interval time.Duration, inst *statsIn
 			if err != nil {
 				return nil, nil, err
 			}
-			return ateompb.NewAteomClient(conn), closer, nil
+			return ateworkerpb.NewAteomClient(conn), closer, nil
 		},
 		inst:         inst,
 		eventEmitter: newStatsEventEmitter(newAsyncWriter(ctx, logSink, usageEventQueueDepth), defaultLabelsKey),

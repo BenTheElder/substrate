@@ -30,7 +30,7 @@ import (
 	"syscall"
 
 	"github.com/agent-substrate/substrate/internal/ocispec"
-	"github.com/agent-substrate/substrate/internal/proto/ateompb"
+	"github.com/agent-substrate/substrate/internal/proto/ateworkerpb"
 	"github.com/agent-substrate/substrate/internal/sizing"
 )
 
@@ -38,7 +38,7 @@ type runsc struct {
 	path     string
 	actorUID string
 	// actorDirs are the actor's directories, from the request.
-	actorDirs *ateompb.ActorDirs
+	actorDirs *ateworkerpb.ActorDirs
 	// size is the actor's declared limits.
 	size sizing.SandboxSize
 	// durableVolumes are the durable-dir volume names declared to the sandbox.
@@ -47,7 +47,7 @@ type runsc struct {
 
 // durableVolumeNames returns the sorted, deduplicated durable-dir volume names
 // mounted by workload containers.
-func durableVolumeNames(spec *ateompb.WorkloadSpec) []string {
+func durableVolumeNames(spec *ateworkerpb.WorkloadSpec) []string {
 	var names []string
 	for _, c := range spec.GetContainers() {
 		for _, m := range c.GetDurableDirVolumeMounts() {

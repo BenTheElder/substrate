@@ -28,7 +28,7 @@ import (
 	"github.com/agent-substrate/substrate/cmd/ateworker-microvm/internal/agentstats"
 	"github.com/agent-substrate/substrate/cmd/ateworker-microvm/internal/third_party/kata/agentpb"
 	"github.com/agent-substrate/substrate/internal/apierror"
-	"github.com/agent-substrate/substrate/internal/proto/ateompb"
+	"github.com/agent-substrate/substrate/internal/proto/ateworkerpb"
 	"github.com/agent-substrate/substrate/internal/resources"
 )
 
@@ -83,7 +83,7 @@ type guestStatsTarget struct {
 	workloadIDs []string
 }
 
-// GetWorkloadStats implements ateompb.Ateom/GetWorkloadStats.
+// GetWorkloadStats implements ateworkerpb.Ateom/GetWorkloadStats.
 //
 // The sample comes from inside the guest, not from the host cgroup. On this
 // runtime the host cgroup holds cloud-hypervisor, whose memory is the guest RAM
@@ -94,7 +94,7 @@ type guestStatsTarget struct {
 // It must not take the actor's lifecycle lock, which is held across a whole
 // cold boot, snapshot, or restore; blocking there would silence the poller
 // through the phases whose usage matters most.
-func (s *AteomService) GetWorkloadStats(ctx context.Context, req *ateompb.GetWorkloadStatsRequest) (*ateompb.GetWorkloadStatsResponse, error) {
+func (s *AteomService) GetWorkloadStats(ctx context.Context, req *ateworkerpb.GetWorkloadStatsRequest) (*ateworkerpb.GetWorkloadStatsResponse, error) {
 	if req.GetActorUid() == "" {
 		return nil, apierror.InvalidArgument("actor_uid is required")
 	}
@@ -130,14 +130,14 @@ func (s *AteomService) GetWorkloadStats(ctx context.Context, req *ateompb.GetWor
 		return nil, apierror.NotFound("ateom stopped executing actor %q while the sample was being taken", req.GetActorUid())
 	}
 
-	return &ateompb.GetWorkloadStatsResponse{Sample: sample}, nil
+	return &ateworkerpb.GetWorkloadStatsResponse{Sample: sample}, nil
 }
 
 // GetActiveWorkloadStats implements
-// ateompb.Ateom/GetActiveWorkloadStats: the discovery read, sampling
+// ateworkerpb.Ateom/GetActiveWorkloadStats: the discovery read, sampling
 // whatever is executing with no identity asserted. Same lock discipline as
 // GetWorkloadStats above, for the same reasons.
-func (s *AteomService) GetActiveWorkloadStats(ctx context.Context, req *ateompb.GetActiveWorkloadStatsRequest) (*ateompb.GetActiveWorkloadStatsResponse, error) {
+func (s *AteomService) GetActiveWorkloadStats(ctx context.Context, req *ateworkerpb.GetActiveWorkloadStatsRequest) (*ateworkerpb.GetActiveWorkloadStatsResponse, error) {
 	hosted := s.hostedActors()
 	sweepCtx, cancel := context.WithTimeout(ctx, statsSweepBudget)
 	defer cancel()
@@ -145,7 +145,7 @@ func (s *AteomService) GetActiveWorkloadStats(ctx context.Context, req *ateompb.
 	// A workload with no numbers yet answers as a pending entry, so it stays
 	// attributable even if it dies during boot, and one of several booting
 	// does not stop the rest being reported.
-	samples := make([]*ateompb.WorkloadStatsSample, len(hosted))
+	samples := make([]*ateworkerpb.WorkloadStatsSample, len(hosted))
 	var stale atomic.Bool
 	slots := make(chan struct{}, statsFanOut)
 	var wg sync.WaitGroup
@@ -160,17 +160,17 @@ func (s *AteomService) GetActiveWorkloadStats(ctx context.Context, req *ateompb.
 	if stale.Load() {
 		return nil, apierror.Internal("%v", errStaleGuestTarget)
 	}
-	samples = slices.DeleteFunc(samples, func(s *ateompb.WorkloadStatsSample) bool { return s == nil })
+	samples = slices.DeleteFunc(samples, func(s *ateworkerpb.WorkloadStatsSample) bool { return s == nil })
 
 	// An empty list is "available", per the proto: a normal answer for a
 	// scraper to get, not an error.
-	return &ateompb.GetActiveWorkloadStatsResponse{Samples: samples}, nil
+	return &ateworkerpb.GetActiveWorkloadStatsResponse{Samples: samples}, nil
 }
 
 // sampleHostedGuest measures one actor for the discovery read, or returns nil
 // when it is no longer hosted. A guest not reached before ctx is done, or that
 // does not answer, is pending.
-func (s *AteomService) sampleHostedGuest(ctx context.Context, h *hostedActor, slots chan struct{}, stale *atomic.Bool) *ateompb.WorkloadStatsSample {
+func (s *AteomService) sampleHostedGuest(ctx context.Context, h *hostedActor, slots chan struct{}, stale *atomic.Bool) *ateworkerpb.WorkloadStatsSample {
 	sample := pendingSample(&h.attribution)
 	select {
 	case slots <- struct{}{}:
@@ -202,15 +202,15 @@ func (s *AteomService) sampleHostedGuest(ctx context.Context, h *hostedActor, sl
 // read reports it: attribution and the runtime family, measurements absent --
 // source stays STATS_SOURCE_UNSPECIFIED, which the sample's contract defines
 // as "not measured" rather than "measured as zero".
-func pendingSample(active *resources.ActorAttribution) *ateompb.WorkloadStatsSample {
-	return &ateompb.WorkloadStatsSample{
+func pendingSample(active *resources.ActorAttribution) *ateworkerpb.WorkloadStatsSample {
+	return &ateworkerpb.WorkloadStatsSample{
 		Atespace:              active.Ref.Atespace,
 		ActorName:             active.Ref.Name,
 		ActorUid:              active.UID,
 		ActorTemplateAtespace: active.TemplateAtespace,
 		ActorTemplateName:     active.TemplateName,
 
-		SandboxClass: ateompb.SandboxClass_SANDBOX_CLASS_MICROVM,
+		SandboxClass: ateworkerpb.SandboxClass_SANDBOX_CLASS_MICROVM,
 
 		ObservedAtUnixNano: time.Now().UnixNano(),
 	}
@@ -231,7 +231,7 @@ var errStaleGuestTarget = errors.New("guest agent connection belongs to a differ
 // two RPCs express the routine ones differently: an error code for the keyed
 // read, a pending entry for the discovery read. The read holds no lock, so the
 // keyed caller re-checks the actor record it loaded after this returns.
-func (s *AteomService) sampleGuest(ctx context.Context, active *resources.ActorAttribution) (*ateompb.WorkloadStatsSample, error) {
+func (s *AteomService) sampleGuest(ctx context.Context, active *resources.ActorAttribution) (*ateworkerpb.WorkloadStatsSample, error) {
 	// The actor is the one here, but there is no guest to ask yet. Usually that
 	// is a poll landing in the boot or the restore: the ateom retains the
 	// attribution from the moment it accepts the actor, and the target is only
@@ -257,15 +257,15 @@ func (s *AteomService) sampleGuest(ctx context.Context, active *resources.ActorA
 		return nil, fmt.Errorf("no container stats from the guest agent: %w", err)
 	}
 
-	return &ateompb.WorkloadStatsSample{
+	return &ateworkerpb.WorkloadStatsSample{
 		Atespace:              active.Ref.Atespace,
 		ActorName:             active.Ref.Name,
 		ActorUid:              active.UID,
 		ActorTemplateAtespace: active.TemplateAtespace,
 		ActorTemplateName:     active.TemplateName,
 
-		SandboxClass: ateompb.SandboxClass_SANDBOX_CLASS_MICROVM,
-		Source:       ateompb.StatsSource_STATS_SOURCE_GUEST_AGENT,
+		SandboxClass: ateworkerpb.SandboxClass_SANDBOX_CLASS_MICROVM,
+		Source:       ateworkerpb.StatsSource_STATS_SOURCE_GUEST_AGENT,
 
 		MemoryCurrentBytes:    sample.MemoryCurrentBytes,
 		MemoryPeakBytes:       sample.MemoryPeakBytes,

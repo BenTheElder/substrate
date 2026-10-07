@@ -40,7 +40,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/nodepath"
 	"github.com/agent-substrate/substrate/internal/ocispec"
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
-	"github.com/agent-substrate/substrate/internal/proto/ateompb"
+	"github.com/agent-substrate/substrate/internal/proto/ateworkerpb"
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/internal/serverboot"
 	"github.com/agent-substrate/substrate/pkg/objectstorage"
@@ -322,7 +322,7 @@ func TestCheckpointSnapshotFiles(t *testing.T) {
 		{name: "manifest name", files: []string{"checkpoint.img", sandboxManifestName}, required: true, wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			files, data, err := checkpointSnapshotFiles(&ateompb.CheckpointWorkloadResponse{SnapshotFiles: tc.files, DataSnapshotFiles: tc.data}, tc.required)
+			files, data, err := checkpointSnapshotFiles(&ateworkerpb.CheckpointWorkloadResponse{SnapshotFiles: tc.files, DataSnapshotFiles: tc.data}, tc.required)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("checkpointSnapshotFiles() = %v, %v, %v; wantErr %v", files, data, err, tc.wantErr)
 			}
@@ -705,10 +705,10 @@ func TestValidateRestoreRequest(t *testing.T) {
 func TestToAteomSnapshotScope(t *testing.T) {
 	tests := []struct {
 		in   ateletpb.SnapshotScope
-		want ateompb.SnapshotScope
+		want ateworkerpb.SnapshotScope
 	}{
-		{ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FULL, ateompb.SnapshotScope_SNAPSHOT_SCOPE_FULL},
-		{ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA, ateompb.SnapshotScope_SNAPSHOT_SCOPE_DATA},
+		{ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FULL, ateworkerpb.SnapshotScope_SNAPSHOT_SCOPE_FULL},
+		{ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA, ateworkerpb.SnapshotScope_SNAPSHOT_SCOPE_DATA},
 	}
 	for _, tc := range tests {
 		if got := toAteomSnapshotScope(tc.in); got != tc.want {
@@ -923,12 +923,12 @@ func TestBuildAteomWorkloadSpecForwardsWakeupProbe(t *testing.T) {
 			},
 		},
 	}
-	want := &ateompb.WorkloadSpec{
-		Containers: []*ateompb.Container{
+	want := &ateworkerpb.WorkloadSpec{
+		Containers: []*ateworkerpb.Container{
 			{
 				Name: "with-probe",
-				WakeupProbe: &ateompb.WakeupProbe{
-					HttpGet:        &ateompb.HTTPGetAction{Path: "/health", Port: 8080},
+				WakeupProbe: &ateworkerpb.WakeupProbe{
+					HttpGet:        &ateworkerpb.HTTPGetAction{Path: "/health", Port: 8080},
 					TimeoutSeconds: 45,
 				},
 			},
@@ -973,24 +973,24 @@ func TestBuildAteomWorkloadSpecForwardsDurableDirMounts(t *testing.T) {
 	}
 	// ateom needs the volume NAME as well as the path: the name selects the
 	// per-volume directory on the host, and an actor may have several.
-	want := &ateompb.WorkloadSpec{
-		Containers: []*ateompb.Container{
+	want := &ateworkerpb.WorkloadSpec{
+		Containers: []*ateworkerpb.Container{
 			{
 				Name: "main",
-				DurableDirVolumeMounts: []*ateompb.DurableDirVolumeMount{
+				DurableDirVolumeMounts: []*ateworkerpb.DurableDirVolumeMount{
 					{VolumeName: "data", MountPath: "/home/counter"},
 					{VolumeName: "cache", MountPath: "/var/cache"},
 				},
-				CsiVolumeMounts: []*ateompb.VolumeMount{
+				CsiVolumeMounts: []*ateworkerpb.VolumeMount{
 					{VolumeName: "scratch", MountPath: "/scratch"},
 				},
-				SystemInfoVolumeMounts: []*ateompb.SystemInfoVolumeMount{
+				SystemInfoVolumeMounts: []*ateworkerpb.SystemInfoVolumeMount{
 					{VolumeName: "system-info", MountPath: "/run/ate"},
 				},
 			},
 			{
 				Name: "sidecar",
-				DurableDirVolumeMounts: []*ateompb.DurableDirVolumeMount{
+				DurableDirVolumeMounts: []*ateworkerpb.DurableDirVolumeMount{
 					{VolumeName: "data", MountPath: "/shared"},
 				},
 			},
@@ -1083,7 +1083,7 @@ func TestToAteomEgressGateway(t *testing.T) {
 	if got := toAteomEgressGateway(nil); got != nil {
 		t.Fatalf("toAteomEgressGateway(nil) = %v, want nil", got)
 	}
-	want := &ateompb.EgressGateway{Address: "egress.example:443"}
+	want := &ateworkerpb.EgressGateway{Address: "egress.example:443"}
 	got := toAteomEgressGateway(&ateletpb.EgressGateway{Address: want.Address})
 	if diff := cmp.Diff(want, got, protocmp.Transform()); diff != "" {
 		t.Errorf("toAteomEgressGateway mismatch (-want +got):\n%s", diff)

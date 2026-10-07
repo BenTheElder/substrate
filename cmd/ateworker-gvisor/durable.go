@@ -25,7 +25,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/agent-substrate/substrate/internal/proto/ateompb"
+	"github.com/agent-substrate/substrate/internal/proto/ateworkerpb"
 	"github.com/agent-substrate/substrate/internal/tarutil"
 )
 
@@ -43,7 +43,7 @@ func durableTarFile(volumeName string) (string, error) {
 }
 
 // hasDurableVolumes reports whether any container mounts a durable-dir volume.
-func hasDurableVolumes(containers []*ateompb.Container) bool {
+func hasDurableVolumes(containers []*ateworkerpb.Container) bool {
 	for _, c := range containers {
 		if len(c.GetDurableDirVolumeMounts()) > 0 {
 			return true

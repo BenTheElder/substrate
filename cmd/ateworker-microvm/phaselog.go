@@ -23,7 +23,7 @@ import (
 
 	"github.com/agent-substrate/substrate/internal/apierror"
 	"github.com/agent-substrate/substrate/internal/ateattr"
-	"github.com/agent-substrate/substrate/internal/proto/ateompb"
+	"github.com/agent-substrate/substrate/internal/proto/ateworkerpb"
 	"github.com/agent-substrate/substrate/internal/resources"
 	"google.golang.org/grpc/status"
 )
@@ -80,11 +80,11 @@ type phase struct {
 // the same way ateattr.SnapshotScopeValue does for the atelet enum. An
 // unrecognized scope reports as unknown rather than stringified, so no wire
 // value can widen the value set readers key on.
-func scopeLogValue(scope ateompb.SnapshotScope) string {
+func scopeLogValue(scope ateworkerpb.SnapshotScope) string {
 	switch scope {
-	case ateompb.SnapshotScope_SNAPSHOT_SCOPE_FULL:
+	case ateworkerpb.SnapshotScope_SNAPSHOT_SCOPE_FULL:
 		return ateattr.SnapshotScopeFull
-	case ateompb.SnapshotScope_SNAPSHOT_SCOPE_DATA:
+	case ateworkerpb.SnapshotScope_SNAPSHOT_SCOPE_DATA:
 		return ateattr.SnapshotScopeData
 	default:
 		return ateattr.SnapshotScopeUnknown
@@ -101,7 +101,7 @@ func scopeLogValue(scope ateompb.SnapshotScope) string {
 // it completed, marked with error.type (the gRPC code, context errors as
 // DeadlineExceeded / Canceled) so a reader can leave it out of a latency
 // distribution. Absence means success.
-func snapshotPhaseAttrs(a resources.ActorAttribution, scope ateompb.SnapshotScope, durationKey string, err error, phases []phase) []slog.Attr {
+func snapshotPhaseAttrs(a resources.ActorAttribution, scope ateworkerpb.SnapshotScope, durationKey string, err error, phases []phase) []slog.Attr {
 	attrs := ateattr.ActorLogAttrs(a)
 	attrs = append(attrs, slog.String(string(ateattr.SnapshotScopeKey), scopeLogValue(scope)))
 	if err != nil {
@@ -125,6 +125,6 @@ func snapshotPhaseAttrs(a resources.ActorAttribution, scope ateompb.SnapshotScop
 }
 
 // logSnapshotPhases emits the snapshotPhaseAttrs record under msg.
-func logSnapshotPhases(ctx context.Context, msg string, a resources.ActorAttribution, scope ateompb.SnapshotScope, durationKey string, err error, phases []phase) {
+func logSnapshotPhases(ctx context.Context, msg string, a resources.ActorAttribution, scope ateworkerpb.SnapshotScope, durationKey string, err error, phases []phase) {
 	slog.LogAttrs(ctx, slog.LevelInfo, msg, snapshotPhaseAttrs(a, scope, durationKey, err, phases)...)
 }

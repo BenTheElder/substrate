@@ -35,7 +35,7 @@ import (
 	"github.com/agent-substrate/substrate/cmd/ateworker-microvm/internal/ch"
 	"github.com/agent-substrate/substrate/cmd/ateworker-microvm/internal/kata"
 	"github.com/agent-substrate/substrate/internal/imagecache"
-	"github.com/agent-substrate/substrate/internal/proto/ateompb"
+	"github.com/agent-substrate/substrate/internal/proto/ateworkerpb"
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/internal/sizing"
 	"github.com/agent-substrate/substrate/internal/wakeupprobe"
@@ -99,7 +99,7 @@ func newReseedNonce() ([]byte, error) {
 //
 // Contract with atelet: the snapshot's files are in ActorDirs.restore_dir,
 // and the durable-dir volume directories re-created (empty).
-func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.RestoreWorkloadRequest) (resp *ateompb.RestoreWorkloadResponse, retErr error) {
+func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateworkerpb.RestoreWorkloadRequest) (resp *ateworkerpb.RestoreWorkloadResponse, retErr error) {
 	if err := validateActorDirs(req.GetActorDirs()); err != nil {
 		return nil, err
 	}
@@ -172,11 +172,11 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	}
 
 	switch scope := req.GetScope(); scope {
-	case ateompb.SnapshotScope_SNAPSHOT_SCOPE_FULL:
+	case ateworkerpb.SnapshotScope_SNAPSHOT_SCOPE_FULL:
 		if err := s.restoreFullScope(ctx, p, scope, restoreDir, req.GetPreserveRestoreDir(), tStart); err != nil {
 			return nil, err
 		}
-	case ateompb.SnapshotScope_SNAPSHOT_SCOPE_DATA:
+	case ateworkerpb.SnapshotScope_SNAPSHOT_SCOPE_DATA:
 		// A Data snapshot holds no guest state, so this is a cold boot that
 		// happens to start with the volumes already populated. wakeup probe gating comes
 		// with the cold-boot path, so the actor is serving when we return.
@@ -195,7 +195,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	}
 
 	s.actorLogger.EmitLifecycleLog(ctx, "Actor restored", attribution)
-	return &ateompb.RestoreWorkloadResponse{}, nil
+	return &ateworkerpb.RestoreWorkloadResponse{}, nil
 }
 
 // restoreFullScope restores a whole-guest snapshot: relaunch cloud-hypervisor
@@ -210,7 +210,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 // and resume. Guest RAM — the actor's in-memory state and the frozen network config —
 // comes back from the memory snapshot; the durable-dir volumes were restored by the
 // caller from their tar.
-func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, scope ateompb.SnapshotScope, restoreDir string, preserveRestoreDir bool, tStart time.Time) (retErr error) {
+func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, scope ateworkerpb.SnapshotScope, restoreDir string, preserveRestoreDir bool, tStart time.Time) (retErr error) {
 	actorUID := p.actorUID
 
 	rr := s.resolveRuntime(p.assetPaths)

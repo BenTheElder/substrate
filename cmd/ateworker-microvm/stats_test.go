@@ -34,7 +34,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/actorlock"
 	"github.com/agent-substrate/substrate/internal/apierror"
 	"github.com/agent-substrate/substrate/internal/ateomstats"
-	"github.com/agent-substrate/substrate/internal/proto/ateompb"
+	"github.com/agent-substrate/substrate/internal/proto/ateworkerpb"
 	"github.com/agent-substrate/substrate/internal/resources"
 )
 
@@ -85,7 +85,7 @@ func TestActorBootParamsAttribution(t *testing.T) {
 // what the caller sent. The two hops are written in different files, so this is
 // the assertion that catches them drifting apart.
 func TestActorBootParamsAttributionMatchesRequest(t *testing.T) {
-	req := &ateompb.RunWorkloadRequest{
+	req := &ateworkerpb.RunWorkloadRequest{
 		Atespace:              "atespace-a",
 		ActorName:             "actor-b",
 		ActorUid:              "uid-c",
@@ -200,7 +200,7 @@ func TestGetWorkloadStats(t *testing.T) {
 	s := newStatsService(agent, "app_ovl")
 
 	before := time.Now().UnixNano()
-	got, err := s.GetWorkloadStats(context.Background(), &ateompb.GetWorkloadStatsRequest{ActorUid: "uid-a"})
+	got, err := s.GetWorkloadStats(context.Background(), &ateworkerpb.GetWorkloadStatsRequest{ActorUid: "uid-a"})
 	after := time.Now().UnixNano()
 	if err != nil {
 		t.Fatalf("GetWorkloadStats() error = %v, want nil", err)
@@ -212,14 +212,14 @@ func TestGetWorkloadStats(t *testing.T) {
 	// Checked above; zeroed so the rest can be compared as a whole.
 	got.GetSample().ObservedAtUnixNano = 0
 
-	want := &ateompb.GetWorkloadStatsResponse{Sample: &ateompb.WorkloadStatsSample{
+	want := &ateworkerpb.GetWorkloadStatsResponse{Sample: &ateworkerpb.WorkloadStatsSample{
 		Atespace:              "space-a",
 		ActorName:             "actor-a",
 		ActorUid:              "uid-a",
 		ActorTemplateAtespace: "ns-a",
 		ActorTemplateName:     "template-a",
-		SandboxClass:          ateompb.SandboxClass_SANDBOX_CLASS_MICROVM,
-		Source:                ateompb.StatsSource_STATS_SOURCE_GUEST_AGENT,
+		SandboxClass:          ateworkerpb.SandboxClass_SANDBOX_CLASS_MICROVM,
+		Source:                ateworkerpb.StatsSource_STATS_SOURCE_GUEST_AGENT,
 		MemoryCurrentBytes:    157286400,
 		MemoryPeakBytes:       209715200,
 		MemoryWorkingSetBytes: 136314880,
@@ -247,7 +247,7 @@ func TestGetWorkloadStatsSumsContainers(t *testing.T) {
 	}}
 	s := newStatsService(agent, "app_ovl", "sidecar_ovl")
 
-	got, err := s.GetWorkloadStats(context.Background(), &ateompb.GetWorkloadStatsRequest{ActorUid: "uid-a"})
+	got, err := s.GetWorkloadStats(context.Background(), &ateworkerpb.GetWorkloadStatsRequest{ActorUid: "uid-a"})
 	if err != nil {
 		t.Fatalf("GetWorkloadStats() error = %v, want nil", err)
 	}
@@ -284,7 +284,7 @@ func TestGetWorkloadStatsSkipsUnreadableContainer(t *testing.T) {
 	}
 	s := newStatsService(agent, "app_ovl", "exited_ovl")
 
-	got, err := s.GetWorkloadStats(context.Background(), &ateompb.GetWorkloadStatsRequest{ActorUid: "uid-a"})
+	got, err := s.GetWorkloadStats(context.Background(), &ateworkerpb.GetWorkloadStatsRequest{ActorUid: "uid-a"})
 	if err != nil {
 		t.Fatalf("GetWorkloadStats() error = %v, want nil", err)
 	}
@@ -303,7 +303,7 @@ func TestGetWorkloadStatsCountsAnsweredContainer(t *testing.T) {
 	agent := &fakeAgent{stats: map[string]*agentpb.CgroupStats{"app_ovl": nil}}
 	s := newStatsService(agent, "app_ovl")
 
-	got, err := s.GetWorkloadStats(context.Background(), &ateompb.GetWorkloadStatsRequest{ActorUid: "uid-a"})
+	got, err := s.GetWorkloadStats(context.Background(), &ateworkerpb.GetWorkloadStatsRequest{ActorUid: "uid-a"})
 	if err != nil {
 		t.Fatalf("GetWorkloadStats() error = %v, want nil", err)
 	}
@@ -401,7 +401,7 @@ func TestGetWorkloadStatsErrors(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			resp, err := tc.service().GetWorkloadStats(context.Background(), &ateompb.GetWorkloadStatsRequest{ActorUid: tc.actorUID})
+			resp, err := tc.service().GetWorkloadStats(context.Background(), &ateworkerpb.GetWorkloadStatsRequest{ActorUid: tc.actorUID})
 			if resp != nil {
 				t.Errorf("GetWorkloadStats() returned response %v, want nil", resp)
 			}
@@ -425,7 +425,7 @@ func TestGetWorkloadStatsDoesNotTakeLock(t *testing.T) {
 	}
 	defer s.locks.Unlock(testActor.UID)
 
-	if _, err := s.GetWorkloadStats(context.Background(), &ateompb.GetWorkloadStatsRequest{ActorUid: "uid-a"}); err != nil {
+	if _, err := s.GetWorkloadStats(context.Background(), &ateworkerpb.GetWorkloadStatsRequest{ActorUid: "uid-a"}); err != nil {
 		t.Errorf("GetWorkloadStats() error = %v, want nil", err)
 	}
 }
@@ -451,7 +451,7 @@ func TestGetActiveWorkloadStats(t *testing.T) {
 	}}
 	s := newStatsService(agent, "app_ovl")
 
-	got, err := s.GetActiveWorkloadStats(context.Background(), &ateompb.GetActiveWorkloadStatsRequest{})
+	got, err := s.GetActiveWorkloadStats(context.Background(), &ateworkerpb.GetActiveWorkloadStatsRequest{})
 	if err != nil {
 		t.Fatalf("GetActiveWorkloadStats() error = %v, want nil", err)
 	}
@@ -462,7 +462,7 @@ func TestGetActiveWorkloadStats(t *testing.T) {
 	// The keyed read against the same fake is the reference: the discovery read
 	// must produce the identical sample, since both are the same measurement
 	// with a different addressing mode.
-	want, err := s.GetWorkloadStats(context.Background(), &ateompb.GetWorkloadStatsRequest{ActorUid: "uid-a"})
+	want, err := s.GetWorkloadStats(context.Background(), &ateworkerpb.GetWorkloadStatsRequest{ActorUid: "uid-a"})
 	if err != nil {
 		t.Fatalf("GetWorkloadStats() error = %v, want nil", err)
 	}
@@ -479,7 +479,7 @@ func TestGetActiveWorkloadStats(t *testing.T) {
 func TestGetActiveWorkloadStatsAvailable(t *testing.T) {
 	s := &AteomService{}
 
-	got, err := s.GetActiveWorkloadStats(context.Background(), &ateompb.GetActiveWorkloadStatsRequest{})
+	got, err := s.GetActiveWorkloadStats(context.Background(), &ateworkerpb.GetActiveWorkloadStatsRequest{})
 	if err != nil {
 		t.Fatalf("GetActiveWorkloadStats() on an available ateom: error = %v, want nil", err)
 	}
@@ -491,14 +491,14 @@ func TestGetActiveWorkloadStatsAvailable(t *testing.T) {
 // pendingFor is the entry the discovery read answers for a workload with no
 // numbers yet: attribution and the runtime family, source UNSPECIFIED,
 // measurements absent. observed_at is zeroed by the caller before comparing.
-func pendingFor(attr resources.ActorAttribution) *ateompb.WorkloadStatsSample {
-	return &ateompb.WorkloadStatsSample{
+func pendingFor(attr resources.ActorAttribution) *ateworkerpb.WorkloadStatsSample {
+	return &ateworkerpb.WorkloadStatsSample{
 		Atespace:              attr.Ref.Atespace,
 		ActorName:             attr.Ref.Name,
 		ActorUid:              attr.UID,
 		ActorTemplateAtespace: attr.TemplateAtespace,
 		ActorTemplateName:     attr.TemplateName,
-		SandboxClass:          ateompb.SandboxClass_SANDBOX_CLASS_MICROVM,
+		SandboxClass:          ateworkerpb.SandboxClass_SANDBOX_CLASS_MICROVM,
 	}
 }
 
@@ -511,7 +511,7 @@ func TestGetActiveWorkloadStatsBooting(t *testing.T) {
 	s := &AteomService{}
 	hostTestActor(s, testActor, nil) // attribution retained, target not published
 
-	got, err := s.GetActiveWorkloadStats(context.Background(), &ateompb.GetActiveWorkloadStatsRequest{})
+	got, err := s.GetActiveWorkloadStats(context.Background(), &ateworkerpb.GetActiveWorkloadStatsRequest{})
 	if err != nil {
 		t.Fatalf("GetActiveWorkloadStats() mid-boot: error = %v, want nil", err)
 	}
@@ -540,14 +540,14 @@ func TestGetActiveWorkloadStatsSeveralActors(t *testing.T) {
 	s := newStatsService(agent, "app_ovl")
 	hostTestActor(s, second, &guestStatsTarget{actorUID: second.UID, agent: agent, workloadIDs: []string{"b_ovl"}})
 
-	got, err := s.GetActiveWorkloadStats(context.Background(), &ateompb.GetActiveWorkloadStatsRequest{})
+	got, err := s.GetActiveWorkloadStats(context.Background(), &ateworkerpb.GetActiveWorkloadStatsRequest{})
 	if err != nil {
 		t.Fatalf("GetActiveWorkloadStats() error = %v, want nil", err)
 	}
 	if len(got.GetSamples()) != 2 {
 		t.Fatalf("GetActiveWorkloadStats() returned %d samples, want 2: %v", len(got.GetSamples()), got)
 	}
-	byUID := map[string]*ateompb.WorkloadStatsSample{}
+	byUID := map[string]*ateworkerpb.WorkloadStatsSample{}
 	for _, sample := range got.GetSamples() {
 		byUID[sample.GetActorUid()] = sample
 	}
@@ -573,7 +573,7 @@ func TestGetActiveWorkloadStatsOneBooting(t *testing.T) {
 	s := newStatsService(agent, "app_ovl")
 	hostTestActor(s, booting, nil) // accepted, no guest to ask yet
 
-	got, err := s.GetActiveWorkloadStats(context.Background(), &ateompb.GetActiveWorkloadStatsRequest{})
+	got, err := s.GetActiveWorkloadStats(context.Background(), &ateworkerpb.GetActiveWorkloadStatsRequest{})
 	if err != nil {
 		t.Fatalf("GetActiveWorkloadStats() error = %v, want nil", err)
 	}
@@ -581,7 +581,7 @@ func TestGetActiveWorkloadStatsOneBooting(t *testing.T) {
 		t.Fatalf("GetActiveWorkloadStats() returned %d samples, want 2: %v", len(got.GetSamples()), got)
 	}
 	for _, sample := range got.GetSamples() {
-		measured := sample.GetSource() != ateompb.StatsSource_STATS_SOURCE_UNSPECIFIED
+		measured := sample.GetSource() != ateworkerpb.StatsSource_STATS_SOURCE_UNSPECIFIED
 		if want := sample.GetActorUid() == testActor.UID; measured != want {
 			t.Errorf("actor %q measured = %v, want %v", sample.GetActorUid(), measured, want)
 		}
@@ -598,7 +598,7 @@ func TestGetWorkloadStatsTransition(t *testing.T) {
 	s := newStatsService(agent, "app_ovl")
 	agent.onCall = func() { unhostTestActor(s, testActor.UID) }
 
-	_, err := s.GetWorkloadStats(context.Background(), &ateompb.GetWorkloadStatsRequest{ActorUid: "uid-a"})
+	_, err := s.GetWorkloadStats(context.Background(), &ateworkerpb.GetWorkloadStatsRequest{ActorUid: "uid-a"})
 	if got := apierror.Code(err); got != codes.NotFound {
 		t.Errorf("GetWorkloadStats() during transition: code = %v, want %v (err: %v)", got, codes.NotFound, err)
 	}
@@ -614,7 +614,7 @@ func TestGetActiveWorkloadStatsStaleTarget(t *testing.T) {
 	s := newStatsService(agent, "app_ovl")
 	hostTestActor(s, testActor, &guestStatsTarget{actorUID: "uid-b", agent: agent, workloadIDs: []string{"app_ovl"}})
 
-	_, err := s.GetActiveWorkloadStats(context.Background(), &ateompb.GetActiveWorkloadStatsRequest{})
+	_, err := s.GetActiveWorkloadStats(context.Background(), &ateworkerpb.GetActiveWorkloadStatsRequest{})
 	if got := apierror.Code(err); got != codes.Internal {
 		t.Errorf("GetActiveWorkloadStats() with stale target: code = %v, want %v (err: %v)", got, codes.Internal, err)
 	}
@@ -652,7 +652,7 @@ func TestGetActiveWorkloadStatsSamplesGuestsConcurrently(t *testing.T) {
 		hostTestActor(s, attr, &guestStatsTarget{actorUID: attr.UID, agent: agent, workloadIDs: []string{"app_ovl"}})
 	}
 
-	got, err := s.GetActiveWorkloadStats(context.Background(), &ateompb.GetActiveWorkloadStatsRequest{})
+	got, err := s.GetActiveWorkloadStats(context.Background(), &ateworkerpb.GetActiveWorkloadStatsRequest{})
 	if err != nil {
 		t.Fatalf("GetActiveWorkloadStats() error = %v, want nil", err)
 	}
@@ -677,12 +677,12 @@ func TestGetActiveWorkloadStatsTransition(t *testing.T) {
 		name string
 		// during changes the hosted set inside the guest read.
 		during func(s *AteomService)
-		want   []*ateompb.WorkloadStatsSample
+		want   []*ateworkerpb.WorkloadStatsSample
 	}{
 		{
 			name:   "re-hosted on another template",
 			during: func(s *AteomService) { hostTestActor(s, otherTemplate, nil) },
-			want:   []*ateompb.WorkloadStatsSample{pendingFor(otherTemplate)},
+			want:   []*ateworkerpb.WorkloadStatsSample{pendingFor(otherTemplate)},
 		},
 		{
 			name: "to another actor",
@@ -703,11 +703,11 @@ func TestGetActiveWorkloadStatsTransition(t *testing.T) {
 			var once sync.Once
 			agent.onCall = func() { once.Do(func() { tc.during(s) }) }
 
-			got, err := s.GetActiveWorkloadStats(context.Background(), &ateompb.GetActiveWorkloadStatsRequest{})
+			got, err := s.GetActiveWorkloadStats(context.Background(), &ateworkerpb.GetActiveWorkloadStatsRequest{})
 			if err != nil {
 				t.Fatalf("GetActiveWorkloadStats() during transition: error = %v, want nil", err)
 			}
-			var samples []*ateompb.WorkloadStatsSample
+			var samples []*ateworkerpb.WorkloadStatsSample
 			for _, sample := range got.GetSamples() {
 				// otherActor was not snapshotted by this read.
 				if sample.GetActorUid() == otherActor.UID {

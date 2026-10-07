@@ -26,10 +26,10 @@ import (
 	"github.com/agent-substrate/substrate/internal/actorlock"
 	"github.com/agent-substrate/substrate/internal/apierror"
 	"github.com/agent-substrate/substrate/internal/ocispec"
-	"github.com/agent-substrate/substrate/internal/proto/ateompb"
+	"github.com/agent-substrate/substrate/internal/proto/ateworkerpb"
 )
 
-var testActorDirs = &ateompb.ActorDirs{
+var testActorDirs = &ateworkerpb.ActorDirs{
 	RootDir:      "/node/actors/test-actor-123",
 	OciBundleDir: "/node/actors/test-actor-123/bundle",
 }
@@ -155,17 +155,17 @@ func TestRestoreWorkloadRejectsEmptyRestoreDir(t *testing.T) {
 
 	for _, tc := range []struct {
 		name string
-		req  *ateompb.RestoreWorkloadRequest
+		req  *ateworkerpb.RestoreWorkloadRequest
 	}{
 		{
 			name: "nil actor_dirs",
-			req:  &ateompb.RestoreWorkloadRequest{ActorUid: "actor-a"},
+			req:  &ateworkerpb.RestoreWorkloadRequest{ActorUid: "actor-a"},
 		},
 		{
 			name: "empty restore_dir",
-			req: &ateompb.RestoreWorkloadRequest{
+			req: &ateworkerpb.RestoreWorkloadRequest{
 				ActorUid: "actor-a",
-				ActorDirs: &ateompb.ActorDirs{
+				ActorDirs: &ateworkerpb.ActorDirs{
 					RootDir:                   "/node/actors/actor-a",
 					OciBundleDir:              "/node/actors/actor-a/bundle",
 					CheckpointDir:             "/node/actors/actor-a/checkpoint-state",

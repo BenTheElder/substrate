@@ -25,7 +25,7 @@ import (
 	"strings"
 
 	"github.com/agent-substrate/substrate/internal/apierror"
-	"github.com/agent-substrate/substrate/internal/proto/ateompb"
+	"github.com/agent-substrate/substrate/internal/proto/ateworkerpb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -101,7 +101,7 @@ func ValidateAteomUID(targetAteomUID string) error {
 
 // ValidateActorDirs checks that every directory atelet passes to ateom is
 // set, absolute and clean.
-func ValidateActorDirs(actorDirs *ateompb.ActorDirs, fldPath *field.Path) field.ErrorList {
+func ValidateActorDirs(actorDirs *ateworkerpb.ActorDirs, fldPath *field.Path) field.ErrorList {
 	if actorDirs == nil {
 		return field.ErrorList{field.Required(fldPath, "")}
 	}

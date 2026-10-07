@@ -15,7 +15,7 @@
 // limitations under the License.
 
 // Command ateworker-microvm is the kata + cloud-hypervisor micro-VM
-// implementation of the ateompb.Ateom service, a peer to cmd/ateworker-gvisor.
+// implementation of the ateworkerpb.Ateom service, a peer to cmd/ateworker-gvisor.
 //
 // It runs a substrate actor as a cloud-hypervisor micro-VM (launched via the
 // kata guest model) and supports full suspend/resume by driving CH's native
@@ -46,7 +46,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/ateomtunnel"
 	"github.com/agent-substrate/substrate/internal/nodepath"
 	"github.com/agent-substrate/substrate/internal/otlprelay"
-	"github.com/agent-substrate/substrate/internal/proto/ateompb"
+	"github.com/agent-substrate/substrate/internal/proto/ateworkerpb"
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/internal/serverboot"
 	"github.com/agent-substrate/substrate/internal/version"
@@ -227,7 +227,7 @@ func do(ctx context.Context) error {
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.UnaryInterceptor(ateinterceptors.InternalServerUnaryInterceptor),
 	)
-	ateompb.RegisterAteomServer(svr, ateomService)
+	ateworkerpb.RegisterAteomServer(svr, ateomService)
 	reflection.Register(svr)
 	readiness := &serverboot.Readiness{}
 
@@ -312,9 +312,9 @@ const (
 	rpcCheckpointWorkload = "CheckpointWorkload"
 )
 
-// AteomService is the cloud-hypervisor implementation of ateompb.AteomServer.
+// AteomService is the cloud-hypervisor implementation of ateworkerpb.AteomServer.
 type AteomService struct {
-	ateompb.UnimplementedAteomServer
+	ateworkerpb.UnimplementedAteomServer
 
 	// Serializes lifecycle RPCs per actor.
 	locks *actorlock.Locks
@@ -356,7 +356,7 @@ type AteomService struct {
 	actorCgroups bool
 }
 
-var _ ateompb.AteomServer = (*AteomService)(nil)
+var _ ateworkerpb.AteomServer = (*AteomService)(nil)
 
 // NewService creates a new AteomService.
 func NewService(podUID, chBinary string, guestDebug bool, memReserveMiB, maxActors int, tunnel *ateomtunnel.Tunnel, actorLogger *actorlog.ActorLogger) *AteomService {
@@ -385,7 +385,7 @@ func (s *AteomService) beginRPC(actorUID, name string, cancel context.CancelFunc
 }
 
 // validateActorDirs rejects a request whose actor directories are unusable.
-func validateActorDirs(actorDirs *ateompb.ActorDirs) error {
+func validateActorDirs(actorDirs *ateworkerpb.ActorDirs) error {
 	if errs := resources.ValidateActorDirs(actorDirs, field.NewPath("actor_dirs")); len(errs) > 0 {
 		return apierror.InvalidArgument("%v", errs.ToAggregate())
 	}

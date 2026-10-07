@@ -47,7 +47,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/nodepath"
 	"github.com/agent-substrate/substrate/internal/ocispec"
 	"github.com/agent-substrate/substrate/internal/otlprelay"
-	"github.com/agent-substrate/substrate/internal/proto/ateompb"
+	"github.com/agent-substrate/substrate/internal/proto/ateworkerpb"
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/internal/serverboot"
 	"github.com/agent-substrate/substrate/internal/sizing"
@@ -216,7 +216,7 @@ func do(ctx context.Context) error {
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.UnaryInterceptor(ateinterceptors.InternalServerUnaryInterceptor),
 	)
-	ateompb.RegisterAteomServer(svr, ateomService)
+	ateworkerpb.RegisterAteomServer(svr, ateomService)
 	reflection.Register(svr)
 	readiness := &serverboot.Readiness{}
 
@@ -279,7 +279,7 @@ type workloadSession struct {
 
 // AteomService is a service for shepherding single microvm.
 type AteomService struct {
-	ateompb.UnimplementedAteomServer
+	ateworkerpb.UnimplementedAteomServer
 
 	// Serializes lifecycle RPCs per actor.
 	locks *actorlock.Locks
@@ -313,7 +313,7 @@ type AteomService struct {
 	readSandboxCgroup func(dir string) (cgroupstats.Sample, error)
 }
 
-var _ ateompb.AteomServer = (*AteomService)(nil)
+var _ ateworkerpb.AteomServer = (*AteomService)(nil)
 
 // NewService creates a new AteomService.
 func NewService(tunnel *ateomtunnel.Tunnel, actorLogger *actorlog.ActorLogger, maxActors int) *AteomService {
@@ -491,7 +491,7 @@ func waitContainerStop(ctx context.Context, done <-chan error) error {
 	}
 }
 
-func containerNames(containers []*ateompb.Container) []string {
+func containerNames(containers []*ateworkerpb.Container) []string {
 	names := make([]string, 0, len(containers))
 	for _, c := range containers {
 		names = append(names, c.GetName())
@@ -508,14 +508,14 @@ func validateRunscPath(p string) error {
 	return nil
 }
 
-func validateActorDirs(actorDirs *ateompb.ActorDirs) error {
+func validateActorDirs(actorDirs *ateworkerpb.ActorDirs) error {
 	if errs := resources.ValidateActorDirs(actorDirs, field.NewPath("actor_dirs")); len(errs) > 0 {
 		return apierror.InvalidArgument("%v", errs.ToAggregate())
 	}
 	return nil
 }
 
-func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkloadRequest) (resp *ateompb.RunWorkloadResponse, retErr error) {
+func (s *AteomService) RunWorkload(ctx context.Context, req *ateworkerpb.RunWorkloadRequest) (resp *ateworkerpb.RunWorkloadResponse, retErr error) {
 	if err := validateActorDirs(req.GetActorDirs()); err != nil {
 		return nil, err
 	}
@@ -633,12 +633,12 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	s.actorLogger.EmitLifecycleLog(ctx, "Actor started", attribution)
 	s.setSession(req.GetActorUid(), &workloadSession{rcmd: rcmd, containers: containerNames(req.GetSpec().GetContainers())})
 
-	return &ateompb.RunWorkloadResponse{}, nil
+	return &ateworkerpb.RunWorkloadResponse{}, nil
 }
 
 // Allow checkpointing even if the pod is shutting down. This will allow actors
 // (or the harness) to suspend on shutdown.
-func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.CheckpointWorkloadRequest) (*ateompb.CheckpointWorkloadResponse, error) {
+func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateworkerpb.CheckpointWorkloadRequest) (*ateworkerpb.CheckpointWorkloadResponse, error) {
 	if err := validateActorDirs(req.GetActorDirs()); err != nil {
 		return nil, err
 	}
@@ -684,7 +684,7 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 	// Always take durable-dir snapshot if at least one container has a durable-dir volume mount.
 	// TODO(dberkov): this is a temporary workaround until gVisor supports taking durable-dir snapshots in a single request with the process snapshot.
 	switch req.GetScope() {
-	case ateompb.SnapshotScope_SNAPSHOT_SCOPE_DATA:
+	case ateworkerpb.SnapshotScope_SNAPSHOT_SCOPE_DATA:
 		if !hasDurableVolumes(req.GetSpec().GetContainers()) {
 			return nil, fmt.Errorf("no durable-dir volumes found for DATA snapshot")
 		}
@@ -704,7 +704,7 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 		if tarErr != nil {
 			return nil, fmt.Errorf("while archiving durable-dir volumes: %w", tarErr)
 		}
-	case ateompb.SnapshotScope_SNAPSHOT_SCOPE_FULL:
+	case ateworkerpb.SnapshotScope_SNAPSHOT_SCOPE_FULL:
 		// Checkpoint pause container (root of the sandbox)
 		// TODO: Consider pause -> tar -> resume -> checkpoint order for better failure handling.
 		if err := rcmd.cmdCheckpoint(ctx, ocispec.PauseContainer, checkpointPath); err != nil {
@@ -740,7 +740,7 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 
 	s.actorLogger.EmitLifecycleLog(ctx, "Actor checkpointed", attribution)
 
-	return &ateompb.CheckpointWorkloadResponse{SnapshotFiles: snapshotFiles, DataSnapshotFiles: durableFiles}, nil
+	return &ateworkerpb.CheckpointWorkloadResponse{SnapshotFiles: snapshotFiles, DataSnapshotFiles: durableFiles}, nil
 }
 
 // listSnapshotFiles returns the (relative) names of regular files directly under
@@ -764,14 +764,14 @@ func listSnapshotFiles(dir string) ([]string, error) {
 // is left running: it is the sandbox, and cleanupContainers deletes the others
 // through it before deleting it last. Killing it first leaves the sentry a
 // zombie until reaped, which runsc delete mistakes for a live sandbox.
-func stopContainers(ctx context.Context, rcmd containerRuntime, containers []*ateompb.Container) {
+func stopContainers(ctx context.Context, rcmd containerRuntime, containers []*ateworkerpb.Container) {
 	for _, ctr := range containers {
 		_ = rcmd.cmdKill(ctx, ctr.GetName(), "SIGKILL")
 		_ = rcmd.cmdWait(ctx, ctr.GetName())
 	}
 }
 
-func cleanupContainers(ctx context.Context, rcmd containerRuntime, containers []*ateompb.Container) error {
+func cleanupContainers(ctx context.Context, rcmd containerRuntime, containers []*ateworkerpb.Container) error {
 	// Application containers first, the pause (root) container last.
 	names := make([]string, 0, len(containers)+1)
 	for _, ctr := range containers {
@@ -817,7 +817,7 @@ func isContainerAlreadyGone(ctx context.Context, rcmd containerRuntime, name str
 	return !slices.Contains(ids, name), nil
 }
 
-func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.RestoreWorkloadRequest) (resp *ateompb.RestoreWorkloadResponse, retErr error) {
+func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateworkerpb.RestoreWorkloadRequest) (resp *ateworkerpb.RestoreWorkloadResponse, retErr error) {
 	if err := validateActorDirs(req.GetActorDirs()); err != nil {
 		return nil, err
 	}
@@ -900,7 +900,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	}
 
 	switch req.GetScope() {
-	case ateompb.SnapshotScope_SNAPSHOT_SCOPE_DATA:
+	case ateworkerpb.SnapshotScope_SNAPSHOT_SCOPE_DATA:
 		// Create and start pause container (cold boot with durable-dir volumes restored)
 		containersToDelete = append(containersToDelete, ocispec.PauseContainer)
 		if err := rcmd.cmdCreate(ctx, os.Stdout, ocispec.PauseContainer, nil); err != nil {
@@ -909,7 +909,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		if err := rcmd.cmdStart(ctx, os.Stdout, ocispec.PauseContainer); err != nil {
 			return nil, fmt.Errorf("while starting pause container: %w", err)
 		}
-	case ateompb.SnapshotScope_SNAPSHOT_SCOPE_FULL:
+	case ateworkerpb.SnapshotScope_SNAPSHOT_SCOPE_FULL:
 		// Create and restore pause container
 		containersToDelete = append(containersToDelete, ocispec.PauseContainer)
 		if err := rcmd.cmdCreate(ctx, os.Stdout, ocispec.PauseContainer, nil); err != nil {
@@ -934,7 +934,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 			return nil, fmt.Errorf("while composing %q rootfs: %w", ac.GetName(), err)
 		}
 		switch req.GetScope() {
-		case ateompb.SnapshotScope_SNAPSHOT_SCOPE_DATA:
+		case ateworkerpb.SnapshotScope_SNAPSHOT_SCOPE_DATA:
 			containersToDelete = append(containersToDelete, ac.GetName())
 			if err := rcmd.cmdCreate(ctx, pw, ac.GetName(), nil); err != nil {
 				return nil, fmt.Errorf("while creating %q application container: %w", ac.GetName(), err)
@@ -942,7 +942,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 			if err := rcmd.cmdStart(ctx, pw, ac.GetName()); err != nil {
 				return nil, fmt.Errorf("while starting %q application container: %w", ac.GetName(), err)
 			}
-		case ateompb.SnapshotScope_SNAPSHOT_SCOPE_FULL:
+		case ateworkerpb.SnapshotScope_SNAPSHOT_SCOPE_FULL:
 			containersToDelete = append(containersToDelete, ac.GetName())
 			if err := rcmd.cmdCreate(ctx, pw, ac.GetName(), nil); err != nil {
 				return nil, fmt.Errorf("while creating %q application container: %w", ac.GetName(), err)
@@ -966,10 +966,10 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	s.actorLogger.EmitLifecycleLog(ctx, "Actor restored", attribution)
 	s.setSession(req.GetActorUid(), &workloadSession{rcmd: rcmd, containers: containerNames(req.GetSpec().GetContainers())})
 
-	return &ateompb.RestoreWorkloadResponse{}, nil
+	return &ateworkerpb.RestoreWorkloadResponse{}, nil
 }
 
-func (s *AteomService) TerminateWorkload(ctx context.Context, req *ateompb.TerminateWorkloadRequest) (*ateompb.TerminateWorkloadResponse, error) {
+func (s *AteomService) TerminateWorkload(ctx context.Context, req *ateworkerpb.TerminateWorkloadRequest) (*ateworkerpb.TerminateWorkloadResponse, error) {
 	if err := validateActorDirs(req.GetActorDirs()); err != nil {
 		return nil, err
 	}
@@ -989,10 +989,10 @@ func (s *AteomService) TerminateWorkload(ctx context.Context, req *ateompb.Termi
 
 	s.actorLogger.EmitLifecycleLog(ctx, "Actor terminated", attribution)
 
-	return &ateompb.TerminateWorkloadResponse{}, nil
+	return &ateworkerpb.TerminateWorkloadResponse{}, nil
 }
 
-func (s *AteomService) terminateWorkload(ctx context.Context, actorRef resources.ActorRef, actorUID, runscPath string, actorDirs *ateompb.ActorDirs, containers []*ateompb.Container) error {
+func (s *AteomService) terminateWorkload(ctx context.Context, actorRef resources.ActorRef, actorUID, runscPath string, actorDirs *ateworkerpb.ActorDirs, containers []*ateworkerpb.Container) error {
 	var errs []error
 	if err := s.tunnel.Deactivate(ctx, resources.ActorAttribution{Ref: actorRef, UID: actorUID}); err != nil {
 		errs = append(errs, fmt.Errorf("while deactivating actor networking: %w", err))

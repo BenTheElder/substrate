@@ -26,7 +26,7 @@ import (
 	"time"
 
 	"github.com/agent-substrate/substrate/internal/ateattr"
-	"github.com/agent-substrate/substrate/internal/proto/ateompb"
+	"github.com/agent-substrate/substrate/internal/proto/ateworkerpb"
 	"github.com/agent-substrate/substrate/internal/resources"
 )
 
@@ -55,7 +55,7 @@ func renderPhaseRecord(t *testing.T, attrs []slog.Attr) map[string]any {
 func TestSnapshotPhaseAttrs(t *testing.T) {
 	t.Parallel()
 
-	attrs := snapshotPhaseAttrs(phaseLogAttribution(), ateompb.SnapshotScope_SNAPSHOT_SCOPE_FULL,
+	attrs := snapshotPhaseAttrs(phaseLogAttribution(), ateworkerpb.SnapshotScope_SNAPSHOT_SCOPE_FULL,
 		checkpointDurationKey, nil, []phase{
 			{phasePrep, 40 * time.Millisecond},
 			{phasePause, 3 * time.Millisecond},
@@ -142,7 +142,7 @@ func TestSnapshotPhaseAttrsFailure(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			rec := renderPhaseRecord(t, snapshotPhaseAttrs(phaseLogAttribution(),
-				ateompb.SnapshotScope_SNAPSHOT_SCOPE_FULL, checkpointDurationKey, tt.err,
+				ateworkerpb.SnapshotScope_SNAPSHOT_SCOPE_FULL, checkpointDurationKey, tt.err,
 				[]phase{{phasePrep, 40 * time.Millisecond}, {phasePause, 3 * time.Millisecond}, {phaseTotal, 30 * time.Second}}))
 			if got := rec["error.type"]; got != tt.want {
 				t.Errorf("error.type = %v, want %q", got, tt.want)
@@ -165,13 +165,13 @@ func TestScopeLogValue(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		scope ateompb.SnapshotScope
+		scope ateworkerpb.SnapshotScope
 		want  string
 	}{
-		{ateompb.SnapshotScope_SNAPSHOT_SCOPE_FULL, ateattr.SnapshotScopeFull},
-		{ateompb.SnapshotScope_SNAPSHOT_SCOPE_DATA, ateattr.SnapshotScopeData},
-		{ateompb.SnapshotScope_SNAPSHOT_SCOPE_UNSPECIFIED, ateattr.SnapshotScopeUnknown},
-		{ateompb.SnapshotScope(99), ateattr.SnapshotScopeUnknown},
+		{ateworkerpb.SnapshotScope_SNAPSHOT_SCOPE_FULL, ateattr.SnapshotScopeFull},
+		{ateworkerpb.SnapshotScope_SNAPSHOT_SCOPE_DATA, ateattr.SnapshotScopeData},
+		{ateworkerpb.SnapshotScope_SNAPSHOT_SCOPE_UNSPECIFIED, ateattr.SnapshotScopeUnknown},
+		{ateworkerpb.SnapshotScope(99), ateattr.SnapshotScopeUnknown},
 	}
 	for _, tt := range tests {
 		if got := scopeLogValue(tt.scope); got != tt.want {
