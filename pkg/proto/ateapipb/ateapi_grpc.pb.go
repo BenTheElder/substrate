@@ -1853,7 +1853,7 @@ type WorkerServiceClient interface {
 	// Create a Substrate-issued SPIFFE certificate that asserts an ateom acting
 	// on behalf of a particular actor.
 	//
-	// SPIFFE URI: spiffe://${trustdomain}/ateom-for-actor/${atespace}/${actor}
+	// SPIFFE URI: spiffe://${trustdomain}/worker-for-actor/${atespace}/${actor}
 	MintWorkerActorCertificate(ctx context.Context, in *MintWorkerActorCertificateRequest, opts ...grpc.CallOption) (*MintWorkerActorCertificateResponse, error)
 	// RequestActorSuspend asks the control plane to suspend an Actor that the
 	// calling Worker hosts. Only the Worker can observe what makes an Actor
@@ -1938,7 +1938,7 @@ type WorkerServiceServer interface {
 	// Create a Substrate-issued SPIFFE certificate that asserts an ateom acting
 	// on behalf of a particular actor.
 	//
-	// SPIFFE URI: spiffe://${trustdomain}/ateom-for-actor/${atespace}/${actor}
+	// SPIFFE URI: spiffe://${trustdomain}/worker-for-actor/${atespace}/${actor}
 	MintWorkerActorCertificate(context.Context, *MintWorkerActorCertificateRequest) (*MintWorkerActorCertificateResponse, error)
 	// RequestActorSuspend asks the control plane to suspend an Actor that the
 	// calling Worker hosts. Only the Worker can observe what makes an Actor

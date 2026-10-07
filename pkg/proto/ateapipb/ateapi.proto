@@ -2242,7 +2242,7 @@ service WorkerService {
   // Create a Substrate-issued SPIFFE certificate that asserts an ateom acting
   // on behalf of a particular actor.
   //
-  // SPIFFE URI: spiffe://${trustdomain}/ateom-for-actor/${atespace}/${actor}
+  // SPIFFE URI: spiffe://${trustdomain}/worker-for-actor/${atespace}/${actor}
   rpc MintWorkerActorCertificate(MintWorkerActorCertificateRequest) returns (MintWorkerActorCertificateResponse);
 
   // RequestActorSuspend asks the control plane to suspend an Actor that the
