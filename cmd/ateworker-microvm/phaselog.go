@@ -35,8 +35,8 @@ import (
 // worker_checkpoint phases of atelet's ate.actor.*.duration histograms, whose
 // names they extend, and are joined per actor by benchmarking tooling.
 const (
-	restoreDurationKey    = "ateom.actor.restore.duration"
-	checkpointDurationKey = "ateom.actor.checkpoint.duration"
+	restoreDurationKey    = "ateworker.actor.restore.duration"
+	checkpointDurationKey = "ateworker.actor.checkpoint.duration"
 )
 
 // The phase names, suffixed onto the duration keys. Kept out of ateattr on
