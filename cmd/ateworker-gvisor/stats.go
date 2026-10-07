@@ -86,7 +86,7 @@ const defaultCgroupRoot = "/sys/fs/cgroup"
 // ocispec.GVisorCgroupLeaf supplies the leaf name for both shaping and stats.
 const sandboxCgroupContainer = ocispec.PauseContainer
 
-// GetWorkloadStats implements ateworkerpb.Ateom/GetWorkloadStats.
+// GetWorkloadStats implements ateworkerpb.Worker/GetWorkloadStats.
 //
 // It must not take the actor's lifecycle lock, which is held across whole
 // boots and checkpoints: polls would stall behind runsc, and a checkpoint
@@ -132,7 +132,7 @@ func (s *AteomService) GetWorkloadStats(ctx context.Context, req *ateworkerpb.Ge
 }
 
 // GetActiveWorkloadStats implements
-// ateworkerpb.Ateom/GetActiveWorkloadStats: the discovery read, sampling
+// ateworkerpb.Worker/GetActiveWorkloadStats: the discovery read, sampling
 // whatever is executing with no identity asserted. Same lock discipline as
 // GetWorkloadStats above, for the same reasons.
 func (s *AteomService) GetActiveWorkloadStats(ctx context.Context, req *ateworkerpb.GetActiveWorkloadStatsRequest) (*ateworkerpb.GetActiveWorkloadStatsResponse, error) {

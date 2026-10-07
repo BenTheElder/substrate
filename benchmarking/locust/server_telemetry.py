@@ -278,7 +278,7 @@ def _rpc_buckets(method: str) -> str:
     """The duration bucket selector for one AteomHerder RPC."""
     return (
         'rpc_server_call_duration_seconds_bucket'
-        f'{{rpc_method="atelet.AteomHerder/{method}"}}'
+        f'{{rpc_method="atelet.Atelet/{method}"}}'
     )
 
 
@@ -437,7 +437,7 @@ def _harvest_snapshots(
     snap_avg = _ratio(delta(snap_selector % "_sum"), count, scale=mb)
 
     def rpc_mean(method: str) -> float | None:
-        sel = f'{{rpc_method="atelet.AteomHerder/{method}"}}'
+        sel = f'{{rpc_method="atelet.Atelet/{method}"}}'
         return _ratio(
             delta(f"rpc_server_call_duration_seconds_sum{sel}"),
             delta(f"rpc_server_call_duration_seconds_count{sel}"),

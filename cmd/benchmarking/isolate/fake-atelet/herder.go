@@ -30,7 +30,7 @@ type delays struct {
 // herder answers every AteomHerder call with success after its delay, without
 // running or saving any workload. Actors it "runs" do not exist.
 type herder struct {
-	ateletpb.UnimplementedAteomHerderServer
+	ateletpb.UnimplementedAteletServer
 
 	delays delays
 }

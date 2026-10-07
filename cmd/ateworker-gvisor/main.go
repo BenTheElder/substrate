@@ -216,7 +216,7 @@ func do(ctx context.Context) error {
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.UnaryInterceptor(ateinterceptors.InternalServerUnaryInterceptor),
 	)
-	ateworkerpb.RegisterAteomServer(svr, ateomService)
+	ateworkerpb.RegisterWorkerServer(svr, ateomService)
 	reflection.Register(svr)
 	readiness := &serverboot.Readiness{}
 
@@ -279,7 +279,7 @@ type workloadSession struct {
 
 // AteomService is a service for shepherding single microvm.
 type AteomService struct {
-	ateworkerpb.UnimplementedAteomServer
+	ateworkerpb.UnimplementedWorkerServer
 
 	// Serializes lifecycle RPCs per actor.
 	locks *actorlock.Locks
@@ -313,7 +313,7 @@ type AteomService struct {
 	readSandboxCgroup func(dir string) (cgroupstats.Sample, error)
 }
 
-var _ ateworkerpb.AteomServer = (*AteomService)(nil)
+var _ ateworkerpb.WorkerServer = (*AteomService)(nil)
 
 // NewService creates a new AteomService.
 func NewService(tunnel *ateomtunnel.Tunnel, actorLogger *actorlog.ActorLogger, maxActors int) *AteomService {

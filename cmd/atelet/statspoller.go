@@ -80,7 +80,7 @@ func clampActorStatsPollInterval(ctx context.Context, configured time.Duration) 
 }
 
 // activeStatsClient is the one RPC the poller makes, as a narrow interface so
-// tests can fake an ateom without a socket. ateworkerpb.AteomClient satisfies it.
+// tests can fake an ateom without a socket. ateworkerpb.WorkerClient satisfies it.
 type activeStatsClient interface {
 	GetActiveWorkloadStats(ctx context.Context, req *ateworkerpb.GetActiveWorkloadStatsRequest, opts ...grpc.CallOption) (*ateworkerpb.GetActiveWorkloadStatsResponse, error)
 }
@@ -596,7 +596,7 @@ func startStatsPoller(ctx context.Context, interval time.Duration, inst *statsIn
 			if err != nil {
 				return nil, nil, err
 			}
-			return ateworkerpb.NewAteomClient(conn), closer, nil
+			return ateworkerpb.NewWorkerClient(conn), closer, nil
 		},
 		inst:         inst,
 		eventEmitter: newStatsEventEmitter(newAsyncWriter(ctx, logSink, usageEventQueueDepth), defaultLabelsKey),

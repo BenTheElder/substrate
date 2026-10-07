@@ -388,7 +388,7 @@ func main() {
 
 	ateomFacingSrv := grpc.NewServer(grpc.Creds(credentials.NewTLS(ateomFacingTLS)))
 
-	ateletpb.RegisterAteomSupportServer(ateomFacingSrv, &ateomSupportServer{
+	ateletpb.RegisterWorkerSupportServer(ateomFacingSrv, &ateomSupportServer{
 		workers: ateapipb.NewWorkerServiceClient(ateapiConn),
 	})
 	go func() {
@@ -402,7 +402,7 @@ func main() {
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.UnaryInterceptor(ateinterceptors.InternalServerUnaryInterceptor),
 	)
-	ateletpb.RegisterAteomHerderServer(svr, wmService)
+	ateletpb.RegisterAteletServer(svr, wmService)
 	reflection.Register(svr)
 	slog.InfoContext(ctx, "WorkersManagerService listening", slog.Any("address", lis.Addr()))
 
@@ -458,7 +458,7 @@ func (g *directCSIDriverConfigGetter) Get(name string) (*atev1alpha1.CSIDriverCo
 // AteomHerder is a service that allows controlling workloads on individual
 // ateoms.
 type AteomHerder struct {
-	ateletpb.UnimplementedAteomHerderServer
+	ateletpb.UnimplementedAteletServer
 
 	ateomDialer           *AteomDialer
 	imageCache            *imagecache.Store
@@ -471,7 +471,7 @@ type AteomHerder struct {
 	systemInfoVolumes     *systemInfoVolumeRefresher
 }
 
-var _ ateletpb.AteomHerderServer = (*AteomHerder)(nil)
+var _ ateletpb.AteletServer = (*AteomHerder)(nil)
 
 // NewService creates a new WorkersManagerService.
 func NewService(
@@ -1593,12 +1593,12 @@ func (s *AteomHerder) prepareOCIBundles(
 
 // dialAteom opens (or reuses) the gRPC connection to the target ateom
 // pod and returns an ateom client.
-func (s *AteomHerder) dialAteom(ctx context.Context, targetAteomUid string) (ateworkerpb.AteomClient, error) {
+func (s *AteomHerder) dialAteom(ctx context.Context, targetAteomUid string) (ateworkerpb.WorkerClient, error) {
 	conn, err := s.ateomDialer.DialAteomPod(ctx, targetAteomUid)
 	if err != nil {
 		return nil, fmt.Errorf("while getting ateom conn for %s: %w", targetAteomUid, err)
 	}
-	return ateworkerpb.NewAteomClient(conn), nil
+	return ateworkerpb.NewWorkerClient(conn), nil
 }
 
 // buildAteomWorkloadSpec projects the atelet-facing workload spec onto

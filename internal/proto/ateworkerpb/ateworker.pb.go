@@ -2058,8 +2058,8 @@ const file_ateworker_proto_rawDesc = "" +
 	"\vStatsSource\x12\x1c\n" +
 	"\x18STATS_SOURCE_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13STATS_SOURCE_CGROUP\x10\x01\x12\x1c\n" +
-	"\x18STATS_SOURCE_GUEST_AGENT\x10\x022\xca\x04\n" +
-	"\x05Ateom\x12N\n" +
+	"\x18STATS_SOURCE_GUEST_AGENT\x10\x022\xcb\x04\n" +
+	"\x06Worker\x12N\n" +
 	"\vRunWorkload\x12\x1d.ateworker.RunWorkloadRequest\x1a\x1e.ateworker.RunWorkloadResponse\"\x00\x12c\n" +
 	"\x12CheckpointWorkload\x12$.ateworker.CheckpointWorkloadRequest\x1a%.ateworker.CheckpointWorkloadResponse\"\x00\x12Z\n" +
 	"\x0fRestoreWorkload\x12!.ateworker.RestoreWorkloadRequest\x1a\".ateworker.RestoreWorkloadResponse\"\x00\x12]\n" +
@@ -2139,18 +2139,18 @@ var file_ateworker_proto_depIdxs = []int32{
 	2,  // 23: ateworker.WorkloadStatsSample.source:type_name -> ateworker.StatsSource
 	22, // 24: ateworker.GetWorkloadStatsResponse.sample:type_name -> ateworker.WorkloadStatsSample
 	22, // 25: ateworker.GetActiveWorkloadStatsResponse.samples:type_name -> ateworker.WorkloadStatsSample
-	6,  // 26: ateworker.Ateom.RunWorkload:input_type -> ateworker.RunWorkloadRequest
-	17, // 27: ateworker.Ateom.CheckpointWorkload:input_type -> ateworker.CheckpointWorkloadRequest
-	19, // 28: ateworker.Ateom.RestoreWorkload:input_type -> ateworker.RestoreWorkloadRequest
-	21, // 29: ateworker.Ateom.GetWorkloadStats:input_type -> ateworker.GetWorkloadStatsRequest
-	24, // 30: ateworker.Ateom.GetActiveWorkloadStats:input_type -> ateworker.GetActiveWorkloadStatsRequest
-	4,  // 31: ateworker.Ateom.TerminateWorkload:input_type -> ateworker.TerminateWorkloadRequest
-	16, // 32: ateworker.Ateom.RunWorkload:output_type -> ateworker.RunWorkloadResponse
-	18, // 33: ateworker.Ateom.CheckpointWorkload:output_type -> ateworker.CheckpointWorkloadResponse
-	20, // 34: ateworker.Ateom.RestoreWorkload:output_type -> ateworker.RestoreWorkloadResponse
-	23, // 35: ateworker.Ateom.GetWorkloadStats:output_type -> ateworker.GetWorkloadStatsResponse
-	25, // 36: ateworker.Ateom.GetActiveWorkloadStats:output_type -> ateworker.GetActiveWorkloadStatsResponse
-	5,  // 37: ateworker.Ateom.TerminateWorkload:output_type -> ateworker.TerminateWorkloadResponse
+	6,  // 26: ateworker.Worker.RunWorkload:input_type -> ateworker.RunWorkloadRequest
+	17, // 27: ateworker.Worker.CheckpointWorkload:input_type -> ateworker.CheckpointWorkloadRequest
+	19, // 28: ateworker.Worker.RestoreWorkload:input_type -> ateworker.RestoreWorkloadRequest
+	21, // 29: ateworker.Worker.GetWorkloadStats:input_type -> ateworker.GetWorkloadStatsRequest
+	24, // 30: ateworker.Worker.GetActiveWorkloadStats:input_type -> ateworker.GetActiveWorkloadStatsRequest
+	4,  // 31: ateworker.Worker.TerminateWorkload:input_type -> ateworker.TerminateWorkloadRequest
+	16, // 32: ateworker.Worker.RunWorkload:output_type -> ateworker.RunWorkloadResponse
+	18, // 33: ateworker.Worker.CheckpointWorkload:output_type -> ateworker.CheckpointWorkloadResponse
+	20, // 34: ateworker.Worker.RestoreWorkload:output_type -> ateworker.RestoreWorkloadResponse
+	23, // 35: ateworker.Worker.GetWorkloadStats:output_type -> ateworker.GetWorkloadStatsResponse
+	25, // 36: ateworker.Worker.GetActiveWorkloadStats:output_type -> ateworker.GetActiveWorkloadStatsResponse
+	5,  // 37: ateworker.Worker.TerminateWorkload:output_type -> ateworker.TerminateWorkloadResponse
 	32, // [32:38] is the sub-list for method output_type
 	26, // [26:32] is the sub-list for method input_type
 	26, // [26:26] is the sub-list for extension type_name

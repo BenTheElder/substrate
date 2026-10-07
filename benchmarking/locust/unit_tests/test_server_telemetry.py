@@ -90,11 +90,11 @@ SUMS = {
     "size": "atelet_snapshot_size_bytes_sum" + MEMORY_IMAGE,
     "bytes": "sum(atelet_snapshot_size_bytes_sum)",
     "seconds": "ate_actor_checkpoint_duration_seconds_sum",
-    "restore_sum": 'seconds_sum{rpc_method="atelet.AteomHerder/Restore"}',
-    "restore_count": 'seconds_count{rpc_method="atelet.AteomHerder/Restore"}',
-    "checkpoint_sum": 'seconds_sum{rpc_method="atelet.AteomHerder/Checkpoint"}',
+    "restore_sum": 'seconds_sum{rpc_method="atelet.Atelet/Restore"}',
+    "restore_count": 'seconds_count{rpc_method="atelet.Atelet/Restore"}',
+    "checkpoint_sum": 'seconds_sum{rpc_method="atelet.Atelet/Checkpoint"}',
     "checkpoint_count":
-        'seconds_count{rpc_method="atelet.AteomHerder/Checkpoint"}',
+        'seconds_count{rpc_method="atelet.Atelet/Checkpoint"}',
 }
 
 

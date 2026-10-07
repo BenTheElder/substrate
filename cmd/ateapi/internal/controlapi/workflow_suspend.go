@@ -201,7 +201,7 @@ func (w *ActorWorkflow) ensureAteletSuspended(ctx context.Context, actorRef reso
 	if err != nil {
 		return "", fmt.Errorf("while getting atelet conn for node %q: %w", assignment.GetNodeName(), err)
 	}
-	client := ateletpb.NewAteomHerderClient(ateletConn)
+	client := ateletpb.NewAteletClient(ateletConn)
 
 	workloadSpec, err := workloadSpecFromActorTemplate(actorTemplate, actor, nil)
 	if err != nil {
@@ -263,7 +263,7 @@ func (w *ActorWorkflow) ensurePausedSnapshotUploaded(ctx context.Context, actorR
 		// retryable rather than crash.
 		return "", fmt.Errorf("while getting atelet conn for node %q: %w", nodeName, err)
 	}
-	client := ateletpb.NewAteomHerderClient(ateletConn)
+	client := ateletpb.NewAteletClient(ateletConn)
 
 	req := &ateletpb.UploadPausedCheckpointRequest{
 		Atespace:               actor.GetMetadata().GetAtespace(),

@@ -89,7 +89,7 @@ func main() {
 	}
 	h := &herder{delays: callDelays}
 	srv := grpc.NewServer(grpc.Creds(credentials.NewTLS(herderTLS)))
-	ateletpb.RegisterAteomHerderServer(srv, h)
+	ateletpb.RegisterAteletServer(srv, h)
 	health := &http.Server{Addr: *healthListenAddr, Handler: healthHandler(), ReadHeaderTimeout: 10 * time.Second}
 
 	slog.WarnContext(ctx, "Serving the fake atelet: actor lifecycle calls succeed without running any workload",

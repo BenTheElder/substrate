@@ -3301,12 +3301,12 @@ const file_atelet_proto_rawDesc = "" +
 	"\rSnapshotScope\x12\x1e\n" +
 	"\x1aSNAPSHOT_SCOPE_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13SNAPSHOT_SCOPE_FULL\x10\x01\x12\x17\n" +
-	"\x13SNAPSHOT_SCOPE_DATA\x10\x022\xa8\x02\n" +
-	"\fAteomSupport\x12c\n" +
+	"\x13SNAPSHOT_SCOPE_DATA\x10\x022\xa9\x02\n" +
+	"\rWorkerSupport\x12c\n" +
 	"\x14MintActorCertificate\x12#.atelet.MintActorCertificateRequest\x1a$.atelet.MintActorCertificateResponse\"\x00\x12Q\n" +
 	"\x0eRegisterWorker\x12\x1d.atelet.RegisterWorkerRequest\x1a\x1e.atelet.RegisterWorkerResponse\"\x00\x12`\n" +
-	"\x13RequestActorSuspend\x12\".atelet.RequestActorSuspendRequest\x1a#.atelet.RequestActorSuspendResponse\"\x002\xf3\x02\n" +
-	"\vAteomHerder\x120\n" +
+	"\x13RequestActorSuspend\x12\".atelet.RequestActorSuspendRequest\x1a#.atelet.RequestActorSuspendResponse\"\x002\xee\x02\n" +
+	"\x06Atelet\x120\n" +
 	"\x03Run\x12\x12.atelet.RunRequest\x1a\x13.atelet.RunResponse\"\x00\x12E\n" +
 	"\n" +
 	"Checkpoint\x12\x19.atelet.CheckpointRequest\x1a\x1a.atelet.CheckpointResponse\"\x00\x12<\n" +
@@ -3430,22 +3430,22 @@ var file_atelet_proto_depIdxs = []int32{
 	19, // 43: atelet.RestoreRequest.sandbox_assets:type_name -> atelet.SandboxAssets
 	17, // 44: atelet.ArchAssets.FilesEntry.value:type_name -> atelet.AssetFile
 	18, // 45: atelet.SandboxAssets.AssetsEntry.value:type_name -> atelet.ArchAssets
-	11, // 46: atelet.AteomSupport.MintActorCertificate:input_type -> atelet.MintActorCertificateRequest
-	3,  // 47: atelet.AteomSupport.RegisterWorker:input_type -> atelet.RegisterWorkerRequest
-	9,  // 48: atelet.AteomSupport.RequestActorSuspend:input_type -> atelet.RequestActorSuspendRequest
-	15, // 49: atelet.AteomHerder.Run:input_type -> atelet.RunRequest
-	42, // 50: atelet.AteomHerder.Checkpoint:input_type -> atelet.CheckpointRequest
-	46, // 51: atelet.AteomHerder.Restore:input_type -> atelet.RestoreRequest
-	44, // 52: atelet.AteomHerder.UploadPausedCheckpoint:input_type -> atelet.UploadPausedCheckpointRequest
-	13, // 53: atelet.AteomHerder.Terminate:input_type -> atelet.TerminateRequest
-	12, // 54: atelet.AteomSupport.MintActorCertificate:output_type -> atelet.MintActorCertificateResponse
-	8,  // 55: atelet.AteomSupport.RegisterWorker:output_type -> atelet.RegisterWorkerResponse
-	10, // 56: atelet.AteomSupport.RequestActorSuspend:output_type -> atelet.RequestActorSuspendResponse
-	38, // 57: atelet.AteomHerder.Run:output_type -> atelet.RunResponse
-	43, // 58: atelet.AteomHerder.Checkpoint:output_type -> atelet.CheckpointResponse
-	47, // 59: atelet.AteomHerder.Restore:output_type -> atelet.RestoreResponse
-	45, // 60: atelet.AteomHerder.UploadPausedCheckpoint:output_type -> atelet.UploadPausedCheckpointResponse
-	14, // 61: atelet.AteomHerder.Terminate:output_type -> atelet.TerminateResponse
+	11, // 46: atelet.WorkerSupport.MintActorCertificate:input_type -> atelet.MintActorCertificateRequest
+	3,  // 47: atelet.WorkerSupport.RegisterWorker:input_type -> atelet.RegisterWorkerRequest
+	9,  // 48: atelet.WorkerSupport.RequestActorSuspend:input_type -> atelet.RequestActorSuspendRequest
+	15, // 49: atelet.Atelet.Run:input_type -> atelet.RunRequest
+	42, // 50: atelet.Atelet.Checkpoint:input_type -> atelet.CheckpointRequest
+	46, // 51: atelet.Atelet.Restore:input_type -> atelet.RestoreRequest
+	44, // 52: atelet.Atelet.UploadPausedCheckpoint:input_type -> atelet.UploadPausedCheckpointRequest
+	13, // 53: atelet.Atelet.Terminate:input_type -> atelet.TerminateRequest
+	12, // 54: atelet.WorkerSupport.MintActorCertificate:output_type -> atelet.MintActorCertificateResponse
+	8,  // 55: atelet.WorkerSupport.RegisterWorker:output_type -> atelet.RegisterWorkerResponse
+	10, // 56: atelet.WorkerSupport.RequestActorSuspend:output_type -> atelet.RequestActorSuspendResponse
+	38, // 57: atelet.Atelet.Run:output_type -> atelet.RunResponse
+	43, // 58: atelet.Atelet.Checkpoint:output_type -> atelet.CheckpointResponse
+	47, // 59: atelet.Atelet.Restore:output_type -> atelet.RestoreResponse
+	45, // 60: atelet.Atelet.UploadPausedCheckpoint:output_type -> atelet.UploadPausedCheckpointResponse
+	14, // 61: atelet.Atelet.Terminate:output_type -> atelet.TerminateResponse
 	54, // [54:62] is the sub-list for method output_type
 	46, // [46:54] is the sub-list for method input_type
 	46, // [46:46] is the sub-list for extension type_name
