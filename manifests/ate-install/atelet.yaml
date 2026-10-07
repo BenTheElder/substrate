@@ -215,7 +215,6 @@ spec:
         ports:
         - name: grpc
           containerPort: 8085
-          hostPort: 8085
         - name: prometheus
           containerPort: 9090
           hostPort: 9090

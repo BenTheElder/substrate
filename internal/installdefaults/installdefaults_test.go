@@ -16,6 +16,33 @@ package installdefaults
 
 import "testing"
 
+func TestAPIServerSPIFFEID(t *testing.T) {
+	tests := []struct {
+		name      string
+		namespace string
+		want      string
+	}{
+		{
+			name:      "default namespace",
+			namespace: SystemNamespace,
+			want:      "spiffe://cluster.local/ns/ate-system/sa/ate-api-server",
+		},
+		{
+			name:      "relocated namespace",
+			namespace: "team-a-substrate",
+			want:      "spiffe://cluster.local/ns/team-a-substrate/sa/ate-api-server",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := APIServerSPIFFEID(tt.namespace); got != tt.want {
+				t.Errorf("expected %q, but got %q", tt.want, got)
+			}
+		})
+	}
+}
+
 func TestAteletSPIFFEID(t *testing.T) {
 	tests := []struct {
 		name      string

@@ -44,10 +44,11 @@ const (
 	// podidentity signer (cmd/podcertcontroller/internal/podidentitysigner).
 	// The namespace segment is the namespace they run in, which callers
 	// resolve themselves rather than assume.
-	AteletTrustDomain    = "cluster.local"
-	AteletServiceAccount = "atelet"
-	RouterServiceAccount = "atenet-router"
-	EgressServiceAccount = "atenet-egress"
+	AteletTrustDomain       = "cluster.local"
+	APIServerServiceAccount = "ate-api-server"
+	AteletServiceAccount    = "atelet"
+	RouterServiceAccount    = "atenet-router"
+	EgressServiceAccount    = "atenet-egress"
 
 	// PodNamespaceEnv is the conventional env var name for the namespace
 	// a pod is running in, exposed via Kubernetes' downward API.
@@ -82,6 +83,11 @@ func SPIFFEID(namespace, serviceAccount string) string {
 		Host:   AteletTrustDomain,
 		Path:   path.Join("ns", namespace, "sa", serviceAccount),
 	}).String()
+}
+
+// APIServerSPIFFEID returns the SPIFFE ID ate-api-server presents in namespace
+func APIServerSPIFFEID(namespace string) string {
+	return SPIFFEID(namespace, APIServerServiceAccount)
 }
 
 // AteletSPIFFEID returns the SPIFFE ID atelet presents when it runs in namespace.

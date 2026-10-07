@@ -43,6 +43,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/clustertrustbundle"
 	"github.com/agent-substrate/substrate/internal/credbundle"
 	"github.com/agent-substrate/substrate/internal/imagecache"
+	"github.com/agent-substrate/substrate/internal/installdefaults"
 	"github.com/agent-substrate/substrate/internal/nodepath"
 	"github.com/agent-substrate/substrate/internal/ocispec"
 	"github.com/agent-substrate/substrate/internal/otlprelay"
@@ -94,6 +95,7 @@ var (
 	ateapiAddress        = pflag.String("ateapi-address", "k8s:///api.ate-system.svc:443", "ateapi gRPC target used by the credential broker.")
 	ateapiCAFile         = pflag.String("ateapi-ca-file", "/run/servicedns.podcert.ate.dev/trust-bundle.pem", "CA bundle used to verify ateapi.")
 	ateapiServerName     = pflag.String("ateapi-server-name", "api.ate-system.svc", "DNS name expected on the ateapi certificate.")
+	ateapiServiceAccount = pflag.String("ateapi-service-account", installdefaults.APIServerServiceAccount, "service account ate-api-server runs as")
 
 	// The kubelet already knows how to authenticate to its node's cloud
 	// registry, via an exec plugin the node ships. Pointing atelet at the same
@@ -356,7 +358,12 @@ func main() {
 		serverboot.Fatal(ctx, "Failed to listen", err)
 	}
 
-	tlsCfg, err := ateletServerTLSConfig(*grpcServerCredBundle, *clientCACerts)
+	if *ateapiServiceAccount == "" {
+		serverboot.Fatal(ctx, "Invalid flags", errors.New("--ateapi-service-account must not be empty"))
+	}
+	ateapiSPIFFEID := installdefaults.SPIFFEID(installdefaults.NamespaceFromPodEnv(), *ateapiServiceAccount)
+
+	tlsCfg, err := ateletServerTLSConfig(*grpcServerCredBundle, *clientCACerts, verifyClientSPIFFEID(ateapiSPIFFEID))
 	if err != nil {
 		serverboot.Fatal(ctx, "Failed to build server TLS config", err)
 	}
@@ -372,8 +379,10 @@ func main() {
 		serverboot.Fatal(ctx, "Failed to load atelet Pod identity", fmt.Errorf("credential bundle has no Pod identity"))
 	}
 
-	ateomFacingTLS := tlsCfg.Clone()
-	ateomFacingTLS.VerifyConnection = verifyClientOnSameNode(ateletIdentity)
+	ateomFacingTLS, err := ateletServerTLSConfig(*grpcServerCredBundle, *clientCACerts, verifyClientOnSameNode(ateletIdentity))
+	if err != nil {
+		serverboot.Fatal(ctx, "Failed to build credential broker TLS config", err)
+	}
 	if err := os.Remove(nodepath.AteomSupportSocket); err != nil && !errors.Is(err, os.ErrNotExist) {
 		serverboot.Fatal(ctx, "Failed to remove stale credential broker socket", err)
 	}
@@ -1739,12 +1748,9 @@ func (d *AteomDialer) DialAteomPod(ctx context.Context, podUID string) (*grpc.Cl
 
 // validateRunRequest, validateCheckpointRequest, and validateRestoreRequest
 // validate everything in their request that atelet turns into host filesystem
-// paths, plus the request-specific fields. atelet listens on an insecure
-// hostPort, so any reachable caller could otherwise smuggle a path separator
-// or ".." through these fields and make atelet read/RemoveAll/write outside
-// the intended directory tree, or collide bundles. Each RPC validates at its
-// boundary, before any path is built. The field rules live in
-// internal/resources so other components can apply them at their boundaries.
+// paths, plus the request-specific fields. Each RPC validates at its boundary,
+// before any path is built. The field rules live in internal/resources so
+// other components can apply them at their boundaries.
 func validateRunRequest(req *ateletpb.RunRequest) error {
 	var errs field.ErrorList
 	errs = append(errs, resources.ValidateResourceName(req.GetAtespace(), field.NewPath("atespace"))...)
@@ -2002,10 +2008,8 @@ func removeActorDirs(actorUID string) error {
 	return nil
 }
 
-// ateletServerTLSConfig builds a *tls.Config for a gRPC server that presents the
-// credential bundle at servingBundlePath, requires a client certificate
-// chaining to a CA in clientCAPath.
-func ateletServerTLSConfig(servingBundlePath, clientCAPath string) (*tls.Config, error) {
+// ateletServerTLSConfig builds a server *tls.Config with per-handshake client CA reload
+func ateletServerTLSConfig(servingBundlePath, clientCAPath string, verifyConnection func(tls.ConnectionState) error) (*tls.Config, error) {
 	loadClientCAs := credbundle.PoolLoader(clientCAPath)
 	if _, err := loadClientCAs(); err != nil {
 		return nil, fmt.Errorf("load CA bundle %s: %w", clientCAPath, err)
@@ -2019,13 +2023,27 @@ func ateletServerTLSConfig(servingBundlePath, clientCAPath string) (*tls.Config,
 				return nil, err
 			}
 			return &tls.Config{
-				MinVersion:     tls.VersionTLS13,
-				GetCertificate: serverCert,
-				ClientAuth:     tls.RequireAndVerifyClientCert,
-				ClientCAs:      clientCAs,
+				MinVersion:       tls.VersionTLS13,
+				GetCertificate:   serverCert,
+				ClientAuth:       tls.RequireAndVerifyClientCert,
+				ClientCAs:        clientCAs,
+				VerifyConnection: verifyConnection,
 			}, nil
 		},
 	}, nil
+}
+
+func verifyClientSPIFFEID(expectedSPIFFEID string) func(tls.ConnectionState) error {
+	return func(state tls.ConnectionState) error {
+		if len(state.PeerCertificates) == 0 {
+			return errors.New("client certificate is required")
+		}
+		leaf := state.PeerCertificates[0]
+		if len(leaf.URIs) != 1 || leaf.URIs[0].String() != expectedSPIFFEID {
+			return fmt.Errorf("client SPIFFE ID %v does not match expected %q", leaf.URIs, expectedSPIFFEID)
+		}
+		return nil
+	}
 }
 
 func newKubeClients() (*kubernetes.Clientset, versioned.Interface, error) {
