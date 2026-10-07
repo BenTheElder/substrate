@@ -31,8 +31,8 @@ import (
 // The keys the per-phase durations are logged under. They are named like
 // instruments but deliberately are not ones: the phases are implementation
 // details of this binary, so they stay a developer-facing log record rather
-// than becoming metric API. They decompose the ateom_restore /
-// ateom_checkpoint phases of atelet's ate.actor.*.duration histograms, whose
+// than becoming metric API. They decompose the worker_restore /
+// worker_checkpoint phases of atelet's ate.actor.*.duration histograms, whose
 // names they extend, and are joined per actor by benchmarking tooling.
 const (
 	restoreDurationKey    = "ateom.actor.restore.duration"
