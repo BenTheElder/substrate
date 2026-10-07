@@ -37,6 +37,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/apierror"
 	"github.com/agent-substrate/substrate/internal/ateattr"
 	"github.com/agent-substrate/substrate/internal/atelet"
+	"github.com/agent-substrate/substrate/internal/imagecache"
 	"github.com/agent-substrate/substrate/internal/nodepath"
 	"github.com/agent-substrate/substrate/internal/ocispec"
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
@@ -239,9 +240,7 @@ func TestSnapshotManifestPauseImage(t *testing.T) {
 	}
 }
 
-// TestPrepareOCIBundlesPause pins that the pause bundle is built only when the
-// sandbox has a pause image.
-func TestPrepareOCIBundlesPause(t *testing.T) {
+func TestPrepareOCIBundles(t *testing.T) {
 	host := imageVolumeTestRegistry(t)
 	image := host + "/actor:v1"
 	pushTestImage(t, image, singleFileLayer(t, "bin/app", "app"))
@@ -261,13 +260,21 @@ func TestPrepareOCIBundlesPause(t *testing.T) {
 			useTempNodeDirs(t)
 			const actorUID = "actor-uid-1"
 			s := &AteomHerder{imageCache: newImageVolumeStore(t)}
-			if err := s.prepareOCIBundles(t.Context(), actorUID, resources.ActorRef{}, spec, tc.pauseImage, "ateom-uid-1"); err != nil {
+			procs, err := s.prepareOCIBundles(t.Context(), actorUID, resources.ActorRef{}, spec, tc.pauseImage, "ateom-uid-1")
+			if err != nil {
 				t.Fatalf("prepareOCIBundles: %v", err)
 			}
-			if _, err := os.Stat(filepath.Join(ateletpath.OCIBundlePath(actorUID, "app"), "config.json")); err != nil {
-				t.Errorf("app bundle: %v", err)
+			if got := procs["app"].GetArgs(); !slices.Equal(got, []string{"/bin/app"}) {
+				t.Errorf("app args = %v, want [/bin/app]", got)
 			}
-			_, err := os.Stat(ateletpath.OCIBundlePath(actorUID, ocispec.PauseContainer))
+			appBundle := ateletpath.OCIBundlePath(actorUID, "app")
+			if _, err := os.Stat(filepath.Join(appBundle, imagecache.OverlaySpecFileName)); err != nil {
+				t.Errorf("app overlay spec: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(appBundle, "config.json")); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("app config.json stat = %v, want it left to the ateom", err)
+			}
+			_, err = os.Stat(ateletpath.OCIBundlePath(actorUID, ocispec.PauseContainer))
 			if gotPause := err == nil; gotPause != tc.wantPause {
 				t.Errorf("pause bundle exists = %v, want %v (stat: %v)", gotPause, tc.wantPause, err)
 			}
@@ -924,6 +931,29 @@ func TestRPCBoundariesReject(t *testing.T) {
 	})
 }
 
+func TestBuildAteomWorkloadSpecForwardsProcessAndResources(t *testing.T) {
+	in := &ateletpb.WorkloadSpec{
+		Containers: []*ateletpb.Container{
+			{Name: "app", Resources: &ateletpb.ResourceLimits{MemoryBytes: 1 << 20, CpuMillis: 250}},
+			{Name: "unresolved"},
+		},
+	}
+	proc := &ateompb.Process{Args: []string{"/app"}, Env: []string{"A=1"}, Capabilities: []string{"CAP_KILL"}}
+	want := &ateompb.WorkloadSpec{
+		Containers: []*ateompb.Container{
+			{Name: "app", Process: proc, Resources: &ateompb.ResourceLimits{MemoryBytes: 1 << 20, CpuMillis: 250}},
+			{Name: "unresolved"},
+		},
+	}
+	got, err := buildAteomWorkloadSpec(in, map[string]*ateompb.Process{"app": proc})
+	if err != nil {
+		t.Fatalf("buildAteomWorkloadSpec failed: %v", err)
+	}
+	if diff := cmp.Diff(want, got, protocmp.Transform()); diff != "" {
+		t.Errorf("buildAteomWorkloadSpec mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestBuildAteomWorkloadSpecForwardsWakeupProbe(t *testing.T) {
 	in := &ateletpb.WorkloadSpec{
 		Containers: []*ateletpb.Container{
@@ -952,7 +982,7 @@ func TestBuildAteomWorkloadSpecForwardsWakeupProbe(t *testing.T) {
 			{Name: "without-probe"},
 		},
 	}
-	got, err := buildAteomWorkloadSpec(in)
+	got, err := buildAteomWorkloadSpec(in, nil)
 	if err != nil {
 		t.Fatalf("buildAteomWorkloadSpec failed: %v", err)
 	}
@@ -1014,7 +1044,7 @@ func TestBuildAteomWorkloadSpecForwardsDurableDirMounts(t *testing.T) {
 			{Name: "no-volumes"},
 		},
 	}
-	got, err := buildAteomWorkloadSpec(in)
+	got, err := buildAteomWorkloadSpec(in, nil)
 	if err != nil {
 		t.Fatalf("buildAteomWorkloadSpec failed: %v", err)
 	}
@@ -1085,7 +1115,7 @@ func TestBuildAteomWorkloadSpecValidation(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := buildAteomWorkloadSpec(tc.in)
+			_, err := buildAteomWorkloadSpec(tc.in, nil)
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
@@ -1435,7 +1465,7 @@ func TestBuildAteomWorkloadSpec_ImageVolumeMounts(t *testing.T) {
 		}},
 	}
 
-	got, err := buildAteomWorkloadSpec(spec)
+	got, err := buildAteomWorkloadSpec(spec, nil)
 	if err != nil {
 		t.Fatalf("buildAteomWorkloadSpec: %v", err)
 	}

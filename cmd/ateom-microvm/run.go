@@ -225,7 +225,8 @@ func (s *AteomService) resolveRuntime(paths map[string]string) resolvedRuntime {
 // Contract with atelet:
 //   - The runtime assets (guest kernel, guest OS image, cloud-hypervisor, virtiofsd)
 //     are on disk and passed as runtime asset paths.
-//   - The OCI bundle (config.json + populated rootfs/) is prepared per container.
+//   - Each container's bundle (overlay spec, rootfs/) is prepared. The OCI spec
+//     is built here from the request.
 func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkloadRequest) (resp *ateompb.RunWorkloadResponse, retErr error) {
 	if err := validateActorDirs(req.GetActorDirs()); err != nil {
 		return nil, err
@@ -613,7 +614,7 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 }
 
 // buildActorContainers prepares each of the actor's containers for the shared
-// micro-VM: it loads the OCI spec from the per-container bundle, injects guest DNS,
+// micro-VM: it builds the OCI spec, injects guest DNS,
 // and records the bundle rootfs that backs the overlay's RO lower. No host disk is
 // mounted here — the merged overlays are assembled in stageMergedRootfs after the
 // sandbox state is clean. Both RunWorkload and RestoreWorkload go through here.
@@ -622,10 +623,8 @@ func (s *AteomService) buildActorContainers(actorDirs *ateompb.ActorDirs, contai
 	for i, c := range containers {
 		cn := c.GetName()
 		bundle := ociBundlePath(actorDirs, cn)
-		spec, err := ocispec.Load(bundle)
-		if err != nil {
-			return nil, fmt.Errorf("while reading the OCI spec for %q: %w", cn, err)
-		}
+		// the guest has its own network stack, the spec's netns is never joined
+		spec := ocispec.Build(c, actorDirs, "")
 		if err := ocispec.ShapeMicroVM(spec, ocispec.MicroVMOptions{ActorDirs: actorDirs, ContainerID: cn}); err != nil {
 			return nil, fmt.Errorf("while shaping the OCI spec for %q: %w", cn, err)
 		}

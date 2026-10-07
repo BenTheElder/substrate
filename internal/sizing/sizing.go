@@ -19,7 +19,7 @@
 // leaf. ateom-microvm does not call ApplyToOCISpec: it uses SandboxSize only to
 // size the VM itself (VCPUs, and MemoryBytes via resolveGuestMemMiB). A
 // micro-VM container's own cgroup limit comes instead from that container's
-// declared `spec.containers[].resources`, written into its OCI spec by atelet.
+// declared `spec.containers[].resources`, carried in its OCI spec.
 package sizing
 
 import (

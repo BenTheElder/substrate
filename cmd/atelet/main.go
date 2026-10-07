@@ -524,9 +524,10 @@ func (s *AteomHerder) Run(ctx context.Context, req *ateletpb.RunRequest) (resp *
 	if err := s.systemInfoVolumes.Register(actorUID, actorRef, systemInfoVolumesFor(actorUID, req.GetSpec())); err != nil {
 		return nil, err
 	}
-	if err := s.prepareOCIBundles(ctx, actorUID, actorRef,
+	procs, err := s.prepareOCIBundles(ctx, actorUID, actorRef,
 		req.GetSpec(), sandboxRec.PauseImage, req.GetTargetAteomUid(),
-	); err != nil {
+	)
+	if err != nil {
 		return nil, err
 	}
 
@@ -535,7 +536,7 @@ func (s *AteomHerder) Run(ctx context.Context, req *ateletpb.RunRequest) (resp *
 		return nil, err
 	}
 
-	spec, err := buildAteomWorkloadSpec(req.GetSpec())
+	spec, err := buildAteomWorkloadSpec(req.GetSpec(), procs)
 	if err != nil {
 		return nil, apierror.InvalidArgument("invalid workload spec: %v", err)
 	}
@@ -658,7 +659,7 @@ func (s *AteomHerder) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRe
 	// Tell ateom to take the checkpoint and delete containers. ateom reports the
 	// exact files it wrote so we ship precisely that set (gVisor's image files,
 	// cloud-hypervisor's snapshot set, ...) rather than a hardcoded list.
-	spec, err := buildAteomWorkloadSpec(req.GetSpec())
+	spec, err := buildAteomWorkloadSpec(req.GetSpec(), nil)
 	if err != nil {
 		return nil, apierror.InvalidArgument("invalid workload spec: %v", err)
 	}
@@ -1185,6 +1186,7 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 	// TODO(dberkov): the old pause checkpoint files are not deleted after they are
 	// copied to checkpointDir for the LOCAL case.
 	var assetPaths map[string]string
+	var procs map[string]*ateompb.Process
 	// One per leg: a single field written from both goroutines would race.
 	var downloadErr, prepErr error
 	var prepFailedPhase string
@@ -1250,7 +1252,7 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 			return err
 		}
 		t := time.Now()
-		err = s.prepareOCIBundles(gctx, actorUID, actorRef, req.GetSpec(), runtimeRec.PauseImage, req.GetTargetAteomUid())
+		procs, err = s.prepareOCIBundles(gctx, actorUID, actorRef, req.GetSpec(), runtimeRec.PauseImage, req.GetTargetAteomUid())
 		dBundles = time.Since(t)
 		if err != nil {
 			prepFailedPhase = ateattr.SnapshotPhaseOCIUnpack
@@ -1275,7 +1277,7 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 
 	// Tell ateom to do runsc create + runsc restore for pause container and
 	// all application containers.
-	spec, err := buildAteomWorkloadSpec(req.GetSpec())
+	spec, err := buildAteomWorkloadSpec(req.GetSpec(), procs)
 	if err != nil {
 		return nil, apierror.InvalidArgument("invalid workload spec: %v", err)
 	}
@@ -1345,7 +1347,7 @@ func (s *AteomHerder) Terminate(ctx context.Context, req *ateletpb.TerminateRequ
 		return nil, fmt.Errorf("failed to dial ateom for terminate (actor: %s, actorUID: %s): %w", actorRef, actorUID, err)
 	}
 
-	spec, err := buildAteomWorkloadSpec(req.GetSpec())
+	spec, err := buildAteomWorkloadSpec(req.GetSpec(), nil)
 	if err != nil {
 		return nil, apierror.InvalidArgument("invalid workload spec: %v", err)
 	}
@@ -1547,12 +1549,11 @@ func (s *AteomHerder) downloadExternalCheckpoint(ctx context.Context, snapshotUR
 	return nil
 }
 
-// prepareOCIBundles pulls images and assembles OCI bundles for the pause
-// container and every application container in spec, in parallel. pauseImage
-// comes from the sandbox record, not the workload spec: it is sandbox
-// configuration, and on a restore it must be the image the snapshot was taken
-// with. It is empty for sandboxes without a pause container, which get no
-// pause bundle.
+// prepareOCIBundles lays out a bundle per container and returns each app
+// container's process, resolved against its image
+//
+// pauseImage comes from the sandbox record so a restore uses the image the
+// snapshot was taken with. It is empty when there is no pause container.
 func (s *AteomHerder) prepareOCIBundles(
 	ctx context.Context,
 	actorUID string,
@@ -1560,14 +1561,14 @@ func (s *AteomHerder) prepareOCIBundles(
 	spec *ateletpb.WorkloadSpec,
 	pauseImage string,
 	targetAteomUid string,
-) error {
+) (map[string]*ateompb.Process, error) {
 	// Prepare host folders for volume types that need them.
 	for _, vol := range spec.GetVolumes() {
 		switch vol.GetSource().(type) {
 		case *ateletpb.Volume_DurableDir:
 			volPath := ateletpath.DurableDirVolumeMountPoint(actorUID, vol.GetName())
 			if err := os.MkdirAll(volPath, 0o700); err != nil {
-				return fmt.Errorf("while creating %q: %w", volPath, err)
+				return nil, fmt.Errorf("while creating %q: %w", volPath, err)
 			}
 		}
 	}
@@ -1576,21 +1577,8 @@ func (s *AteomHerder) prepareOCIBundles(
 
 	if pauseImage != "" {
 		g.Go(func() error {
-			if err := prepareOCIDirectory(
-				gCtx,
-				s.imageCache,
-				actorUID,
-				ocispec.PauseContainer,
-				pauseImage,
-				[]string{"/pause"},
-				nil,
-				nil,
-				nodepath.ActorNetNSPath(actorUID),
-				nil, // pause is sandbox infra; it mounts no volumes.
-				nil,
-				nil, // pause only reaps; it needs no capabilities.
-				nil, // pause carries no user-declared limits.
-			); err != nil {
+			// pause is sandbox infra, it mounts no volumes
+			if _, err := prepareOCIDirectory(gCtx, s.imageCache, actorUID, ocispec.PauseContainer, pauseImage, nil, nil); err != nil {
 				return wrapFileSystemErr("while creating pause OCI bundle", err)
 			}
 			return nil
@@ -1598,35 +1586,29 @@ func (s *AteomHerder) prepareOCIBundles(
 	}
 
 	// Application containers.
+	var mu sync.Mutex
+	procs := make(map[string]*ateompb.Process, len(spec.GetContainers()))
 	for _, ctr := range spec.GetContainers() {
-		ctr := ctr
-		var envs []string
-		for _, env := range ctr.GetEnv() {
-			envs = append(envs, fmt.Sprintf("%s=%s", env.GetName(), env.GetValue()))
-		}
 		g.Go(func() error {
-			if err := prepareOCIDirectory(
-				gCtx,
-				s.imageCache,
-				actorUID,
-				ctr.GetName(),
-				ctr.GetImage(),
-				ctr.GetCommand(),
-				ctr.GetArgs(),
-				envs,
-				nodepath.ActorNetNSPath(actorUID),
-				spec.GetVolumes(),
-				ctr.GetVolumeMounts(),
-				resolveCapabilities(ctr.GetSecurityContext().GetCapabilities()),
-				ctr.GetResources(),
-			); err != nil {
+			imageCfg, err := prepareOCIDirectory(gCtx, s.imageCache, actorUID, ctr.GetName(), ctr.GetImage(), spec.GetVolumes(), ctr.GetVolumeMounts())
+			if err != nil {
 				return wrapFileSystemErr(fmt.Sprintf("while creating %q OCI bundle", ctr.GetName()), err)
 			}
+			proc, err := resolveProcess(imageCfg, ctr)
+			if err != nil {
+				return err
+			}
+			mu.Lock()
+			procs[ctr.GetName()] = proc
+			mu.Unlock()
 			return nil
 		})
 	}
 
-	return g.Wait()
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+	return procs, nil
 }
 
 // dialAteom opens (or reuses) the gRPC connection to the target ateom
@@ -1640,8 +1622,9 @@ func (s *AteomHerder) dialAteom(ctx context.Context, targetAteomUid string) (ate
 }
 
 // buildAteomWorkloadSpec projects the atelet-facing workload spec onto
-// the ateom-facing one.
-func buildAteomWorkloadSpec(spec *ateletpb.WorkloadSpec) (*ateompb.WorkloadSpec, error) {
+// the ateom-facing one. procs are the resolved processes by container name,
+// nil for calls that run nothing.
+func buildAteomWorkloadSpec(spec *ateletpb.WorkloadSpec, procs map[string]*ateompb.Process) (*ateompb.WorkloadSpec, error) {
 	volumes := make(map[string]*ateletpb.Volume)
 	for _, vol := range spec.GetVolumes() {
 		name := vol.GetName()
@@ -1696,9 +1679,18 @@ func buildAteomWorkloadSpec(spec *ateletpb.WorkloadSpec) (*ateompb.WorkloadSpec,
 			SystemInfoVolumeMounts: siMounts,
 			ImageVolumeMounts:      imgMounts,
 			WakeupProbe:            toAteomWakeupProbe(ctr.GetWakeupProbe()),
+			Process:                procs[ctr.GetName()],
+			Resources:              toAteomResourceLimits(ctr.GetResources()),
 		})
 	}
 	return out, nil
+}
+
+func toAteomResourceLimits(r *ateletpb.ResourceLimits) *ateompb.ResourceLimits {
+	if r == nil {
+		return nil
+	}
+	return &ateompb.ResourceLimits{MemoryBytes: r.GetMemoryBytes(), CpuMillis: r.GetCpuMillis()}
 }
 
 func toAteomEgressGateway(gateway *ateletpb.EgressGateway) *ateompb.EgressGateway {

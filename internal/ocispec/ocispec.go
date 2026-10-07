@@ -22,9 +22,11 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
+	"strings"
 
 	"github.com/agent-substrate/substrate/internal/imagecache"
-	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
+	"github.com/agent-substrate/substrate/internal/proto/ateompb"
 	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
@@ -33,29 +35,6 @@ const specFile = "config.json"
 
 // hostname is the UTS hostname for actor containers.
 const hostname = "actor"
-
-// Options describes one actor container. Args, Env and Capabilities arrive
-// already resolved.
-type Options struct {
-	Args []string
-	Env  []string
-	// NetNSPath is the network namespace the ateom runs the actor in.
-	NetNSPath    string
-	Volumes      []*ateletpb.Volume
-	VolumeMounts []*ateletpb.VolumeMount
-	Capabilities []string
-	// Resources are the container's own declared limits, or nil for none.
-	Resources *ateletpb.ResourceLimits
-
-	// The actor's directories the bind mount sources are joined from, one
-	// subdirectory per volume name.
-	DurableDirVolumeMountsDir string
-	VolumesDir                string
-	SystemInfoVolumeRootsDir  string
-	// BundlePath is this container's bundle, where its image volumes are
-	// composed.
-	BundlePath string
-}
 
 const (
 	// cpuQuotaPeriodUS is the CFS period the CPU quota is expressed against: a
@@ -71,7 +50,7 @@ const (
 // ociResources maps the resolved limits onto the OCI spec's linux.resources.
 // Returns nil when nothing is set, so the spec carries no linux.resources at
 // all for a container that declares no limits.
-func ociResources(r *ateletpb.ResourceLimits) *specs.LinuxResources {
+func ociResources(r *ateompb.ResourceLimits) *specs.LinuxResources {
 	if r == nil || (r.GetMemoryBytes() <= 0 && r.GetCpuMillis() <= 0) {
 		return nil
 	}
@@ -87,21 +66,23 @@ func ociResources(r *ateletpb.ResourceLimits) *specs.LinuxResources {
 	return out
 }
 
-// Build returns a runtime-neutral OCI spec for an actor container.
-func Build(o Options) *specs.Spec {
+// Build returns a runtime-neutral OCI spec for container c, with bind mount
+// sources under the actor's dirs.
+func Build(c *ateompb.Container, dirs *ateompb.ActorDirs, netNSPath string) *specs.Spec {
+	caps := c.GetProcess().GetCapabilities()
 	spec := &specs.Spec{
 		Process: &specs.Process{
 			User: specs.User{
 				UID: 0,
 				GID: 0,
 			},
-			Args: o.Args,
-			Env:  o.Env,
+			Args: c.GetProcess().GetArgs(),
+			Env:  c.GetProcess().GetEnv(),
 			Cwd:  "/",
 			Capabilities: &specs.LinuxCapabilities{
-				Bounding:  o.Capabilities,
-				Effective: o.Capabilities,
-				Permitted: o.Capabilities,
+				Bounding:  caps,
+				Effective: caps,
+				Permitted: caps,
 				// Inheritable and Ambient stay empty; capabilities inherit via
 				// Bounding.
 				//
@@ -150,7 +131,7 @@ func Build(o Options) *specs.Spec {
 				},
 				{
 					Type: "network",
-					Path: o.NetNSPath, // Will be created by ateom
+					Path: netNSPath,
 				},
 				{
 					Type: "ipc",
@@ -162,40 +143,52 @@ func Build(o Options) *specs.Spec {
 					Type: "mount",
 				},
 			},
-			Resources: ociResources(o.Resources),
+			Resources: ociResources(c.GetResources()),
 		},
 	}
 
-	volumesByName := make(map[string]*ateletpb.Volume, len(o.Volumes))
-	for _, vol := range o.Volumes {
-		volumesByName[vol.GetName()] = vol
-	}
-	for _, vm := range o.VolumeMounts {
-		var srcPath string
-		options := []string{"bind", "rw"}
-		switch volumesByName[vm.GetName()].GetSource().(type) {
-		case *ateletpb.Volume_DurableDir:
-			srcPath = filepath.Join(o.DurableDirVolumeMountsDir, vm.GetName())
-		case *ateletpb.Volume_External:
-			srcPath = filepath.Join(o.VolumesDir, vm.GetName())
-		case *ateletpb.Volume_SystemInfo:
-			srcPath = filepath.Join(o.SystemInfoVolumeRootsDir, vm.GetName())
-			options = []string{"bind", "ro"}
-		case *ateletpb.Volume_Image:
-			srcPath = imagecache.ImageVolumeMountPath(o.BundlePath, vm.GetName())
-			options = []string{"bind", "ro"}
-		default:
-			continue
-		}
-		spec.Mounts = append(spec.Mounts, specs.Mount{
-			Destination: vm.GetMountPath(),
-			Type:        "bind",
-			Source:      srcPath,
-			Options:     options,
-		})
-	}
-
+	spec.Mounts = append(spec.Mounts, volumeMounts(c, dirs)...)
 	return spec
+}
+
+// volumeMounts returns c's volume bind mounts, parents before children
+func volumeMounts(c *ateompb.Container, dirs *ateompb.ActorDirs) []specs.Mount {
+	bind := func(src, dst, mode string) specs.Mount {
+		return specs.Mount{
+			Destination: dst,
+			Type:        "bind",
+			Source:      src,
+			Options:     []string{"bind", mode},
+		}
+	}
+	var mounts []specs.Mount
+	for _, m := range c.GetDurableDirVolumeMounts() {
+		src := filepath.Join(dirs.GetDurableDirVolumeMountsDir(), m.GetVolumeName())
+		mounts = append(mounts, bind(src, m.GetMountPath(), "rw"))
+	}
+	for _, m := range c.GetCsiVolumeMounts() {
+		src := filepath.Join(dirs.GetVolumesDir(), m.GetVolumeName())
+		mounts = append(mounts, bind(src, m.GetMountPath(), "rw"))
+	}
+	for _, m := range c.GetSystemInfoVolumeMounts() {
+		src := filepath.Join(dirs.GetSystemInfoVolumeRootsDir(), m.GetVolumeName())
+		mounts = append(mounts, bind(src, m.GetMountPath(), "ro"))
+	}
+	bundle := filepath.Join(dirs.GetOciBundleDir(), c.GetName())
+	for _, m := range c.GetImageVolumeMounts() {
+		src := imagecache.ImageVolumeMountPath(bundle, m.GetVolumeName())
+		mounts = append(mounts, bind(src, m.GetMountPath(), "ro"))
+	}
+	// a nested mount has to come after its parent or the parent hides it,
+	// so order by depth like containerd's CRI does
+	slices.SortStableFunc(mounts, func(a, b specs.Mount) int {
+		return pathDepth(a.Destination) - pathDepth(b.Destination)
+	})
+	return mounts
+}
+
+func pathDepth(p string) int {
+	return len(strings.Split(filepath.Clean(p), "/"))
 }
 
 // Load reads the OCI spec of the bundle at bundlePath.

@@ -25,15 +25,14 @@ import (
 )
 
 // ImageVolumeMountPath is where one image volume is composed inside a
-// bundle. atelet writes it into config.json as the bind source; the ateom
-// mounts the volume there (see setupImageVolumes).
+// bundle, and the bind source in the container's OCI spec (see
+// setupImageVolumes).
 func ImageVolumeMountPath(bundlePath, volumeName string) string {
 	return filepath.Join(bundlePath, "volumes", volumeName)
 }
 
 // OverlaySpecFileName is the file atelet writes into each container bundle,
-// next to config.json, describing how to compose the bundle's rootfs from
-// cached layers. Its absence means the bundle's rootfs is a plain directory
+// describing how to compose the bundle's rootfs from cached layers. Its absence means the bundle's rootfs is a plain directory
 // (e.g. one prepared by a pre-imagecache atelet) and needs no mount.
 const OverlaySpecFileName = "rootfs-overlay.json"
 

@@ -49,7 +49,7 @@ const (
 )
 
 // procStatus is where the kernel reports this process's capability sets. Asking
-// the kernel — rather than reading back the OCI spec atelet wrote — is the whole
+// the kernel — rather than reading back the OCI spec — is the whole
 // point: it is what proves the sandbox actually applied the requested set.
 const procStatus = "/proc/self/status"
 

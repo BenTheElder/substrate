@@ -29,6 +29,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/agent-substrate/substrate/internal/nodepath"
 	"github.com/agent-substrate/substrate/internal/ocispec"
 	"github.com/agent-substrate/substrate/internal/proto/ateompb"
 	"github.com/agent-substrate/substrate/internal/sizing"
@@ -43,6 +44,8 @@ type runsc struct {
 	size sizing.SandboxSize
 	// durableVolumes are the durable-dir volume names declared to the sandbox.
 	durableVolumes []string
+	// spec is the workload, set when creating or restoring containers.
+	spec *ateompb.WorkloadSpec
 }
 
 // durableVolumeNames returns the sorted, deduplicated durable-dir volume names
@@ -58,13 +61,13 @@ func durableVolumeNames(spec *ateompb.WorkloadSpec) []string {
 	return slices.Compact(names)
 }
 
-// shapeSpec loads, shapes for gVisor, and saves the container's OCI spec.
-func (r *runsc) shapeSpec(containerName string) error {
-	bundle := ociBundlePath(r.actorDirs, containerName)
-	spec, err := ocispec.Load(bundle)
+// writeSpec writes the container's OCI spec, shaped for gVisor, to its bundle
+func (r *runsc) writeSpec(containerName string) error {
+	c, err := r.container(containerName)
 	if err != nil {
 		return err
 	}
+	spec := ocispec.Build(c, r.actorDirs, nodepath.ActorNetNSPath(r.actorUID))
 	ocispec.ShapeGVisor(spec, ocispec.GVisorOptions{
 		ActorUID:       r.actorUID,
 		ContainerName:  containerName,
@@ -72,14 +75,31 @@ func (r *runsc) shapeSpec(containerName string) error {
 		Size:           r.size,
 		ResolvConf:     resolvConfPath(r.actorDirs),
 	})
-	return ocispec.Save(bundle, spec)
+	return ocispec.Save(ociBundlePath(r.actorDirs, containerName), spec)
+}
+
+// container returns the named workload container, or the pause container
+func (r *runsc) container(name string) (*ateompb.Container, error) {
+	if name == ocispec.PauseContainer {
+		// pause only reaps, it needs no capabilities, volumes or limits
+		return &ateompb.Container{
+			Name:    ocispec.PauseContainer,
+			Process: &ateompb.Process{Args: []string{"/pause"}},
+		}, nil
+	}
+	for _, c := range r.spec.GetContainers() {
+		if c.GetName() == name {
+			return c, nil
+		}
+	}
+	return nil, fmt.Errorf("no container %q in the workload spec", name)
 }
 
 func (r *runsc) cmdCreate(ctx context.Context, out io.Writer, containerName string, additionalArgs []string) error {
 	slog.InfoContext(ctx, "About to run runsc create", slog.String("container", containerName))
 
-	if err := r.shapeSpec(containerName); err != nil {
-		return fmt.Errorf("while shaping the OCI spec for %q: %w", containerName, err)
+	if err := r.writeSpec(containerName); err != nil {
+		return fmt.Errorf("while writing the OCI spec for %q: %w", containerName, err)
 	}
 
 	args := []string{
@@ -266,8 +286,8 @@ func (r *runsc) cmdResume(ctx context.Context, containerName string) error {
 func (r *runsc) cmdRestore(ctx context.Context, out io.Writer, containerName, checkpointPath string) error {
 	slog.InfoContext(ctx, "About to run runsc restore", slog.String("container", containerName))
 
-	if err := r.shapeSpec(containerName); err != nil {
-		return fmt.Errorf("while shaping the OCI spec for %q: %w", containerName, err)
+	if err := r.writeSpec(containerName); err != nil {
+		return fmt.Errorf("while writing the OCI spec for %q: %w", containerName, err)
 	}
 
 	restoreArgs := []string{
