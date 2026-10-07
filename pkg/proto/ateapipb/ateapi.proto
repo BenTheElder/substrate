@@ -2243,7 +2243,7 @@ service WorkerService {
   // on behalf of a particular actor.
   //
   // SPIFFE URI: spiffe://${trustdomain}/ateom-for-actor/${atespace}/${actor}
-  rpc MintAteomActorCertificate(MintAteomActorCertificateRequest) returns (MintAteomActorCertificateResponse);
+  rpc MintWorkerActorCertificate(MintWorkerActorCertificateRequest) returns (MintWorkerActorCertificateResponse);
 
   // RequestActorSuspend asks the control plane to suspend an Actor that the
   // calling Worker hosts. Only the Worker can observe what makes an Actor
@@ -2294,8 +2294,8 @@ message RegisterWorkerResponse {
   Worker worker = 1;
 }
 
-// Request message for MintAteomActorCertificate.
-message MintAteomActorCertificateRequest {
+// Request message for MintWorkerActorCertificate.
+message MintWorkerActorCertificateRequest {
   // The actor for which the certificate should be issued.
   //
   // Must be a valid actor that currently exists according to the actor store.
@@ -2320,8 +2320,8 @@ message MintAteomActorCertificateRequest {
   bytes certificate_signing_request = 3;
 }
 
-// Response message for MintAteomActorCertificate.
-message MintAteomActorCertificateResponse {
+// Response message for MintWorkerActorCertificate.
+message MintWorkerActorCertificateResponse {
   // Response contains a list of DER encoded certificates. The first entry is the
   // leaf certificate, and any remaining entries are intermediates in
   // leaf-to-root order.
