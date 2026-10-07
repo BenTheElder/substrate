@@ -28,7 +28,7 @@ import (
 
 // Every RPC rejects a request without ActorDirs before touching any state.
 func TestRPCsRejectMissingActorDirs(t *testing.T) {
-	s := &AteomService{}
+	s := &AteWorkerService{}
 	ctx := context.Background()
 	for name, call := range map[string]func() error{
 		"RunWorkload": func() error {
@@ -55,7 +55,7 @@ func TestRPCsRejectMissingActorDirs(t *testing.T) {
 }
 
 func TestRPCsRejectUntrustedRunscPath(t *testing.T) {
-	s := &AteomService{}
+	s := &AteWorkerService{}
 	ctx := context.Background()
 	dirs := &ateworkerpb.ActorDirs{
 		RootDir:                   "/node/actors/actor-a",

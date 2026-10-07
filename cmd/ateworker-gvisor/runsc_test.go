@@ -148,7 +148,7 @@ func TestRestoreArgs(t *testing.T) {
 }
 
 func TestRestoreWorkloadRejectsEmptyRestoreDir(t *testing.T) {
-	s := &AteomService{
+	s := &AteWorkerService{
 		locks:    actorlock.New(),
 		inFlight: actorlock.NewInFlight(),
 	}

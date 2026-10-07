@@ -136,7 +136,7 @@ func TestMintWorkerActorCertificate(t *testing.T) {
 		t.Fatalf("ActorIdentityFromCertificate: %v", err)
 	}
 	if identity != nil {
-		t.Errorf("ActorIdentity = %+v, want nil (ateom certificates should not carry ActorIdentity)", identity)
+		t.Errorf("ActorIdentity = %+v, want nil (worker certificates should not carry ActorIdentity)", identity)
 	}
 }
 

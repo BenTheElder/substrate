@@ -402,7 +402,7 @@ func (r *runsc) waitArgs(containerName string) []string {
 }
 
 // cmdWait blocks until the given container's process exits. Used during
-// graceful shutdown to confirm the actor has stopped before ateom exits.
+// graceful shutdown to confirm the actor has stopped before ateworker exits.
 //
 // Deliberately outside the reaper: this blocks for as long as the actor runs,
 // and an entry held that long would hold off reaping and, past MaxDefer, every

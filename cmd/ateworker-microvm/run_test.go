@@ -210,14 +210,14 @@ func TestWorkloadIDs(t *testing.T) {
 }
 
 func TestGuestConfigDebugConsole(t *testing.T) {
-	_, _, prodParams := (&AteomService{guestDebug: false}).guestConfig()
+	_, _, prodParams := (&AteWorkerService{guestDebug: false}).guestConfig()
 	for _, forbidden := range []string{"agent.debug_console", "agent.debug_console_vport", "1026"} {
 		if strings.Contains(prodParams, forbidden) {
 			t.Errorf("expected guestConfig() with guestDebug=false not to contain %q, but got %q", forbidden, prodParams)
 		}
 	}
 
-	_, _, dbgParams := (&AteomService{guestDebug: true}).guestConfig()
+	_, _, dbgParams := (&AteWorkerService{guestDebug: true}).guestConfig()
 	for _, want := range []string{"agent.log=debug", "agent.debug_console", "agent.debug_console_vport=1026"} {
 		if !strings.Contains(dbgParams, want) {
 			t.Errorf("expected guestConfig() with guestDebug=true to contain %q, but got %q", want, dbgParams)

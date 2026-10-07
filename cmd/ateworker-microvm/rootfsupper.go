@@ -31,7 +31,7 @@ package main
 // overlay on a virtio-fs upper needed three kernel workarounds. Snapshots
 // from the tmpfs era still restore, see below.)
 //
-// The directory is owned entirely by ateom (atelet never touches it): created
+// The directory is owned entirely by ateworker (atelet never touches it): created
 // pristine at cold boot, re-materialized from the snapshot at restore, and
 // removed at teardown — after CleanupSandboxState has dropped the overlay
 // mounts that use it.
@@ -40,8 +40,8 @@ package main
 // ships it as one tar per container (rootfsUpperTarFile), taken while the
 // guest is paused (the share is write-through, so a paused guest's completed
 // writes are already in the upper). Each tar holds only the contents of that
-// container's upperdir: ateom creates the directory layout itself on restore,
-// so nothing in the snapshot decides a path ateom later mounts or wipes. A
+// container's upperdir: ateworker creates the directory layout itself on restore,
+// so nothing in the snapshot decides a path ateworker later mounts or wipes. A
 // DATA snapshot deliberately excludes rootfs state: the workload cold-starts
 // on restore.
 
@@ -81,7 +81,7 @@ func containerNames(containers []*ateworkerpb.Container) []string {
 
 // resetRootfsUpperDir gives a cold boot a pristine upper directory: a cold
 // boot must start from the bare image, and atelet's actor-dir reset does not
-// know about this directory, so ateom wipes any previous activation's contents
+// know about this directory, so ateworker wipes any previous activation's contents
 // itself. The per-container fs/work subdirectories are created by the overlay
 // staging (kata.StageMergedRootfs).
 func resetRootfsUpperDir(actorDirs *ateworkerpb.ActorDirs) error {

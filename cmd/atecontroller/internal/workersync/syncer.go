@@ -271,7 +271,7 @@ func (s *WorkerPoolSyncer) reconcile(ctx context.Context, key workerKey) error {
 	if pod.DeletionTimestamp != nil {
 		// The pod has entered Terminating: mark the worker DRAINING so the
 		// scheduler stops routing new actors to it. We deliberately do NOT touch
-		// the bound actor here — inside the pod ateom has received SIGTERM and is
+		// the bound actor here — inside the pod worker has received SIGTERM and is
 		// gracefully shutting the actor down. Actor cleanup happens on the Pod
 		// Deleted event.
 		return s.markWorkerDraining(ctx, key)
@@ -284,7 +284,7 @@ func (s *WorkerPoolSyncer) reconcile(ctx context.Context, key workerKey) error {
 	}
 	if !isWorkerEligible(pod) {
 		// The pod has no IP or is not Ready yet; a later update event re-enqueues
-		// it. A registered Worker still takes a raised epoch: an ateom that is
+		// it. A registered Worker still takes a raised epoch: a worker that is
 		// restarting is not Ready, but its Actors are already lost.
 		return s.raiseEpoch(ctx, key, pod)
 	}
@@ -294,7 +294,7 @@ func (s *WorkerPoolSyncer) reconcile(ctx context.Context, key workerKey) error {
 // workerContainer is the name of the worker pod's worker container.
 const workerContainer = "worker"
 
-// podEpoch counts the runs of the pod's ateom container: 1 for its first run
+// podEpoch counts the runs of the pod's worker container: 1 for its first run
 // and one more for each restart. 0 until kubelet reports the container.
 func podEpoch(pod *corev1.Pod) int64 {
 	for _, cs := range pod.Status.ContainerStatuses {
@@ -361,7 +361,7 @@ func (s *WorkerPoolSyncer) createOrUpdateWorker(ctx context.Context, key workerK
 			Labels:          pool.GetLabels(),
 			Epoch:           podEpoch(pod),
 			// Capacity is the Worker's to report, not the syncer's to infer
-			// from the pod: it is what the ateom can actually supply. Until
+			// from the pod: it is what the worker can actually supply. Until
 			// that report lands, CreateWorker's reified ceiling holds the
 			// Worker to a single Actor.
 		}

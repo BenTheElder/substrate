@@ -40,7 +40,7 @@ func IsMicroVM() bool { return SandboxClass() == SandboxClassMicroVM }
 
 // Fixture identifies an installed WorkerPool + ActorTemplate pair (both carry
 // the same name) that suites either create Actors from directly or copy the
-// resolved runtime — sandbox class, ateom image, container images — out of.
+// resolved runtime — sandbox class, worker image, container images — out of.
 type Fixture struct {
 	Namespace string
 	Name      string
@@ -52,7 +52,7 @@ type Fixture struct {
 // SubstrateFixture identifies an installed substrate ActorTemplate (the proto
 // resource created through the ate API, not the CRD) plus the CRD WorkerPool
 // backing it. Suites copy the resolved runtime — container images, sandbox
-// config, sandbox size — out of the template, and the ateom image and sandbox
+// config, sandbox size — out of the template, and the worker image and sandbox
 // class out of the pool.
 type SubstrateFixture struct {
 	// Atespace and Name locate the ActorTemplate for GetActorTemplate.
@@ -204,7 +204,7 @@ func fixtureSubstitutions(bucket, name string) (inline, blocks map[string]string
 	// classes, so only same-class pools are eligible to run these actors.
 	blocks["${TEMPLATE_SANDBOX_CLASS}"] = "  sandboxClass: microvm"
 	// Only for fixtures that declare no limits of their own. Without them the
-	// guest boots at ateom's default size (2GiB), and several of those do
+	// guest boots at worker's default size (2GiB), and several of those do
 	// not fit beside the demo pools on CI's single kind node. These size the VM
 	// itself — see internal/sizing.
 	blocks["${TEMPLATE_RESOURCES}"] = "  resources:\n    limits:\n      cpu: \"1\"\n      memory: 512Mi"

@@ -57,7 +57,7 @@ type containerStatsReader interface {
 
 // guestStatsTarget is everything GetWorkloadStats needs to sample a live guest.
 //
-// It exists so the handler never reads AteomService.running, which lock guards:
+// It exists so the handler never reads AteWorkerService.running, which lock guards:
 // the handler must not take lock (see below), and a map read racing a lifecycle
 // RPC's write is a data race whatever the read is for. The fields it holds are
 // the ones RunWorkload and RestoreWorkload already produce.
@@ -94,7 +94,7 @@ type guestStatsTarget struct {
 // It must not take the actor's lifecycle lock, which is held across a whole
 // cold boot, snapshot, or restore; blocking there would silence the poller
 // through the phases whose usage matters most.
-func (s *AteomService) GetWorkloadStats(ctx context.Context, req *ateworkerpb.GetWorkloadStatsRequest) (*ateworkerpb.GetWorkloadStatsResponse, error) {
+func (s *AteWorkerService) GetWorkloadStats(ctx context.Context, req *ateworkerpb.GetWorkloadStatsRequest) (*ateworkerpb.GetWorkloadStatsResponse, error) {
 	if req.GetActorUid() == "" {
 		return nil, apierror.InvalidArgument("actor_uid is required")
 	}
@@ -137,7 +137,7 @@ func (s *AteomService) GetWorkloadStats(ctx context.Context, req *ateworkerpb.Ge
 // ateworkerpb.Worker/GetActiveWorkloadStats: the discovery read, sampling
 // whatever is executing with no identity asserted. Same lock discipline as
 // GetWorkloadStats above, for the same reasons.
-func (s *AteomService) GetActiveWorkloadStats(ctx context.Context, req *ateworkerpb.GetActiveWorkloadStatsRequest) (*ateworkerpb.GetActiveWorkloadStatsResponse, error) {
+func (s *AteWorkerService) GetActiveWorkloadStats(ctx context.Context, req *ateworkerpb.GetActiveWorkloadStatsRequest) (*ateworkerpb.GetActiveWorkloadStatsResponse, error) {
 	hosted := s.hostedActors()
 	sweepCtx, cancel := context.WithTimeout(ctx, statsSweepBudget)
 	defer cancel()
@@ -170,7 +170,7 @@ func (s *AteomService) GetActiveWorkloadStats(ctx context.Context, req *ateworke
 // sampleHostedGuest measures one actor for the discovery read, or returns nil
 // when it is no longer hosted. A guest not reached before ctx is done, or that
 // does not answer, is pending.
-func (s *AteomService) sampleHostedGuest(ctx context.Context, h *hostedActor, slots chan struct{}, stale *atomic.Bool) *ateworkerpb.WorkloadStatsSample {
+func (s *AteWorkerService) sampleHostedGuest(ctx context.Context, h *hostedActor, slots chan struct{}, stale *atomic.Bool) *ateworkerpb.WorkloadStatsSample {
 	sample := pendingSample(&h.attribution)
 	select {
 	case slots <- struct{}{}:
@@ -231,9 +231,9 @@ var errStaleGuestTarget = errors.New("guest agent connection belongs to a differ
 // two RPCs express the routine ones differently: an error code for the keyed
 // read, a pending entry for the discovery read. The read holds no lock, so the
 // keyed caller re-checks the actor record it loaded after this returns.
-func (s *AteomService) sampleGuest(ctx context.Context, active *resources.ActorAttribution) (*ateworkerpb.WorkloadStatsSample, error) {
+func (s *AteWorkerService) sampleGuest(ctx context.Context, active *resources.ActorAttribution) (*ateworkerpb.WorkloadStatsSample, error) {
 	// The actor is the one here, but there is no guest to ask yet. Usually that
-	// is a poll landing in the boot or the restore: the ateom retains the
+	// is a poll landing in the boot or the restore: the ateworker retains the
 	// attribution from the moment it accepts the actor, and the target is only
 	// published once the containers are up. It is also what a teardown looks
 	// like from here, since teardownActor clears the target before it closes

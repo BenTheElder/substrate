@@ -160,7 +160,7 @@ func TestSnapshotPhaseAttrsFailure(t *testing.T) {
 }
 
 // TestScopeLogValue pins the mapping onto the shared scope values, so the
-// ateom and atelet records of one operation agree on the scope they carry.
+// ateworker and atelet records of one operation agree on the scope they carry.
 func TestScopeLogValue(t *testing.T) {
 	t.Parallel()
 

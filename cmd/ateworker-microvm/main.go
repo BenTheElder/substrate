@@ -115,7 +115,7 @@ func do(ctx context.Context) error {
 	// ends of the same decision: Dial already treats an absent socket as a
 	// fallback rather than an error, and atelet logs and keeps going when it
 	// cannot serve the relay at all. What is lost here is the node-local export
-	// path, not the ateom's ability to run actors, and failing the worker pod
+	// path, not the ateworker's ability to run actors, and failing the worker pod
 	// over its telemetry route would turn a misconfigured flag into an outage.
 	relayConn, err := otlprelay.Dial(ctx, *otlpRelaySocket)
 	if err != nil {
@@ -131,7 +131,7 @@ func do(ctx context.Context) error {
 		Sampling:     serverboot.ResolveTraceSampling(ctx, serverboot.ParentRatioSampling(serverboot.ControlPlaneTraceRatio)),
 		ExporterConn: relayConn,
 		// So the spans say which path they took, including when relayConn is nil
-		// because the dial above failed and this ateom is exporting directly.
+		// because the dial above failed and this ateworker is exporting directly.
 		RelayCapable: true,
 	})
 	if err != nil {
@@ -159,17 +159,17 @@ func do(ctx context.Context) error {
 		defer serverboot.ShutdownProvider("LoggerProvider", lp.Shutdown)
 	}
 
-	// Create ateom dir.
-	ateomDir := nodepath.AteomPath(*podUID)
-	if err := resources.ValidateAteomUID(*podUID); err != nil {
-		return fmt.Errorf("in resources.ValidateAteomUID: %w", err)
+	// Create ateworker dir.
+	ateworkerDir := nodepath.WorkerPath(*podUID)
+	if err := resources.ValidateWorkerPodUID(*podUID); err != nil {
+		return fmt.Errorf("in resources.ValidateWorkerPodUID: %w", err)
 	}
-	if err := os.MkdirAll(ateomDir, 0o700); err != nil {
-		return fmt.Errorf("in os.MkdirAll(%q): %w", ateomDir, err)
+	if err := os.MkdirAll(ateworkerDir, 0o700); err != nil {
+		return fmt.Errorf("in os.MkdirAll(%q): %w", ateworkerDir, err)
 	}
-	// Clean up the ateom directory during graceful shutdown (#1677).
+	// Clean up the ateworker directory during graceful shutdown (#1677).
 	defer func() {
-		if err := os.RemoveAll(ateomDir); err != nil {
+		if err := os.RemoveAll(ateworkerDir); err != nil {
 			slog.ErrorContext(ctx, "Failed to remove the worker directory on shutdown", slog.Any("err", err))
 		}
 	}()
@@ -194,7 +194,7 @@ func do(ctx context.Context) error {
 	}
 
 	// Clean up any old socket.
-	sockPath := nodepath.AteomSocketPath(*podUID)
+	sockPath := nodepath.WorkerSocketPath(*podUID)
 	if err := os.RemoveAll(sockPath); err != nil {
 		return fmt.Errorf("while removing %q: %w", sockPath, err)
 	}
@@ -220,14 +220,14 @@ func do(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	ateomService := NewService(*podUID, *chBinary, *guestDebug, *vmmMemReserve, *maxActors, tunnel, actorLogger)
-	ateomService.actorCgroups = actorCgroups
+	ateworkerService := NewService(*podUID, *chBinary, *guestDebug, *vmmMemReserve, *maxActors, tunnel, actorLogger)
+	ateworkerService.actorCgroups = actorCgroups
 
 	svr := grpc.NewServer(
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.UnaryInterceptor(ateinterceptors.InternalServerUnaryInterceptor),
 	)
-	ateworkerpb.RegisterWorkerServer(svr, ateomService)
+	ateworkerpb.RegisterWorkerServer(svr, ateworkerService)
 	reflection.Register(svr)
 	readiness := &serverboot.Readiness{}
 
@@ -245,7 +245,7 @@ func do(ctx context.Context) error {
 		readiness.MarkNotReady()
 		// Use a fresh context: the do() context is torn down on return, but the
 		// shutdown must outlive it until the guest has stopped and the VM is down.
-		ateomService.gracefulShutdown(context.Background())
+		ateworkerService.gracefulShutdown(context.Background())
 		// Only now stop the server, which blocks until any in-flight RPC (notably a
 		// concurrent CheckpointWorkload) has completed, then unblocks svr.Serve below.
 		svr.GracefulStop()
@@ -258,7 +258,7 @@ func do(ctx context.Context) error {
 	// that reaches here is a misconfiguration no restart-in-place will fix.
 	go func() {
 		err := ateom.Report(ctx, ateom.ReportConfig{
-			SocketPath:           nodepath.AteomSupportSocket,
+			SocketPath:           nodepath.WorkerSupportSocket,
 			CredentialBundlePath: tunnelConfig.CredentialBundle,
 			TrustBundlePath:      tunnelConfig.TrustBundle,
 			AteletSPIFFEID:       tunnelConfig.BrokerIdentity,
@@ -312,8 +312,8 @@ const (
 	rpcCheckpointWorkload = "CheckpointWorkload"
 )
 
-// AteomService is the cloud-hypervisor implementation of ateworkerpb.WorkerServer.
-type AteomService struct {
+// AteWorkerService is the cloud-hypervisor implementation of ateworkerpb.WorkerServer.
+type AteWorkerService struct {
 	ateworkerpb.UnimplementedWorkerServer
 
 	// Serializes lifecycle RPCs per actor.
@@ -356,11 +356,11 @@ type AteomService struct {
 	actorCgroups bool
 }
 
-var _ ateworkerpb.WorkerServer = (*AteomService)(nil)
+var _ ateworkerpb.WorkerServer = (*AteWorkerService)(nil)
 
-// NewService creates a new AteomService.
-func NewService(podUID, chBinary string, guestDebug bool, memReserveMiB, maxActors int, tunnel *ateomtunnel.Tunnel, actorLogger *actorlog.ActorLogger) *AteomService {
-	return &AteomService{
+// NewService creates a new AteWorkerService.
+func NewService(podUID, chBinary string, guestDebug bool, memReserveMiB, maxActors int, tunnel *ateomtunnel.Tunnel, actorLogger *actorlog.ActorLogger) *AteWorkerService {
+	return &AteWorkerService{
 		locks:         actorlock.New(),
 		inFlight:      actorlock.NewInFlight(),
 		actors:        map[string]*hostedActor{},
@@ -375,7 +375,7 @@ func NewService(podUID, chBinary string, guestDebug bool, memReserveMiB, maxActo
 }
 
 // beginRPC registers before checking the drain flag so shutdown cannot miss it.
-func (s *AteomService) beginRPC(actorUID, name string, cancel context.CancelFunc) (func(), error) {
+func (s *AteWorkerService) beginRPC(actorUID, name string, cancel context.CancelFunc) (func(), error) {
 	release := s.inFlight.Add(actorUID, name, cancel)
 	if err := s.rejectIfDraining(); err != nil {
 		release()
@@ -404,9 +404,9 @@ func validateRuntimeAssetPaths(paths map[string]string) error {
 	return nil
 }
 
-// rejectIfDraining returns a codes.Unavailable error if ateom has begun graceful
+// rejectIfDraining returns a codes.Unavailable error if ateworker has begun graceful
 // shutdown, so the control plane reschedules the actor onto a live worker.
-func (s *AteomService) rejectIfDraining() error {
+func (s *AteWorkerService) rejectIfDraining() error {
 	if s.shuttingDown.Load() {
 		return apierror.Unavailable("worker draining: not accepting new workloads")
 	}
@@ -414,7 +414,7 @@ func (s *AteomService) rejectIfDraining() error {
 }
 
 // cancelStartups cancels all boots and restores, leaving checkpoints running.
-func (s *AteomService) cancelStartups(ctx context.Context) {
+func (s *AteWorkerService) cancelStartups(ctx context.Context) {
 	for _, actorUID := range s.inFlight.CancelStartups() {
 		slog.InfoContext(ctx, "Cancelling in-progress workload startup RPC due to graceful shutdown",
 			slog.String("actorUID", actorUID))

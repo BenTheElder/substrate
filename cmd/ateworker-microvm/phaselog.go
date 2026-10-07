@@ -76,7 +76,7 @@ type phase struct {
 	d    time.Duration
 }
 
-// scopeLogValue maps the ateom wire enum onto the shared scope label values,
+// scopeLogValue maps the ateworker wire enum onto the shared scope label values,
 // the same way ateattr.SnapshotScopeValue does for the atelet enum. An
 // unrecognized scope reports as unknown rather than stringified, so no wire
 // value can widen the value set readers key on.

@@ -46,12 +46,12 @@ const defaultCgroupRoot = "/sys/fs/cgroup"
 // and gofer spawn in cgroup.RunInCgroup — so the sentry lands in the leaf of
 // the pause container, the first one RunWorkload and RestoreWorkload create.
 //
-// The leaf is a direct child of the delegated scope rather than of ateom's own
+// The leaf is a direct child of the delegated scope rather than of ateworker's own
 // cgroup, because runsc resolves cgroupsPath against the parent of the cgroup
 // it is running in: cgroup v2 forbids a cgroup from holding processes and
 // delegating controllers to children at once, so runsc walks up one level to
 // find a directory it is allowed to create in. ateomcgroup.Delegate moves
-// ateom into /sys/fs/cgroup/ateom precisely so that one level up is the
+// ateworker into /sys/fs/cgroup/ateworker precisely so that one level up is the
 // delegated scope.
 //
 // The actor's own containers get leaves too, since cmdCreate shapes a
@@ -91,7 +91,7 @@ const sandboxCgroupContainer = ocispec.PauseContainer
 // It must not take the actor's lifecycle lock, which is held across whole
 // boots and checkpoints: polls would stall behind runsc, and a checkpoint
 // would wait on telemetry. The cgroup files are read with no lock held.
-func (s *AteomService) GetWorkloadStats(ctx context.Context, req *ateworkerpb.GetWorkloadStatsRequest) (*ateworkerpb.GetWorkloadStatsResponse, error) {
+func (s *AteWorkerService) GetWorkloadStats(ctx context.Context, req *ateworkerpb.GetWorkloadStatsRequest) (*ateworkerpb.GetWorkloadStatsResponse, error) {
 	if req.GetActorUid() == "" {
 		return nil, apierror.InvalidArgument("actor_uid is required")
 	}
@@ -108,7 +108,7 @@ func (s *AteomService) GetWorkloadStats(ctx context.Context, req *ateworkerpb.Ge
 	sample, err := s.sampleSandbox(active)
 	if err != nil {
 		// The requested actor is the active one but its cgroup is not there.
-		// Most often that is a poll landing in the boot: the ateom retains the
+		// Most often that is a poll landing in the boot: the ateworker retains the
 		// attribution from the moment it accepts the actor, before runsc has
 		// created the leaf. The other way in is a sandbox that went away
 		// underneath the read, which the next CheckpointWorkload turns into the
@@ -135,7 +135,7 @@ func (s *AteomService) GetWorkloadStats(ctx context.Context, req *ateworkerpb.Ge
 // ateworkerpb.Worker/GetActiveWorkloadStats: the discovery read, sampling
 // whatever is executing with no identity asserted. Same lock discipline as
 // GetWorkloadStats above, for the same reasons.
-func (s *AteomService) GetActiveWorkloadStats(ctx context.Context, req *ateworkerpb.GetActiveWorkloadStatsRequest) (*ateworkerpb.GetActiveWorkloadStatsResponse, error) {
+func (s *AteWorkerService) GetActiveWorkloadStats(ctx context.Context, req *ateworkerpb.GetActiveWorkloadStatsRequest) (*ateworkerpb.GetActiveWorkloadStatsResponse, error) {
 	hosted := s.hostedActors()
 	samples := make([]*ateworkerpb.WorkloadStatsSample, 0, len(hosted))
 	for _, h := range hosted {
@@ -189,7 +189,7 @@ func pendingSample(active *resources.ActorAttribution) *ateworkerpb.WorkloadStat
 // code for the keyed read, a normal EXECUTING answer for the discovery read.
 // The read holds no lock, so the keyed caller re-checks the actor record it
 // loaded after this returns.
-func (s *AteomService) sampleSandbox(active *resources.ActorAttribution) (*ateworkerpb.WorkloadStatsSample, error) {
+func (s *AteWorkerService) sampleSandbox(active *resources.ActorAttribution) (*ateworkerpb.WorkloadStatsSample, error) {
 	read := s.readSandboxCgroup
 	if read == nil {
 		read = cgroupstats.Read

@@ -26,7 +26,7 @@ const (
 	DefaultVCPUs = 1
 )
 
-// BaseKernelParams is the guest kernel command line parameters ateom boots with
+// BaseKernelParams is the guest kernel command line parameters ateworker boots with
 const BaseKernelParams = "cgroup_no_v1=all systemd.unified_cgroup_hierarchy=1"
 
 // WithAgentDebug enables guest agent debug logging and the debug console on vsock 1026

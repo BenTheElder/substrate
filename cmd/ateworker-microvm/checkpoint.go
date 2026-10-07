@@ -43,7 +43,7 @@ import (
 //
 // What the snapshot holds depends on the requested scope:
 //
-//   - FULL: the whole guest. ateom drives the CH REST api-socket: pause -> snapshot
+//   - FULL: the whole guest. ateworker drives the CH REST api-socket: pause -> snapshot
 //     file://<checkpoint_dir> (config.json + state.json + sparse memory-ranges)
 //     -> tear the VMM down. Each container's rootfs is overlay(virtio-fs RO lower +
 //     disk-backed upper): the upper is host-backed like the durable-dir volumes and
@@ -59,7 +59,7 @@ import (
 //
 // Allow checkpointing even if the pod is shutting down. This will allow actors
 // (or the harness) to suspend on shutdown.
-func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateworkerpb.CheckpointWorkloadRequest) (_ *ateworkerpb.CheckpointWorkloadResponse, err error) {
+func (s *AteWorkerService) CheckpointWorkload(ctx context.Context, req *ateworkerpb.CheckpointWorkloadRequest) (_ *ateworkerpb.CheckpointWorkloadResponse, err error) {
 	if err := validateActorDirs(req.GetActorDirs()); err != nil {
 		return nil, err
 	}
@@ -125,7 +125,7 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateworkerpb.
 	}
 
 	// The actor's CH was booted by RunWorkload or relaunched by RestoreWorkload;
-	// either way ateom owns it and tracks its api-socket.
+	// either way ateworker owns it and tracks its api-socket.
 	ra := s.runningVM(actorUID)
 	chSocket := kata.CLHSocketPath(actorUID)
 	if ra != nil && ra.apiSocket != "" {
@@ -236,7 +236,7 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateworkerpb.
 // snapshotVMState captures the paused guest into checkpointDir: the CH snapshot
 // (config.json + state.json + memory-ranges) plus the base-id the restore side
 // needs, and returns how long the snapshot itself took.
-func (s *AteomService) snapshotVMState(ctx context.Context, client *ch.Client, ra *runningActor, actorUID, checkpointDir string) (time.Duration, error) {
+func (s *AteWorkerService) snapshotVMState(ctx context.Context, client *ch.Client, ra *runningActor, actorUID, checkpointDir string) (time.Duration, error) {
 	// Record the FROZEN base id (the id the guest's virtio-fs find-paths are pinned
 	// to, <baseID>/rootfs). For a cold-run actor this is its own id; for a restored
 	// actor it is the golden id propagated via ra.baseID (set from the snapshot we
@@ -311,9 +311,9 @@ func listFiles(dir string) ([]string, error) {
 	return files, nil
 }
 
-// teardownActor stops the ateom-owned CH VMM for an actor. ra may be
-// nil (e.g. ateom restarted and lost in-memory state).
-func (s *AteomService) teardownActor(ctx context.Context, id string, actorDirs *ateworkerpb.ActorDirs, ra *runningActor, client *ch.Client) error {
+// teardownActor stops the ateworker-owned CH VMM for an actor. ra may be
+// nil (e.g. ateworker restarted and lost in-memory state).
+func (s *AteWorkerService) teardownActor(ctx context.Context, id string, actorDirs *ateworkerpb.ActorDirs, ra *runningActor, client *ch.Client) error {
 	// Stop offering the guest to GetWorkloadStats first, before anything below
 	// makes it stop answering. Clearing it here rather than alongside the
 	// attribution is what keeps a poll that lands mid-teardown on the
@@ -347,7 +347,7 @@ func (s *AteomService) teardownActor(ctx context.Context, id string, actorDirs *
 			_ = agent.Close()
 		}
 
-		// Kill the CH process ateom launched.
+		// Kill the CH process ateworker launched.
 		if ra.chCmd != nil && ra.chCmd.Process != nil {
 			_ = ra.chCmd.Process.Kill()
 			_, _ = ra.chCmd.Process.Wait()
@@ -360,13 +360,13 @@ func (s *AteomService) teardownActor(ctx context.Context, id string, actorDirs *
 	}
 
 	// Sweep any leftover per-sandbox host-side state + orphaned per-sandbox
-	// processes. This is ateom's own cleanup (process kill + unmount + rm) —
+	// processes. This is ateworker's own cleanup (process kill + unmount + rm) —
 	// it also drops the merged rootfs overlay mounts, which MUST come before
 	// the upper-dir removal below (removing a live overlay's upperdir would
 	// corrupt the mount rather than delete the files).
 	s.cleanupSandboxState(ctx, id)
 
-	// Remove the rootfs upper dir: ateom owns it — atelet's actor-dir reset
+	// Remove the rootfs upper dir: ateworker owns it — atelet's actor-dir reset
 	// doesn't know it — and its absence is what marks a worker as holding no
 	// disk-backed upper. Runs after the checkpoint tar, which is already on disk.
 	if err := os.RemoveAll(rootfsUpperDir(actorDirs)); err != nil {
@@ -385,7 +385,7 @@ func (s *AteomService) teardownActor(ctx context.Context, id string, actorDirs *
 
 // TerminateWorkload stops the running actor, tears down its VMM, and cleans up
 // networking and overlays.
-func (s *AteomService) TerminateWorkload(ctx context.Context, req *ateworkerpb.TerminateWorkloadRequest) (*ateworkerpb.TerminateWorkloadResponse, error) {
+func (s *AteWorkerService) TerminateWorkload(ctx context.Context, req *ateworkerpb.TerminateWorkloadRequest) (*ateworkerpb.TerminateWorkloadResponse, error) {
 	if err := validateActorDirs(req.GetActorDirs()); err != nil {
 		return nil, err
 	}
@@ -406,7 +406,7 @@ func (s *AteomService) TerminateWorkload(ctx context.Context, req *ateworkerpb.T
 }
 
 // stopActorVM tears down the actor's micro-VM, if any, keeping it hosted.
-func (s *AteomService) stopActorVM(ctx context.Context, actorUID string, actorDirs *ateworkerpb.ActorDirs) error {
+func (s *AteWorkerService) stopActorVM(ctx context.Context, actorUID string, actorDirs *ateworkerpb.ActorDirs) error {
 	ra := s.runningVM(actorUID)
 	chSocket := kata.CLHSocketPath(actorUID)
 	if ra != nil && ra.apiSocket != "" {
@@ -415,7 +415,7 @@ func (s *AteomService) stopActorVM(ctx context.Context, actorUID string, actorDi
 	return s.teardownActor(ctx, actorUID, actorDirs, ra, ch.NewClient(chSocket))
 }
 
-func (s *AteomService) terminateWorkload(ctx context.Context, actor resources.ActorAttribution, actorDirs *ateworkerpb.ActorDirs) error {
+func (s *AteWorkerService) terminateWorkload(ctx context.Context, actor resources.ActorAttribution, actorDirs *ateworkerpb.ActorDirs) error {
 	var errs []error
 	if err := s.tunnel.Deactivate(ctx, actor); err != nil {
 		errs = append(errs, fmt.Errorf("while deactivating actor networking: %w", err))
