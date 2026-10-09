@@ -261,13 +261,13 @@ func main() {
 		serverboot.Fatal(ctx, "Failed to create metric instruments", err)
 	}
 
-	snapshotPluginConn, err := objectstoreplugin.Dial(*snapshotPluginSocket)
+	snapshotPluginConn, err := objectstoreplugin.Dial(*snapshotPluginSocket, objectstoreplugin.ReadyWait)
 	if err != nil {
 		serverboot.Fatal(ctx, "Failed to set up the snapshot plugin client", err)
 	}
 	defer snapshotPluginConn.Close()
-	// Plugin calls wait for the connection to become ready, so a plugin
-	// that never serves would hang them. Fail at startup instead.
+	// A plugin that never serves would fail every call. Fail at startup
+	// instead, giving the sidecar time to come up.
 	readyCtx, cancelReady := context.WithTimeout(ctx, time.Minute)
 	err = objectstoreplugin.WaitReady(readyCtx, snapshotPluginConn)
 	cancelReady()
