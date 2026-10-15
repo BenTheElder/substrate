@@ -16,33 +16,22 @@
 
 package main
 
-import "github.com/agent-substrate/substrate/internal/ateattr"
-
-// The phase names, suffixed onto the phaselog duration keys. Kept out of
-// ateattr on purpose: that package's SnapshotPhase* values are the
-// ate.snapshot.phase metric enum, and these are not values of it. "total" is
-// shared so the two layers' records agree on the denominator.
+// The phase names this runtime adds to the worker's timing records.
 //
 // Checkpoint: snapshot, durable_dir and rootfs_upper run concurrently on the
-// paused guest, so the paused window costs their max, not their sum; prep,
-// pause and teardown are sequential around them. Restore: every phase is
-// sequential and the phases partition the total.
+// paused guest, so the paused window costs their max, not their sum. Restore:
+// every phase is sequential and the phases partition the total.
 const (
 	phasePause       = "pause"
 	phaseSnapshot    = "snapshot"
 	phaseDurableDir  = "durable_dir"
 	phaseRootfsUpper = "rootfs_upper"
-	phaseTeardown    = "teardown"
 
-	phasePrep        = "prep"
-	phaseBundles     = "bundles"
-	phaseUpperJoin   = "upper_join"
-	phaseLowers      = "lowers"
-	phaseTap         = "tap"
-	phaseVMMLaunch   = "vmm_launch"
-	phaseVMRestore   = "vm_restore"
-	phaseResume      = "resume"
-	phaseWakeupProbe = "wakeup_probe"
-
-	phaseTotal = ateattr.SnapshotPhaseTotal
+	phaseBundles   = "bundles"
+	phaseUpperJoin = "upper_join"
+	phaseLowers    = "lowers"
+	phaseTap       = "tap"
+	phaseVMMLaunch = "vmm_launch"
+	phaseVMRestore = "vm_restore"
+	phaseResume    = "resume"
 )

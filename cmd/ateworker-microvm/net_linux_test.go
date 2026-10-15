@@ -23,49 +23,9 @@ import (
 	"github.com/vishvananda/netlink"
 
 	"github.com/agent-substrate/substrate/internal/ateworker/actornet"
-	"github.com/agent-substrate/substrate/internal/ateworker/tunnel"
-	"github.com/agent-substrate/substrate/internal/atunnel/egress"
-	"github.com/agent-substrate/substrate/internal/linuxsys"
 	"github.com/agent-substrate/substrate/internal/netns"
-	"github.com/agent-substrate/substrate/internal/nodepath"
-	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/internal/roottest"
 )
-
-// Hosting an actor that is already hosted replaces its network rather than
-// failing on the namespace name it still holds.
-func TestHostActorReplacesSameActor(t *testing.T) {
-	roottest.Require(t, "creates network namespaces")
-	ctx := context.Background()
-	egressProxy, err := egress.New(linuxsys.TCPOriginalDestination)
-	if err != nil {
-		t.Fatal(err)
-	}
-	service := &AteWorkerService{
-		tunnel:    &tunnel.Tunnel{Egress: egressProxy, EgressPort: 15001},
-		actors:    map[string]*hostedActor{},
-		maxActors: 1,
-	}
-	const actorUID = "microvm-network-replace"
-	t.Cleanup(func() {
-		if err := service.unhostActor(ctx, actorUID); err != nil {
-			t.Error(err)
-		}
-	})
-	for range 2 {
-		if _, err := service.hostActor(ctx, resources.ActorAttribution{UID: actorUID}, false); err != nil {
-			t.Fatal(err)
-		}
-	}
-	named, err := netns.GetFromName(nodepath.ActorNetNSName(actorUID))
-	if err != nil {
-		t.Fatalf("opening replacement namespace by name: %v", err)
-	}
-	defer named.Close()
-	if !named.Equal(service.sandboxNetNS(actorUID)) {
-		t.Fatal("namespace name does not refer to the replacement")
-	}
-}
 
 // tapNetNS gives a test its own namespace to build a tap in.
 func tapNetNS(t *testing.T, name string) netns.Handle {

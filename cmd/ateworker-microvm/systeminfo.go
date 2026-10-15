@@ -68,7 +68,7 @@ func hasSystemInfoVolumes(containers []*ateworkerpb.Container) bool {
 // directory, into the sandbox's shared virtio-fs tree at SharedDir(actorUID)/system-info,
 // then remounts the bind read-only: atelet is the only writer, and it writes
 // the host source directly, never through the share.
-func (s *AteWorkerService) stageSystemInfoVolumes(ctx context.Context, actorUID, src string) error {
+func (s *microvmRuntime) stageSystemInfoVolumes(ctx context.Context, actorUID, src string) error {
 	if _, err := os.Stat(src); err != nil {
 		return fmt.Errorf("while checking system-info volumes dir %q: %w", src, err)
 	}

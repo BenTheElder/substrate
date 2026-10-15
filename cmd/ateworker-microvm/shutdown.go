@@ -15,9 +15,9 @@
 // limitations under the License.
 
 // Graceful termination. The kubelet sends SIGTERM at the start of the pod's
-// termination grace period; main.go traps it and calls gracefulShutdown, which
-// propagates the signal into the guest so the actor can save its state and exit
-// on its own before the pod goes away. Stopping the workloads is all this does —
+// termination grace period; the worker traps it and calls Drain for each actor,
+// which propagates the signal into the guest so the actor can save its state and
+// exit on its own before the pod goes away. Stopping the workloads is all this does —
 // the VM around them is left for the pod's own teardown to reap.
 
 package main
@@ -32,16 +32,9 @@ import (
 	"time"
 
 	"github.com/agent-substrate/substrate/cmd/ateworker-microvm/internal/kata"
+	"github.com/agent-substrate/substrate/internal/ateworker"
+	"github.com/agent-substrate/substrate/internal/resources"
 )
-
-// workloadGracePeriod is the whole budget for draining the worker on shutdown:
-// waiting for an in-flight RPC to release the lock and letting the guest
-// workloads handle SIGTERM both draw on it, and ateworker escalates to SIGKILL once
-// it is gone. Matches ateworker-gvisor, and is deliberately shorter than the pod's
-// own termination grace period — 3600s, set by
-// workerTerminationGracePeriodSeconds in cmd/atecontroller — so the escalation
-// happens here rather than as a kubelet SIGKILL of ateworker itself.
-const workloadGracePeriod = 30 * time.Minute
 
 // workloadKillTimeout bounds the post-SIGKILL wait. The VM teardown that
 // follows is what ultimately guarantees the workload is gone, so a wedged
@@ -54,7 +47,7 @@ const (
 	// is a local ttrpc call that returns in microseconds; if it has not come back by
 	// now the agent is not answering, and waiting longer will not change that.
 	//
-	// Separate from workloadGracePeriod on purpose. That is the allowance we owe the
+	// Separate from the drain's grace period on purpose. That is the allowance we owe the
 	// actor to save its state, not a budget for a stalled transport to spend, and
 	// sharing one number would both cheat the actor out of part of its grace period
 	// and silently lengthen how long a wedged agent can stall shutdown whenever the
@@ -62,73 +55,18 @@ const (
 	signalDeliveryTimeout = 10 * time.Second
 )
 
-// gracefulShutdown propagates SIGTERM into every running actor's guest and waits
-// for the workloads to exit, so the caller can exit cleanly. It takes no actor's
-// lifecycle lock, so a suspend can still land mid-drain.
-func (s *AteWorkerService) gracefulShutdown(ctx context.Context) {
-	// Set this first so an RPC that arrives while we drain is turned away.
-	s.shuttingDown.Store(true)
-
-	// Cancel an in-flight run or restore. Waiting for a cold boot to finish only to
-	// SIGTERM the guest it just produced is strictly worse than aborting it.
-	s.cancelStartups(ctx)
-
-	// One deadline covers the whole drain. Waiting for the lock and waiting out
-	// SIGTERM below both run against it, so the two phases split a single grace
-	// period rather than each getting one: an RPC that burns most of the budget
-	// leaves the workloads only the remainder, and the total stays bounded by
-	// workloadGracePeriod however the time falls between them.
-	deadline := time.Now().Add(workloadGracePeriod)
-
-	// Let checkpoints finish saving state before stopping guests.
-	waitCtx, waitCancel := context.WithDeadline(ctx, deadline)
-	defer waitCancel()
-	if !s.inFlight.WaitIdle(waitCtx) {
-		slog.ErrorContext(ctx, "Giving up waiting for in-flight RPCs during graceful shutdown",
-			slog.Any("rpcs", s.inFlight.Names()))
-	}
-	// Copy VM records under actorsMu; a concurrent teardown clears guestAgent.
-	s.actorsMu.RLock()
-	targets := make([]drainTarget, 0, len(s.actors))
-	for uid, h := range s.actors {
-		if h.vm == nil {
-			continue
-		}
-		targets = append(targets, drainTarget{id: uid, agent: h.vm.guestAgent, workloadIDs: h.vm.workloadIDs, hosted: h})
-	}
-	s.actorsMu.RUnlock()
-
-	if len(targets) == 0 {
-		slog.InfoContext(ctx, "No active actor sessions at shutdown; exiting cleanly")
-		return
-	}
-
-	// Drain the actors concurrently, for the same reason their workloads are
-	// drained concurrently below: they share one deadline, so in series the first
-	// actor's wait would come out of every later one's allowance and the last
-	// would be SIGKILLed with no grace at all.
-	var wg sync.WaitGroup
-	for _, t := range targets {
-		wg.Add(1)
-		go func(t drainTarget) {
-			defer wg.Done()
-			// The drain ends the activation: read it while the guest answers,
-			// and write its final record once the workloads are down.
-			s.readFinal(ctx, t.hosted)
-			gracefullyStopActor(ctx, t, deadline)
-			s.recordFinal(ctx, t.hosted)
-		}(t)
-	}
-	wg.Wait()
-
-	slog.InfoContext(ctx, "Shutting down")
+// Drain propagates SIGTERM into the actor's guest and waits until deadline for
+// its workloads to exit, escalating to SIGKILL.
+func (s *microvmRuntime) Drain(ctx context.Context, actor resources.ActorAttribution, sb ateworker.Sandbox, deadline time.Time) {
+	ra := sb.(*runningActor)
+	gracefullyStopActor(ctx, drainTarget{id: actor.UID, agent: ra.agent(), workloadIDs: ra.workloadIDs}, deadline)
 }
 
-// drainTarget is what gracefulShutdown needs from one runningActor, copied out
-// under actorsMu so the drain below never dereferences the shared struct.
-// workloadIDs is set once before the VM is published and never mutated, so
-// sharing the backing array is safe; guestAgent is the field a concurrent
-// teardownActor clears, and is the reason this snapshot exists.
+// drainTarget is what the drain needs from one runningActor, copied out so the
+// drain never dereferences the shared struct. workloadIDs is set once before
+// the VM is published and never mutated, so sharing the backing array is safe;
+// guestAgent is the field a concurrent teardownActor clears, and is the reason
+// this snapshot exists.
 //
 // The client the snapshot holds can still be closed under us by that teardown,
 // which is not a problem here: every call on a closed AgentClient fails fast with
@@ -138,8 +76,6 @@ type drainTarget struct {
 	id          string
 	agent       *kata.AgentClient
 	workloadIDs []string
-	// hosted is the activation the drain ends, for its final record.
-	hosted *hostedActor
 }
 
 // guestAgent is the slice of *kata.AgentClient the drain needs: signal a guest

@@ -18,99 +18,16 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
-	"net"
 	"time"
 
 	"github.com/agent-substrate/substrate/cmd/ateworker-microvm/internal/kata"
-	"github.com/agent-substrate/substrate/internal/apierror"
-	"github.com/agent-substrate/substrate/internal/ateworker/actornet"
 	"github.com/agent-substrate/substrate/internal/ateworker/cgroup"
-	"github.com/agent-substrate/substrate/internal/atunnel/ingress"
-	"github.com/agent-substrate/substrate/internal/netns"
-	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/internal/sizing"
-	"github.com/agent-substrate/substrate/internal/workerstats"
 )
 
-// hostedActor holds one actor's attribution, network, and runtime state.
-type hostedActor struct {
-	// Immutable after admission.
-	attribution resources.ActorAttribution
-
-	// Mutable fields are guarded by actorsMu.
-	network *actornet.SandboxSession
-	// Nil until boot publishes the VM.
-	vm *runningActor
-	// Nil when no guest stats connection is available.
-	guest *guestStatsTarget
-
-	// usage is this activation's epoch, CPU baseline, and latest sample.
-	// Immutable after admission.
-	usage *workerstats.Activation
-}
-
-// admitActor reserves capacity before network setup. An actor that is already
-// hosted keeps its slot; its old network is returned for the caller to close.
-// resumesGuest is true when the activation resumes a guest from a snapshot,
-// whose CPU counters come back with it.
-func (s *AteWorkerService) admitActor(attribution resources.ActorAttribution, resumesGuest bool) (*hostedActor, *actornet.SandboxSession, error) {
-	s.actorsMu.Lock()
-	defer s.actorsMu.Unlock()
-	var stale *actornet.SandboxSession
-	if old, ok := s.actors[attribution.UID]; ok {
-		stale = old.network
-	} else if len(s.actors)+s.draining >= s.maxActors {
-		return nil, nil, apierror.ResourceExhausted("worker is full: %d actors", s.maxActors)
-	}
-	hosted := &hostedActor{attribution: attribution, usage: workerstats.NewActivation(time.Now(), resumesGuest)}
-	s.actors[attribution.UID] = hosted
-	return hosted, stale, nil
-}
-
-// hostActor sets up the actor's network, replacing any stale one. resumesGuest
-// is as for admitActor.
-func (s *AteWorkerService) hostActor(ctx context.Context, attribution resources.ActorAttribution, resumesGuest bool) (*hostedActor, error) {
-	uid := attribution.UID
-	if uid == "" {
-		return nil, fmt.Errorf("actor UID is required")
-	}
-
-	hosted, stale, err := s.admitActor(attribution, resumesGuest)
-	if err != nil {
-		return nil, err
-	}
-	if stale != nil {
-		if err := stale.Close(ctx); err != nil {
-			s.actorsMu.Lock()
-			delete(s.actors, uid)
-			s.actorsMu.Unlock()
-			return nil, fmt.Errorf("while clearing stale state for actor %s: %w", uid, err)
-		}
-	}
-
-	// The tap and atunnel share a namespace; the guest owns the other end.
-	session, err := actornet.ServeSandbox(ctx, actornet.SandboxNetworkConfig{
-		ActorUID:   uid,
-		EgressPort: s.tunnel.EgressPort,
-		DNSPolicy:  s.tunnel.ActorEgressPolicy(attribution),
-	}, s.tunnel.Egress, s.tunnel.DNSRelay)
-	if err != nil {
-		s.actorsMu.Lock()
-		delete(s.actors, uid)
-		s.actorsMu.Unlock()
-		return nil, fmt.Errorf("while setting up the sandbox network: %w", err)
-	}
-
-	s.actorsMu.Lock()
-	hosted.network = session
-	s.actorsMu.Unlock()
-	return hosted, nil
-}
-
 // actorLeaf opens the actor's cgroup, or returns nil when the worker has none.
-func (s *AteWorkerService) actorLeaf(actorUID string, size sizing.SandboxSize) (*cgroup.ActorLeaf, error) {
+func (s *microvmRuntime) actorLeaf(actorUID string, size sizing.SandboxSize) (*cgroup.ActorLeaf, error) {
 	if !s.actorCgroups {
 		return nil, nil
 	}
@@ -119,7 +36,7 @@ func (s *AteWorkerService) actorLeaf(actorUID string, size sizing.SandboxSize) (
 
 // cleanupSandboxState kills what is left of the actor's host processes and
 // clears its sandbox directories.
-func (s *AteWorkerService) cleanupSandboxState(ctx context.Context, actorUID string) {
+func (s *microvmRuntime) cleanupSandboxState(ctx context.Context, actorUID string) {
 	if s.actorCgroups {
 		killCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		if err := cgroup.KillActorLeaf(killCtx, actorUID); err != nil {
@@ -130,122 +47,12 @@ func (s *AteWorkerService) cleanupSandboxState(ctx context.Context, actorUID str
 	kata.CleanupSandboxState(ctx, actorUID)
 }
 
-// unhostActor removes an actor, its network, and its cgroup. Repeated calls are
-// safe. The caller must stop the VM first.
-func (s *AteWorkerService) unhostActor(ctx context.Context, actorUID string) error {
-	s.actorsMu.Lock()
-	hosted, ok := s.actors[actorUID]
-	delete(s.actors, actorUID)
-	if ok {
-		// Retain capacity until network cleanup completes.
-		s.draining++
+// removeActorLeaf deletes the actor's cgroup. Its processes must be gone.
+func (s *microvmRuntime) removeActorLeaf(ctx context.Context, actorUID string) {
+	if !s.actorCgroups {
+		return
 	}
-	s.actorsMu.Unlock()
-	if !ok {
-		return nil
-	}
-	defer func() {
-		s.actorsMu.Lock()
-		s.draining--
-		s.actorsMu.Unlock()
-	}()
-
-	if s.actorCgroups {
-		if err := cgroup.RemoveActorLeaf(actorUID); err != nil {
-			slog.WarnContext(ctx, "Failed to remove the actor's cgroup", slog.Any("err", err))
-		}
-	}
-	if hosted.network == nil {
-		return nil
-	}
-	if err := hosted.network.Close(ctx); err != nil {
-		slog.WarnContext(ctx, "Failed to remove the sandbox network", slog.Any("err", err))
-		return err
-	}
-	return nil
-}
-
-// lookupActor returns the actor or nil without taking its lifecycle lock.
-func (s *AteWorkerService) lookupActor(actorUID string) *hostedActor {
-	s.actorsMu.RLock()
-	defer s.actorsMu.RUnlock()
-	return s.actors[actorUID]
-}
-
-// hostedActors returns a snapshot of the actor map.
-func (s *AteWorkerService) hostedActors() []*hostedActor {
-	s.actorsMu.RLock()
-	defer s.actorsMu.RUnlock()
-	out := make([]*hostedActor, 0, len(s.actors))
-	for _, hosted := range s.actors {
-		out = append(out, hosted)
-	}
-	return out
-}
-
-// setRunningVM publishes the live micro-VM for an actor.
-func (s *AteWorkerService) setRunningVM(actorUID string, vm *runningActor) {
-	s.actorsMu.Lock()
-	defer s.actorsMu.Unlock()
-	if hosted, ok := s.actors[actorUID]; ok {
-		hosted.vm = vm
-	}
-}
-
-// runningVM is the live micro-VM for an actor, or nil.
-func (s *AteWorkerService) runningVM(actorUID string) *runningActor {
-	hosted := s.lookupActor(actorUID)
-	if hosted == nil {
-		return nil
-	}
-	s.actorsMu.RLock()
-	defer s.actorsMu.RUnlock()
-	return hosted.vm
-}
-
-// setGuestStats sets or clears the actor's stats target.
-func (s *AteWorkerService) setGuestStats(actorUID string, guest *guestStatsTarget) {
-	s.actorsMu.Lock()
-	defer s.actorsMu.Unlock()
-	if hosted, ok := s.actors[actorUID]; ok {
-		hosted.guest = guest
-	}
-}
-
-// guestOf is h's stats target, or nil.
-func (s *AteWorkerService) guestOf(h *hostedActor) *guestStatsTarget {
-	s.actorsMu.RLock()
-	defer s.actorsMu.RUnlock()
-	return h.guest
-}
-
-// sandboxNetNS is where an actor's tap and atunnel's sockets live, or -1.
-func (s *AteWorkerService) sandboxNetNS(actorUID string) netns.Handle {
-	hosted := s.lookupActor(actorUID)
-	if hosted == nil {
-		return -1
-	}
-	s.actorsMu.RLock()
-	defer s.actorsMu.RUnlock()
-	if hosted.network == nil {
-		return -1
-	}
-	return hosted.network.Network.GatewayNetNS
-}
-
-// sandboxDialer connects through the actor's gateway namespace.
-func (s *AteWorkerService) sandboxDialer(actorUID string) ingress.DialFunc {
-	return func(ctx context.Context, network, address string) (net.Conn, error) {
-		s.actorsMu.RLock()
-		hosted := s.actors[actorUID]
-		var session *actornet.SandboxSession
-		if hosted != nil {
-			session = hosted.network
-		}
-		s.actorsMu.RUnlock()
-		if session == nil {
-			return nil, fmt.Errorf("actor %s is not hosted here", actorUID)
-		}
-		return session.Dialer()(ctx, network, address)
+	if err := cgroup.RemoveActorLeaf(actorUID); err != nil {
+		slog.WarnContext(ctx, "Failed to remove the actor's cgroup", slog.Any("err", err))
 	}
 }

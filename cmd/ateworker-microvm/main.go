@@ -14,180 +14,76 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Command ateworker-microvm is the kata + cloud-hypervisor micro-VM
-// implementation of the ateworkerpb.Worker service, a peer to cmd/ateworker-gvisor.
-//
-// It runs a substrate actor as a cloud-hypervisor micro-VM (launched via the
-// kata guest model) and supports full suspend/resume by driving CH's native
-// snapshot/restore underneath (see internal/ch).
+// Command ateworker-microvm runs actors as kata + cloud-hypervisor micro-VMs,
+// with full suspend/resume through CH's native snapshot/restore (see
+// internal/ch).
 package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"os"
-	"os/signal"
 	"strings"
-	"sync"
-	"sync/atomic"
-	"syscall"
 	"time"
 
-	"cloud.google.com/go/compute/metadata"
-	"github.com/agent-substrate/substrate/internal/actorlock"
 	"github.com/agent-substrate/substrate/internal/actorlog"
-	"github.com/agent-substrate/substrate/internal/apierror"
-	"github.com/agent-substrate/substrate/internal/ateinterceptors"
-	"github.com/agent-substrate/substrate/internal/ateworker/actornet"
-	"github.com/agent-substrate/substrate/internal/ateworker/cgroup"
-	"github.com/agent-substrate/substrate/internal/ateworker/pid1"
-	"github.com/agent-substrate/substrate/internal/ateworker/register"
-	"github.com/agent-substrate/substrate/internal/ateworker/tunnel"
+	"github.com/agent-substrate/substrate/internal/ateworker"
 	"github.com/agent-substrate/substrate/internal/nodepath"
-	"github.com/agent-substrate/substrate/internal/otlprelay"
-	"github.com/agent-substrate/substrate/internal/preview"
 	"github.com/agent-substrate/substrate/internal/proto/ateworkerpb"
 	"github.com/agent-substrate/substrate/internal/resources"
-	"github.com/agent-substrate/substrate/internal/serverboot"
-	"github.com/agent-substrate/substrate/internal/version"
-	"github.com/agent-substrate/substrate/internal/workerstats"
 	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	"github.com/spf13/pflag"
-	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"golang.org/x/sys/unix"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/reflection"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
 var (
-	podUID        = pflag.String("pod-uid", "", "The UID of the current pod")
 	chBinary      = pflag.String("cloud-hypervisor-binary", "cloud-hypervisor", "Path to the cloud-hypervisor binary (used to relaunch on restore).")
 	guestDebug    = pflag.Bool("guest-debug", false, "enable guest debugging (agent debug logs, debug console, and early serial console)")
 	vmmMemReserve = pflag.Int("vmm-mem-reserve-mib", vmmMemReserveMiB, "Guest RAM (MiB) held back from the pod's memory limit for the cloud-hypervisor VMM + virtiofsd, which run as host processes in the pod cgroup alongside the guest RAM. Prevents the pod OOMing when the VM is sized to the pod's memory limit.")
-	showVersion   = pflag.Bool("version", false, "Print version and exit.")
-	logLevelFlag  = pflag.String("log-level", "info", "Minimum log level: debug, info, warn, or error.")
-	previewFlags  = pflag.StringSlice("preview", nil, "Preview gates to enable.")
-
-	otlpRelaySocket = pflag.String("otlp-relay-socket", nodepath.AteletOTLPSocketPath(),
-		"Unix socket of atelet's OTLP relay to export telemetry through, keeping it off the pod network. Empty, or absent at startup, exports directly to OTEL_EXPORTER_OTLP_ENDPOINT instead.")
-
-	tunnelConfig = tunnel.RegisterFlags(pflag.CommandLine)
-
-	readinessListenAddress = pflag.String("readiness-listen-address", "0.0.0.0:8080", "Address for the HTTP /readyz and /healthz probes")
-	maxActors              = pflag.Int("max-actors", 1000, "How many actors this worker will host at once")
-	usageSampleInterval    = pflag.Duration("usage-sample-interval", time.Minute, "How often the ateworker samples the resource usage of its actors. Each sample writes an ate.actor.usage_sampled record per actor, and GetActiveWorkloadStats serves the latest.")
 )
 
-// minUsageSampleInterval is the floor of --usage-sample-interval, the same as
-// atelet's poll interval floor. It keeps statsSweepBudget inside one interval.
-const minUsageSampleInterval = 50 * time.Second
-
-func main() {
-	pid1.RunIfPID1()
-	pflag.Parse()
-	if *showVersion {
-		fmt.Println(version.String())
-		return
-	}
-	ctx := context.Background()
-
-	if err := do(ctx); err != nil {
-		slog.ErrorContext(ctx, "Error while executing", slog.Any("err", err))
-		os.Exit(1)
-	}
+var config = ateworker.Config{
+	ServiceName:  "ateworker-microvm",
+	SandboxClass: string(atev1alpha1.SandboxClassMicroVM),
+	// The rootfs upper is host-backed, so it ships with or without guest
+	// memory.
+	Fidelities: []ateworkerpb.SnapshotFidelity{
+		ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES,
+		ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS,
+		ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+	},
+	// A healthy guest reading takes about 2ms; a slower one falls back to the
+	// newest cached sample instead of holding up the checkpoint.
+	FinalReadTimeout: 10 * time.Millisecond,
+	// The guest's CPU counters come back with its memory.
+	MemoryRestoreKeepsCounters: true,
 }
 
-func do(ctx context.Context) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+func main() {
+	ateworker.Main(config, newRuntime)
+}
 
-	// Share one synchronized writer between the runtime logger and the actor-log
-	// forwarder (created below) so the two log streams to the pod's stdout don't
-	// interleave-corrupt each other's lines.
-	logWriter := actorlog.NewSyncedWriter(os.Stdout)
-	serverboot.InitLoggerWithWriter(logWriter)
-	if err := serverboot.SetLogLevel(*logLevelFlag); err != nil {
-		return err
-	}
-	if err := preview.Init(*previewFlags...); err != nil {
-		return fmt.Errorf("invalid --preview: %w", err)
-	}
-	slog.InfoContext(ctx, "ateworker-microvm booting", slog.String("version", version.Version))
-	if *maxActors < 0 {
-		return fmt.Errorf("--max-actors must not be negative, got %d", *maxActors)
-	}
-	if *usageSampleInterval < minUsageSampleInterval {
-		return fmt.Errorf("--usage-sample-interval must be at least %v, got %v", minUsageSampleInterval, *usageSampleInterval)
-	}
+// microvmRuntime runs each actor as a cloud-hypervisor micro-VM.
+type microvmRuntime struct {
+	podUID     string
+	chBinary   string
+	guestDebug bool
+	// memReserveMiB is guest RAM held back from the pod's memory limit for the
+	// VMM and virtiofsd, host processes sharing the pod cgroup with the guest
+	// RAM.
+	memReserveMiB int
+	// actorLogger forwards the actor containers' output to the pod's stdout.
+	actorLogger *actorlog.ActorLogger
+	// actorCgroups is set when the worker's cgroup is delegated, so each actor's
+	// VMM and virtiofsd run in a leaf of their own.
+	actorCgroups bool
+}
 
-	const serviceName = "ateworker-microvm"
-	// Export through atelet's node-local relay when it is there, so telemetry
-	// never touches the worker pod's network. A nil conn means it is not, and
-	// the providers fall back to dialing the collector directly.
-	//
-	// A relay that cannot be dialed is logged rather than fatal, matching both
-	// ends of the same decision: Dial already treats an absent socket as a
-	// fallback rather than an error, and atelet logs and keeps going when it
-	// cannot serve the relay at all. What is lost here is the node-local export
-	// path, not the ateworker's ability to run actors, and failing the worker pod
-	// over its telemetry route would turn a misconfigured flag into an outage.
-	relayConn, err := otlprelay.Dial(ctx, *otlpRelaySocket)
-	if err != nil {
-		slog.ErrorContext(ctx, "Failed to connect to the OTLP relay; exporting telemetry directly over the pod network",
-			slog.String("socket", *otlpRelaySocket), slog.Any("err", err))
-	}
-	if relayConn != nil {
-		defer relayConn.Close()
-	}
+var _ ateworker.Runtime = (*microvmRuntime)(nil)
 
-	tp, err := serverboot.InitTracing(ctx, serverboot.TracingOptions{
-		ServiceName:  serviceName,
-		Sampling:     serverboot.ResolveTraceSampling(ctx, serverboot.ParentRatioSampling(serverboot.ControlPlaneTraceRatio)),
-		ExporterConn: relayConn,
-		// So the spans say which path they took, including when relayConn is nil
-		// because the dial above failed and this ateworker is exporting directly.
-		RelayCapable: true,
-	})
-	if err != nil {
-		serverboot.Fatal(ctx, "Failed to initialize tracing", err)
-	}
-	defer serverboot.ShutdownProvider("TracerProvider", tp.Shutdown)
-
-	mp, err := serverboot.InitMetricsPushOnlyVia(ctx, serviceName, relayConn)
-	if err != nil {
-		serverboot.Fatal(ctx, "Failed to initialize metrics", err)
-	}
-	defer serverboot.ShutdownProvider("MeterProvider", mp.Shutdown)
-
-	lp, err := serverboot.InitLogging(ctx, serverboot.LoggingOptions{
-		ServiceName:  serviceName,
-		Exporter:     serverboot.ResolveLogsExporter(ctx),
-		ExporterConn: relayConn,
-		RelayCapable: true,
-	})
-	if err != nil {
-		serverboot.Fatal(ctx, "Failed to initialize logging", err)
-	}
-	// Nil when the exporter does not include otlp.
-	if lp != nil {
-		defer serverboot.ShutdownProvider("LoggerProvider", lp.Shutdown)
-	}
-
-	// Create ateworker dir.
-	ateworkerDir := nodepath.WorkerPath(*podUID)
-	if err := resources.ValidateWorkerPodUID(*podUID); err != nil {
-		return fmt.Errorf("in resources.ValidateWorkerPodUID: %w", err)
-	}
-	// atelet owns the directory and the sandbox versions file in it; only the
-	// socket below is this process's. Both outlive a container restart.
-	if err := os.MkdirAll(ateworkerDir, 0o700); err != nil {
-		return fmt.Errorf("in os.MkdirAll(%q): %w", ateworkerDir, err)
-	}
-
+func newRuntime(ctx context.Context, env ateworker.Env) (ateworker.Runtime, error) {
 	// kata's virtio-fs sharing depends on mount propagation: it slave-binds
 	// .../shared (served by virtiofsd) from .../mounts and expects the later
 	// per-container rootfs bind under mounts/ to propagate across. That only
@@ -197,107 +93,21 @@ func do(ctx context.Context) error {
 	// createContainer fails ENOENT. Self-bind /run/kata-containers and mark it
 	// rshared so kata's propagation chain works inside the pod.
 	if err := ensureSharedPropagation(ctx, "/run/kata-containers"); err != nil {
-		return fmt.Errorf("while making /run/kata-containers a shared mount: %w", err)
+		return nil, fmt.Errorf("while making /run/kata-containers a shared mount: %w", err)
 	}
+	return &microvmRuntime{
+		podUID:        env.PodUID,
+		chBinary:      *chBinary,
+		guestDebug:    *guestDebug,
+		memReserveMiB: *vmmMemReserve,
+		actorLogger:   env.ActorLogger,
+		actorCgroups:  env.ActorCgroups,
+	}, nil
+}
 
-	// Clean up any old socket.
-	sockPath := nodepath.WorkerSocketPath(*podUID)
-	if err := os.RemoveAll(sockPath); err != nil {
-		return fmt.Errorf("while removing %q: %w", sockPath, err)
-	}
-
-	lis, err := net.Listen("unix", sockPath)
-	if err != nil {
-		return fmt.Errorf("while opening unix socket: %w", err)
-	}
-	defer func() {
-		if err := os.Remove(sockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			slog.ErrorContext(ctx, "Failed to remove the ateworker socket on shutdown", slog.Any("err", err))
-		}
-	}()
-
-	// Forward the actor container's stdout/stderr to the worker pod's stdout as
-	// JSON with ate.dev/* labels (logging parity with ateworker-gvisor). It shares
-	// logWriter with the runtime logger so the two streams to os.Stdout are
-	// serialized through one SyncedWriter and never interleave-corrupt lines.
-	actorLogger := actorlog.NewActorLogger(logWriter, metadata.OnGCE())
-	// Give each actor's VMM and virtiofsd a cgroup of their own, so one busy
-	// guest cannot starve the rest.
-	actorCgroups, err := cgroup.Delegate(ctx)
-	if err != nil {
-		return fmt.Errorf("while delegating the worker cgroup: %w", err)
-	}
-
-	tunnel, err := tunnel.Start(ctx, *tunnelConfig, actornet.ActorHTTPUpstream)
-	if err != nil {
-		return err
-	}
-	ateworkerService := NewService(*podUID, *chBinary, *guestDebug, *vmmMemReserve, *maxActors, tunnel, actorLogger)
-	ateworkerService.actorCgroups = actorCgroups
-	// The controller sets both from the downward API.
-	pool := workerstats.Pool{Namespace: os.Getenv("POD_NAMESPACE"), Name: os.Getenv("WORKER_POOL_NAME")}
-	if pool.Namespace == "" || pool.Name == "" {
-		slog.WarnContext(ctx, "Worker pool unknown; usage records will name no pool", slog.Any("pool", pool))
-	}
-	usageStdout := workerstats.NewStdoutHandler(logWriter)
-	defer usageStdout.Close()
-	ateworkerService.usage = workerstats.NewUsageEmitter(lp, usageStdout, pool)
-	defer workerstats.StartSampler(ctx, *usageSampleInterval, func(ctx context.Context) { ateworkerService.sweepUsage(ctx) })()
-
-	svr := grpc.NewServer(
-		grpc.StatsHandler(otelgrpc.NewServerHandler()),
-		grpc.UnaryInterceptor(ateinterceptors.InternalServerUnaryInterceptor),
-	)
-	ateworkerpb.RegisterWorkerServer(svr, ateworkerService)
-	reflection.Register(svr)
-	readiness := &serverboot.Readiness{}
-
-	// Trap SIGTERM (sent by the kubelet at the start of the pod's termination grace
-	// period) and propagate it into the guest so the actor can save its state and
-	// exit cleanly before the grace period expires. The server deliberately keeps
-	// serving throughout gracefulShutdown: new workload RPCs are rejected with
-	// codes.Unavailable (see rejectIfDraining) while a suspend arriving mid-drain
-	// is still honored, which is what lets an actor checkpoint itself on eviction.
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGTERM)
-	go func() {
-		sig := <-sigCh
-		slog.InfoContext(ctx, "Received signal; beginning graceful shutdown", slog.String("signal", sig.String()))
-		readiness.MarkNotReady()
-		// Use a fresh context: the do() context is torn down on return, but the
-		// shutdown must outlive it until the guest has stopped and the VM is down.
-		ateworkerService.gracefulShutdown(context.Background())
-		// Only now stop the server, which blocks until any in-flight RPC (notably a
-		// concurrent CheckpointWorkload) has completed, then unblocks svr.Serve below.
-		svr.GracefulStop()
-	}()
-
-	// Report what this worker can supply. Nothing else tells the control plane,
-	// which places no Actor here until it lands, so a worker that cannot report
-	// is one that will sit idle forever. Report retries every failure it can
-	// outlast, including the window before the Worker record exists; anything
-	// that reaches here is a misconfiguration no restart-in-place will fix.
-	go func() {
-		err := register.Report(ctx, register.ReportConfig{
-			SocketPath:           nodepath.WorkerSupportSocket,
-			CredentialBundlePath: tunnelConfig.CredentialBundle,
-			TrustBundlePath:      tunnelConfig.TrustBundle,
-			AteletSPIFFEID:       tunnelConfig.BrokerIdentity,
-			Actors:               *maxActors,
-			SandboxClass:         string(atev1alpha1.SandboxClassMicroVM),
-		})
-		if err != nil && ctx.Err() == nil {
-			serverboot.Fatal(ctx, "Failed to report worker capacity", err)
-		}
-	}()
-
-	go serverboot.StartHealthServer(ctx, *readinessListenAddress, readiness)
-
-	slog.InfoContext(ctx, "ateworker-microvm serving", slog.String("socket", sockPath))
-	if err := svr.Serve(lis); err != nil {
-		return fmt.Errorf("while serving: %w", err)
-	}
-	return nil
+// Validate ensures we only run assets from the static files dir.
+func (s *microvmRuntime) Validate(a *ateworker.Actor) error {
+	return validateRuntimeAssetPaths(a.AssetPaths)
 }
 
 // ensureSharedPropagation makes path a mount point with rshared propagation
@@ -328,115 +138,6 @@ func ensureSharedPropagation(ctx context.Context, path string) error {
 	return nil
 }
 
-const (
-	rpcRunWorkload        = "RunWorkload"
-	rpcRestoreWorkload    = "RestoreWorkload"
-	rpcCheckpointWorkload = "CheckpointWorkload"
-)
-
-// AteWorkerService is the cloud-hypervisor implementation of ateworkerpb.WorkerServer.
-type AteWorkerService struct {
-	ateworkerpb.UnimplementedWorkerServer
-
-	// Serializes lifecycle RPCs per actor.
-	locks *actorlock.Locks
-	// Tracks lifecycle RPCs for shutdown cancellation and draining.
-	inFlight *actorlock.InFlight
-
-	// shuttingDown is set once SIGTERM has been received. While true, new workload
-	// RPCs are rejected with codes.Unavailable so the control plane reschedules.
-	//
-	// Atomic rather than lock-guarded: gracefulShutdown sets it before it tries to
-	// take lock, precisely so an RPC that arrives while it is still waiting is
-	// turned away instead of queueing behind it.
-	shuttingDown atomic.Bool
-
-	podUID     string
-	chBinary   string
-	guestDebug bool
-
-	// memReserveMiB is guest RAM (MiB) held back from the pod's memory limit for
-	// the cloud-hypervisor VMM + virtiofsd (host processes sharing the pod cgroup
-	// with the guest RAM). Set from --vmm-mem-reserve-mib.
-	memReserveMiB int
-
-	// actorLogger forwards the actor container's stdout/stderr to the worker pod's
-	// stdout as ate.dev/*-labeled JSON and emits actor lifecycle events (parity
-	// with ateworker-gvisor).
-	actorLogger *actorlog.ActorLogger
-	tunnel      *tunnel.Tunnel
-	// usage writes the usage records. Nil writes none.
-	usage *workerstats.UsageEmitter
-
-	// Guards actors, draining, and mutable hostedActor fields.
-	actorsMu sync.RWMutex
-	// guestSlots bounds the guest reads of the sweeps and initial readings
-	// together to statsFanOut at once.
-	guestSlots chan struct{}
-	// Keyed by actor UID.
-	actors map[string]*hostedActor
-	// Actors undergoing network cleanup still count against capacity.
-	draining  int
-	maxActors int
-	// actorCgroups is set when the worker's cgroup is delegated, so each actor's
-	// VMM and virtiofsd run in a leaf of their own.
-	actorCgroups bool
-}
-
-var _ ateworkerpb.WorkerServer = (*AteWorkerService)(nil)
-
-// NewService creates a new AteWorkerService.
-func NewService(podUID, chBinary string, guestDebug bool, memReserveMiB, maxActors int, tunnel *tunnel.Tunnel, actorLogger *actorlog.ActorLogger) *AteWorkerService {
-	return &AteWorkerService{
-		locks:         actorlock.New(),
-		inFlight:      actorlock.NewInFlight(),
-		actors:        map[string]*hostedActor{},
-		guestSlots:    make(chan struct{}, statsFanOut),
-		maxActors:     maxActors,
-		podUID:        podUID,
-		chBinary:      chBinary,
-		guestDebug:    guestDebug,
-		memReserveMiB: memReserveMiB,
-		tunnel:        tunnel,
-		actorLogger:   actorLogger,
-	}
-}
-
-// beginRPC registers before checking the drain flag so shutdown cannot miss it.
-func (s *AteWorkerService) beginRPC(actorUID, name string, cancel context.CancelFunc) (func(), error) {
-	release := s.inFlight.Add(actorUID, name, cancel)
-	if err := s.rejectIfDraining(); err != nil {
-		release()
-		return nil, err
-	}
-	return release, nil
-}
-
-// validateActorDirs rejects a request whose actor directories are unusable.
-func validateActorDirs(actorDirs *ateworkerpb.ActorDirs) error {
-	if errs := resources.ValidateActorDirs(actorDirs, field.NewPath("actor_dirs")); len(errs) > 0 {
-		return apierror.InvalidArgument("%v", errs.ToAggregate())
-	}
-	return nil
-}
-
-// supportedFidelities are the snapshot fidelities this runtime serves: the
-// rootfs upper is host-backed, so it ships with or without guest memory.
-var supportedFidelities = []ateworkerpb.SnapshotFidelity{
-	ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES,
-	ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS,
-	ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
-}
-
-// validateFidelity rejects a checkpoint or restore request whose fidelity
-// this runtime cannot serve.
-func validateFidelity(fidelity ateworkerpb.SnapshotFidelity) error {
-	if errs := resources.ValidateSnapshotFidelity(fidelity, supportedFidelities, field.NewPath("fidelity")); len(errs) > 0 {
-		return apierror.InvalidArgument("%v", errs.ToAggregate())
-	}
-	return nil
-}
-
 // validateRuntimeAssetPaths ensures we only run assets from the static files dir
 func validateRuntimeAssetPaths(paths map[string]string) error {
 	var errs field.ErrorList
@@ -447,21 +148,4 @@ func validateRuntimeAssetPaths(paths map[string]string) error {
 		return resources.ToAPIError(errs)
 	}
 	return nil
-}
-
-// rejectIfDraining returns a codes.Unavailable error if ateworker has begun graceful
-// shutdown, so the control plane reschedules the actor onto a live worker.
-func (s *AteWorkerService) rejectIfDraining() error {
-	if s.shuttingDown.Load() {
-		return apierror.Unavailable("worker draining: not accepting new workloads")
-	}
-	return nil
-}
-
-// cancelStartups cancels all boots and restores, leaving checkpoints running.
-func (s *AteWorkerService) cancelStartups(ctx context.Context) {
-	for _, actorUID := range s.inFlight.CancelStartups() {
-		slog.InfoContext(ctx, "Cancelling in-progress workload startup RPC due to graceful shutdown",
-			slog.String("actorUID", actorUID))
-	}
 }

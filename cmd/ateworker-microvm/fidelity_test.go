@@ -21,9 +21,11 @@ import (
 	"testing"
 
 	"google.golang.org/grpc/codes"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 
 	"github.com/agent-substrate/substrate/internal/apierror"
 	"github.com/agent-substrate/substrate/internal/proto/ateworkerpb"
+	"github.com/agent-substrate/substrate/internal/resources"
 )
 
 // TestFidelityLadder pins which layers each level carries: the checkpoint's
@@ -55,6 +57,12 @@ func TestFidelityLadder(t *testing.T) {
 // with or without guest memory. Anything else is refused before the request
 // touches the guest.
 func TestValidateFidelity(t *testing.T) {
+	validateFidelity := func(f ateworkerpb.SnapshotFidelity) error {
+		if errs := resources.ValidateSnapshotFidelity(f, config.Fidelities, field.NewPath("fidelity")); len(errs) > 0 {
+			return apierror.InvalidArgument("%v", errs.ToAggregate())
+		}
+		return nil
+	}
 	for _, tc := range []struct {
 		name     string
 		fidelity ateworkerpb.SnapshotFidelity

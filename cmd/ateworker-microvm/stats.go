@@ -20,17 +20,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
-	"runtime/debug"
-	"sync"
 	"time"
 
 	"github.com/agent-substrate/substrate/cmd/ateworker-microvm/internal/agentstats"
 	"github.com/agent-substrate/substrate/cmd/ateworker-microvm/internal/third_party/kata/agentpb"
-	"github.com/agent-substrate/substrate/internal/apierror"
-	"github.com/agent-substrate/substrate/internal/ateattr"
+	"github.com/agent-substrate/substrate/internal/ateworker"
 	"github.com/agent-substrate/substrate/internal/proto/ateworkerpb"
-	"github.com/agent-substrate/substrate/internal/workerstats"
+	"github.com/agent-substrate/substrate/internal/resources"
 	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 )
 
@@ -41,33 +37,14 @@ import (
 // file reads inside the guest, and far short of the lifecycle calls' 20-30s.
 const statsCallTimeout = 2 * time.Second
 
-// finalReadTimeout bounds the final record's guest reading, which sits on the
-// checkpoint path. A healthy reading takes about 2ms; a slower one falls back
-// to the newest cached sample.
-const finalReadTimeout = 10 * time.Millisecond
-
-// Sweeps and initial readings ask up to statsFanOut guests at once. A sweep
-// gives up on the rest after statsSweepBudget, so it ends inside one sample
-// interval. A guest not reached in time reports as pending.
-const (
-	statsFanOut      = 32
-	statsSweepBudget = 45 * time.Second
-)
-
-// containerStatsReader is the one guest-agent call GetWorkloadStats makes.
-// *kata.AgentClient satisfies it; the narrow interface is what lets the handler
-// be tested without a live micro-VM, which is otherwise the only way to get an
-// agent to talk to.
+// containerStatsReader is the one guest-agent call Sample makes.
+// *kata.AgentClient satisfies it; the narrow interface is what lets Sample be
+// tested without a live micro-VM.
 type containerStatsReader interface {
 	StatsContainer(ctx context.Context, containerID string) (*agentpb.CgroupStats, error)
 }
 
-// guestStatsTarget is everything GetWorkloadStats needs to sample a live guest.
-//
-// It exists so the handler never reads AteWorkerService.running, which lock guards:
-// the handler must not take lock (see below), and a map read racing a lifecycle
-// RPC's write is a data race whatever the read is for. The fields it holds are
-// the ones RunWorkload and RestoreWorkload already produce.
+// guestStatsTarget is everything Sample needs to read a live guest.
 type guestStatsTarget struct {
 	// actorUID is the actor these containers belong to. Checked against the
 	// attribution before anything is reported, so a target left behind by a
@@ -90,275 +67,63 @@ type guestStatsTarget struct {
 	workloadIDs []string
 }
 
-// GetWorkloadStats implements ateworkerpb.Worker/GetWorkloadStats.
-//
-// The sample comes from inside the guest, not from the host cgroup. On this
-// runtime the host cgroup holds cloud-hypervisor, whose memory is the guest RAM
-// allocation it took at boot: near-constant, and near-identical for an idle
-// actor and a saturated one. The guest kernel is what accounts for the
-// workload, and the kata-agent is what can read it out.
-//
-// It must not take the actor's lifecycle lock, which is held across a whole
-// cold boot, snapshot, or restore; blocking there would silence the poller
-// through the phases whose usage matters most.
-func (s *AteWorkerService) GetWorkloadStats(ctx context.Context, req *ateworkerpb.GetWorkloadStatsRequest) (*ateworkerpb.GetWorkloadStatsResponse, error) {
-	if req.GetActorUid() == "" {
-		return nil, apierror.InvalidArgument("actor_uid is required")
-	}
-
-	// NOT_FOUND rather than FAILED_PRECONDITION: the requested actor is not
-	// here, which no amount of retrying on the same timer will change. Its
-	// worker-to-actor mapping wants re-resolving.
-	hosted := s.lookupActor(req.GetActorUid())
-	if hosted == nil {
-		return nil, apierror.NotFound("worker is not executing actor %q", req.GetActorUid())
-	}
-	sample, err := s.measureGuest(ctx, hosted)
-	if err != nil {
-		if errors.Is(err, errStaleGuestTarget) {
-			return nil, apierror.Internal("%v", err)
-		}
-		// "No numbers right now", never NOT_FOUND: the requested actor IS the
-		// one here. The reasons are all routine -- a poll landing in the boot
-		// or the restore before the target is published, a teardown that
-		// cleared the target ahead of closing the connection, a restore whose
-		// post-restore agent dial failed, or a guest that has stopped
-		// answering. The caller should take the next sample; after a teardown
-		// the next sample is the NOT_FOUND above.
-		return nil, apierror.FailedPrecondition("%v", err)
-	}
-
-	// The calls above hold no lock, so a checkpoint plus a fresh run can land
-	// underneath them. Pointer identity catches that: hostActor stores a new
-	// record every time.
-	if s.lookupActor(req.GetActorUid()) != hosted {
-		return nil, apierror.NotFound("worker stopped executing actor %q while the sample was being taken", req.GetActorUid())
-	}
-	// The reading advanced the activation's CPU, so the cache keeps up with it.
-	hosted.usage.Store(sample)
-
-	return &ateworkerpb.GetWorkloadStatsResponse{Sample: sample}, nil
-}
-
-// GetActiveWorkloadStats implements ateworkerpb.Worker/GetActiveWorkloadStats: the
-// discovery read. It serves each actor's latest sample from the sampler, so a
-// poll puts no load of its own on the guests; an actor not sampled yet is
-// pending.
-func (s *AteWorkerService) GetActiveWorkloadStats(ctx context.Context, req *ateworkerpb.GetActiveWorkloadStatsRequest) (*ateworkerpb.GetActiveWorkloadStatsResponse, error) {
-	hosted := s.hostedActors()
-	samples := make([]*ateworkerpb.WorkloadStatsSample, 0, len(hosted))
-	for _, h := range hosted {
-		sample := h.usage.Latest()
-		if sample == nil {
-			sample = h.usage.WithEpoch(workerstats.PendingSample(&h.attribution, string(atev1alpha1.SandboxClassMicroVM)))
-		}
-		samples = append(samples, sample)
-	}
-
-	// An empty list is "available", per the proto: a normal answer for a
-	// scraper to get, not an error.
-	return &ateworkerpb.GetActiveWorkloadStatsResponse{Samples: samples}, nil
-}
-
-// sweepUsage samples every hosted actor between its initial reading and its
-// final record, and stores each sample and writes its periodic record. Same
-// lock discipline as GetWorkloadStats, for the same reasons.
-func (s *AteWorkerService) sweepUsage(ctx context.Context) {
-	sweepCtx, cancel := context.WithTimeout(ctx, statsSweepBudget)
-	defer cancel()
-
-	var wg sync.WaitGroup
-	for _, h := range s.hostedActors() {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			// The reads run here, outside the sampler's own recover.
-			defer func() {
-				if r := recover(); r != nil {
-					slog.ErrorContext(ctx, "Usage sample panicked", slog.String(string(ateattr.ActorUIDKey), h.attribution.UID),
-						slog.Any("panic", r), slog.String("stack", string(debug.Stack())))
-				}
-			}()
-			s.sampleHostedGuest(sweepCtx, h)
-		}()
-	}
-	wg.Wait()
-}
-
-// sampleHostedGuest measures one actor for the sweep, and stores the sample and
-// writes its periodic record unless the actor is outside its sampling window or
-// no longer hosted. A guest not reached before ctx is done, or that does not
-// answer, is pending, so it stays attributable.
-func (s *AteWorkerService) sampleHostedGuest(ctx context.Context, h *hostedActor) {
-	if !h.usage.Sampling() {
-		return
-	}
-	sample := h.usage.WithEpoch(workerstats.PendingSample(&h.attribution, string(atev1alpha1.SandboxClassMicroVM)))
-	measured, err := h.usage.Measure(ctx, func() (*ateworkerpb.WorkloadStatsSample, map[string]uint64, error) {
-		return s.sampleGuestInSlot(ctx, h)
-	})
-	if errors.Is(err, errStaleGuestTarget) {
-		slog.ErrorContext(ctx, "Guest stats target belongs to another actor", slog.String(string(ateattr.ActorUIDKey), h.attribution.UID), slog.Any("err", err))
-	}
-	// Otherwise an error is boot, restore, teardown in progress, a guest that
-	// has stopped answering, or the sweep's budget: all routine.
-	if err == nil {
-		sample = measured
-	}
-	// The guest is found by UID alone. If the actor was re-hosted meanwhile,
-	// perhaps on another template, the numbers are the new activation's: drop
-	// them, and let the new activation start with its own initial reading.
-	if s.lookupActor(h.attribution.UID) != h {
-		return
-	}
-	h.usage.Periodic(sample, func() { s.usage.Emit(ctx, ateattr.StatsKindPeriodic, sample) })
-}
-
-// measureGuest reads h's guest as a reading of its activation.
-func (s *AteWorkerService) measureGuest(ctx context.Context, h *hostedActor) (*ateworkerpb.WorkloadStatsSample, error) {
-	return h.usage.Measure(ctx, func() (*ateworkerpb.WorkloadStatsSample, map[string]uint64, error) {
-		return s.sampleGuest(ctx, h)
-	})
-}
-
-// sampleGuestInSlot reads h's guest while holding one of s.guestSlots. The slot
-// is taken inside the reading, so a sweep waiting for another reading of the
-// same actor holds no slot.
-func (s *AteWorkerService) sampleGuestInSlot(ctx context.Context, h *hostedActor) (*ateworkerpb.WorkloadStatsSample, map[string]uint64, error) {
-	select {
-	case s.guestSlots <- struct{}{}:
-	case <-ctx.Done():
-		return nil, nil, ctx.Err()
-	}
-	defer func() { <-s.guestSlots }()
-	return s.sampleGuest(ctx, h)
-}
-
-// recordInitial samples a new activation and writes its initial record. It
-// runs off the resume path, since a guest read can take many seconds, and
-// bounds that read like one sweep's. It recovers from panics, as a sweep does:
-// it runs on its own goroutine, where a panic would take the ateworker down. The
-// activation is then sampled without an initial record.
-func (s *AteWorkerService) recordInitial(ctx context.Context, h *hostedActor) {
-	actorUID := h.attribution.UID
-	defer func() {
-		if r := recover(); r != nil {
-			slog.ErrorContext(ctx, "Initial usage sample panicked", slog.String(string(ateattr.ActorUIDKey), actorUID),
-				slog.Any("panic", r), slog.String("stack", string(debug.Stack())))
-			h.usage.Initial(nil, nil)
-		}
-	}()
-	ctx, cancel := context.WithTimeout(ctx, statsSweepBudget)
-	defer cancel()
-	sample, err := h.usage.Measure(ctx, func() (*ateworkerpb.WorkloadStatsSample, map[string]uint64, error) {
-		return s.sampleGuestInSlot(ctx, h)
-	})
-	if err != nil {
-		slog.WarnContext(ctx, "No initial usage sample", slog.String(string(ateattr.ActorUIDKey), actorUID), slog.Any("err", err))
-		sample = nil
-	}
-	h.usage.Initial(sample, func() { s.usage.Emit(ctx, ateattr.StatsKindInitial, sample) })
-}
-
-// recordFinalIfEnded writes h's final record if a checkpoint or terminate tore
-// its activation down, which unhosts the actor even when a later step fails.
-// The caller holds the actor's lock.
-func (s *AteWorkerService) recordFinalIfEnded(ctx context.Context, h *hostedActor) {
-	if h != nil && s.lookupActor(h.attribution.UID) != h {
-		s.recordFinal(ctx, h)
-	}
-}
-
-// readFinal reads h's guest for the final record, bounded by finalReadTimeout.
-// A failed read leaves the newest measured sample to stand in. If even that
-// bound is too much checkpoint latency, drop the read and the final record
-// uses the newest cached sample instead.
-func (s *AteWorkerService) readFinal(ctx context.Context, h *hostedActor) {
-	readCtx, cancel := context.WithTimeout(ctx, finalReadTimeout)
-	defer cancel()
-	sample, err := s.measureGuest(readCtx, h)
-	if err != nil {
-		slog.LogAttrs(ctx, slog.LevelDebug, "Final usage reading failed; using the newest sample",
-			append(ateattr.ActorLogAttrs(h.attribution), slog.Any("err", err))...)
-		return
-	}
-	h.usage.Store(sample)
-}
-
-// recordFinal writes the final record of an activation that a checkpoint or a
-// terminate ended, from its newest measured sample.
-func (s *AteWorkerService) recordFinal(ctx context.Context, h *hostedActor) {
-	pending := h.usage.WithEpoch(workerstats.PendingSample(&h.attribution, string(atev1alpha1.SandboxClassMicroVM)))
-	h.usage.Final(func(measured *ateworkerpb.WorkloadStatsSample) {
-		if measured == nil {
-			measured = pending
-		}
-		s.usage.Emit(ctx, ateattr.StatsKindFinal, measured)
-	})
-}
-
-// errStaleGuestTarget is the one bug-shaped failure sampleGuest can return:
-// the published guest target and the attribution disagree, which the lifecycle
-// RPCs write together under lock and so should never happen. GetWorkloadStats
-// maps it to Internal and the sweep logs it as an error; everything else
-// sampleGuest returns is routine.
+// errStaleGuestTarget is the one bug-shaped failure Sample can return: the
+// published guest target and the attribution disagree, which should never
+// happen.
 var errStaleGuestTarget = errors.New("guest agent connection belongs to a different actor")
 
-// sampleGuest reads the guest's container cgroups through the agent and builds
-// the sample attributed to active. With one exception its errors mean "no
-// numbers right now" rather than a bug -- a guest that has stopped answering
-// is routine here, and unlike the gVisor runtime's local file reads, a vsock
-// call offers no error type that separates "gone" from "broken". The
-// exception is errStaleGuestTarget, above. Errors come back raw because the
-// callers express the routine ones differently: an error code for the keyed
-// read, a pending sample for the sweep. The read holds no lifecycle lock, so
-// the keyed caller re-checks the actor record it loaded after this returns.
-func (s *AteWorkerService) sampleGuest(ctx context.Context, h *hostedActor) (*ateworkerpb.WorkloadStatsSample, map[string]uint64, error) {
-	active := &h.attribution
-	// The actor is the one here, but there is no guest to ask yet. Usually that
-	// is a poll landing in the boot or the restore: the ateworker retains the
-	// attribution from the moment it accepts the actor, and the target is only
-	// published once the containers are up. It is also what a teardown looks
-	// like from here, since teardownActor clears the target before it closes
-	// the connection, and what a restore whose post-restore agent dial failed
-	// looks like for the rest of that activation.
-	// The target is read from h, not looked up by UID, so a re-host during
-	// this read cannot hand over the next activation's guest.
-	target := s.guestOf(h)
-	if target == nil {
-		return nil, nil, errors.New("no guest agent connection to measure yet")
+// Sample reads the guest's container cgroups through the agent. The host
+// cgroup holds cloud-hypervisor, whose memory is the guest RAM it took at boot
+// and reads the same for an idle actor and a saturated one; the guest kernel is
+// what accounts for the workload.
+//
+// With one exception its errors mean "no numbers right now": a guest that has
+// stopped answering is routine here, and a vsock call offers no error type that
+// separates "gone" from "broken". The exception is errStaleGuestTarget.
+func (s *microvmRuntime) Sample(ctx context.Context, active resources.ActorAttribution, sb ateworker.Sandbox) (ateworker.Reading, error) {
+	// No guest to ask yet, usually a poll landing in the boot or the restore, or
+	// one already torn down.
+	ra, _ := sb.(*runningActor)
+	var target *guestStatsTarget
+	if ra != nil {
+		target = ra.statsTarget()
 	}
-	// Belt and braces against the one thing that must never happen. The target
-	// is published and cleared under lock alongside the attribution, so this
-	// should be unreachable; if the two ever disagree, decline rather than
-	// report a stale guest's numbers under the requested actor's name.
+	if target == nil {
+		return ateworker.Reading{}, fmt.Errorf("%w: no guest agent connection to measure yet", ateworker.ErrNoSample)
+	}
+	// The target is published alongside the attribution, so this should be
+	// unreachable; if the two ever disagree, decline rather than report a
+	// stale guest's numbers under the requested actor's name.
 	if target.actorUID != active.UID {
-		return nil, nil, fmt.Errorf("%w: %q, not %q", errStaleGuestTarget, target.actorUID, active.UID)
+		return ateworker.Reading{}, fmt.Errorf("%w: %q, not %q", errStaleGuestTarget, target.actorUID, active.UID)
 	}
 
 	observedAt := time.Now()
 	sample, cpuByContainer, err := sumContainerStats(ctx, target)
 	if err != nil {
-		return nil, nil, fmt.Errorf("no container stats from the guest agent: %w", err)
+		return ateworker.Reading{}, fmt.Errorf("%w: no container stats from the guest agent: %w", ateworker.ErrNoSample, err)
 	}
 
-	return &ateworkerpb.WorkloadStatsSample{
-		Atespace:              active.Ref.Atespace,
-		ActorName:             active.Ref.Name,
-		ActorUid:              active.UID,
-		ActorTemplateAtespace: active.TemplateAtespace,
-		ActorTemplateName:     active.TemplateName,
+	return ateworker.Reading{
+		Sample: &ateworkerpb.WorkloadStatsSample{
+			Atespace:              active.Ref.Atespace,
+			ActorName:             active.Ref.Name,
+			ActorUid:              active.UID,
+			ActorTemplateAtespace: active.TemplateAtespace,
+			ActorTemplateName:     active.TemplateName,
 
-		SandboxClass: string(atev1alpha1.SandboxClassMicroVM),
-		Source:       ateworkerpb.StatsSource_STATS_SOURCE_GUEST_AGENT,
+			SandboxClass: string(atev1alpha1.SandboxClassMicroVM),
+			Source:       ateworkerpb.StatsSource_STATS_SOURCE_GUEST_AGENT,
 
-		MemoryCurrentBytes:    sample.MemoryCurrentBytes,
-		MemoryPeakBytes:       sample.MemoryPeakBytes,
-		MemoryWorkingSetBytes: sample.MemoryWorkingSetBytes,
-		CpuUsageUsec:          sample.CPUUsageUsec,
+			MemoryCurrentBytes:    sample.MemoryCurrentBytes,
+			MemoryPeakBytes:       sample.MemoryPeakBytes,
+			MemoryWorkingSetBytes: sample.MemoryWorkingSetBytes,
+			CpuUsageUsec:          sample.CPUUsageUsec,
 
-		ObservedAtUnixNano: observedAt.UnixNano(),
-	}, cpuByContainer, nil
+			ObservedAtUnixNano: observedAt.UnixNano(),
+		},
+		CPUByContainer: cpuByContainer,
+	}, nil
 }
 
 // sumContainerStats reads every container of the actor and adds them up. It

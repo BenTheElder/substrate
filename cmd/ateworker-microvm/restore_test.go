@@ -29,9 +29,8 @@ import (
 
 	"github.com/agent-substrate/substrate/cmd/ateworker-microvm/internal/ch"
 	"github.com/agent-substrate/substrate/cmd/ateworker-microvm/internal/kata"
-	"github.com/agent-substrate/substrate/internal/actorlock"
 	"github.com/agent-substrate/substrate/internal/apierror"
-	"github.com/agent-substrate/substrate/internal/proto/ateworkerpb"
+	"github.com/agent-substrate/substrate/internal/ateworker"
 )
 
 // writeSnapshotConfig writes a config.json holding the given fs devices (plus the
@@ -222,44 +221,6 @@ func TestRewriteSnapshotSocketPaths(t *testing.T) {
 	})
 }
 
-func TestRestoreWorkloadRejectsEmptyRestoreDir(t *testing.T) {
-	s := &AteWorkerService{
-		locks:    actorlock.New(),
-		inFlight: actorlock.NewInFlight(),
-	}
-
-	for _, tc := range []struct {
-		name string
-		req  *ateworkerpb.RestoreWorkloadRequest
-	}{
-		{
-			name: "nil actor_dirs",
-			req:  &ateworkerpb.RestoreWorkloadRequest{ActorUid: "actor-a"},
-		},
-		{
-			name: "empty restore_dir",
-			req: &ateworkerpb.RestoreWorkloadRequest{
-				ActorUid: "actor-a",
-				ActorDirs: &ateworkerpb.ActorDirs{
-					RootDir:                   "/node/actors/actor-a",
-					OciBundleDir:              "/node/actors/actor-a/bundle",
-					CheckpointDir:             "/node/actors/actor-a/checkpoint-state",
-					DurableDirVolumeMountsDir: "/node/actors/actor-a/durable-dirs",
-					SystemInfoVolumeRootsDir:  "/node/actors/actor-a/system-info",
-					VolumesDir:                "/node/actors/actor-a/volumes",
-				},
-			},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := s.RestoreWorkload(context.Background(), tc.req)
-			if apierror.Code(err) != codes.InvalidArgument {
-				t.Fatalf("RestoreWorkload() code = %v, want %v (err: %v)", apierror.Code(err), codes.InvalidArgument, err)
-			}
-		})
-	}
-}
-
 func TestMaybeDropStagedMemoryImage(t *testing.T) {
 	for _, tc := range []struct {
 		name               string
@@ -407,31 +368,10 @@ func TestNewReseedNonce(t *testing.T) {
 	}
 }
 
-func TestRPCsRejectUntrustedRuntimeAssetPaths(t *testing.T) {
-	s := &AteWorkerService{}
-	ctx := context.Background()
-	dirs := &ateworkerpb.ActorDirs{
-		RootDir:                   "/node/actors/actor-a",
-		OciBundleDir:              "/node/actors/actor-a/bundle",
-		CheckpointDir:             "/node/actors/actor-a/checkpoint-state",
-		RestoreDir:                "/node/actors/actor-a/restore",
-		DurableDirVolumeMountsDir: "/node/actors/actor-a/durable-dirs",
-		SystemInfoVolumeRootsDir:  "/node/actors/actor-a/system-info",
-		VolumesDir:                "/node/actors/actor-a/volumes",
-	}
-	assets := map[string]string{assetCH: "/bin/sh"}
-	for name, call := range map[string]func() error{
-		"RunWorkload": func() error {
-			_, err := s.RunWorkload(ctx, &ateworkerpb.RunWorkloadRequest{ActorDirs: dirs, RuntimeAssetPaths: assets})
-			return err
-		},
-		"RestoreWorkload": func() error {
-			_, err := s.RestoreWorkload(ctx, &ateworkerpb.RestoreWorkloadRequest{ActorDirs: dirs, RuntimeAssetPaths: assets})
-			return err
-		},
-	} {
-		if got := apierror.Code(call()); got != codes.InvalidArgument {
-			t.Errorf("%s() code = %v, want %v", name, got, codes.InvalidArgument)
-		}
+// Only assets from the static files dir are run.
+func TestValidateRejectsUntrustedRuntimeAssetPaths(t *testing.T) {
+	err := (&microvmRuntime{}).Validate(&ateworker.Actor{AssetPaths: map[string]string{assetCH: "/bin/sh"}})
+	if got := apierror.Code(err); got != codes.InvalidArgument {
+		t.Errorf("Validate() code = %v, want %v (err: %v)", got, codes.InvalidArgument, err)
 	}
 }

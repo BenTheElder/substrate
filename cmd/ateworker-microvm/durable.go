@@ -90,7 +90,7 @@ func durableVolumeNames(containers []*ateworkerpb.Container) []string {
 
 // stageDurableVolumes bind-mounts src, the actor's host durable-dir directory,
 // into the sandbox's shared virtio-fs tree at SharedDir(actorUID)/durable.
-func (s *AteWorkerService) stageDurableVolumes(ctx context.Context, actorUID, src string) error {
+func (s *microvmRuntime) stageDurableVolumes(ctx context.Context, actorUID, src string) error {
 	if _, err := os.Stat(src); err != nil {
 		return fmt.Errorf("while checking durable-dir volumes dir %q: %w", src, err)
 	}
