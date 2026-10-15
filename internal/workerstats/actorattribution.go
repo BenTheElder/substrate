@@ -14,10 +14,10 @@
 
 // Package workerstats holds the usage telemetry both worker runtimes share: the
 // attribution a worker retains for each actor, the per-activation state behind
-// every sample, the sampler, and the ate.actor.usage_sampled records. The
-// per-runtime measurement reads live with their runtimes (the cgroup read is
-// only meaningful inside the gVisor worker's cgroup namespace, the guest-agent
-// read only over the micro-VM's vsock).
+// every sample, the sampler, the pending sample, and the ate.actor.usage_sampled
+// records. The per-runtime measurement reads live with their runtimes (the
+// cgroup read is only meaningful inside the gVisor worker's cgroup namespace,
+// the guest-agent read only over the micro-VM's vsock).
 package workerstats
 
 import (

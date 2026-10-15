@@ -30,6 +30,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/ocispec"
 	"github.com/agent-substrate/substrate/internal/proto/ateworkerpb"
 	"github.com/agent-substrate/substrate/internal/resources"
+	"github.com/agent-substrate/substrate/internal/workerstats"
 	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 )
 
@@ -144,7 +145,7 @@ func (s *AteWorkerService) GetActiveWorkloadStats(ctx context.Context, req *atew
 	for _, h := range hosted {
 		sample := h.usage.Latest()
 		if sample == nil {
-			sample = h.usage.WithEpoch(pendingSample(&h.attribution))
+			sample = h.usage.WithEpoch(workerstats.PendingSample(&h.attribution, string(atev1alpha1.SandboxClassGvisor)))
 		}
 		samples = append(samples, sample)
 	}
@@ -171,7 +172,7 @@ func (s *AteWorkerService) sweepUsage(ctx context.Context) {
 				attrs := append(ateattr.ActorLogAttrs(h.attribution), slog.Any("err", err))
 				slog.LogAttrs(ctx, slog.LevelWarn, "Failed to read sandbox cgroup", attrs...)
 			}
-			sample = h.usage.WithEpoch(pendingSample(&h.attribution))
+			sample = h.usage.WithEpoch(workerstats.PendingSample(&h.attribution, string(atev1alpha1.SandboxClassGvisor)))
 		}
 		// The read holds no lifecycle lock, and the cgroup is found by UID
 		// alone. If the actor was re-hosted meanwhile, perhaps on another
@@ -219,31 +220,13 @@ func (s *AteWorkerService) recordFinalIfEnded(ctx context.Context, h *hostedActo
 // recordFinal writes the final record of an activation that a checkpoint or a
 // terminate ended, from its newest measured sample.
 func (s *AteWorkerService) recordFinal(ctx context.Context, h *hostedActor) {
-	pending := h.usage.WithEpoch(pendingSample(&h.attribution))
+	pending := h.usage.WithEpoch(workerstats.PendingSample(&h.attribution, string(atev1alpha1.SandboxClassGvisor)))
 	h.usage.Final(func(measured *ateworkerpb.WorkloadStatsSample) {
 		if measured == nil {
 			measured = pending
 		}
 		s.usage.Emit(ctx, ateattr.StatsKindFinal, measured)
 	})
-}
-
-// pendingSample is a workload with no numbers to give yet, as the discovery
-// read reports it: attribution and the runtime family, measurements absent --
-// source stays STATS_SOURCE_UNSPECIFIED, which the sample's contract defines
-// as "not measured" rather than "measured as zero".
-func pendingSample(active *resources.ActorAttribution) *ateworkerpb.WorkloadStatsSample {
-	return &ateworkerpb.WorkloadStatsSample{
-		Atespace:              active.Ref.Atespace,
-		ActorName:             active.Ref.Name,
-		ActorUid:              active.UID,
-		ActorTemplateAtespace: active.TemplateAtespace,
-		ActorTemplateName:     active.TemplateName,
-
-		SandboxClass: string(atev1alpha1.SandboxClassGvisor),
-
-		ObservedAtUnixNano: time.Now().UnixNano(),
-	}
 }
 
 // measure reads h's sandbox cgroup as a reading of its activation, returning
