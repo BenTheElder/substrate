@@ -17,20 +17,27 @@
 package main
 
 import (
-	"context"
 	"strings"
 	"testing"
 
 	"google.golang.org/grpc/codes"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 
 	"github.com/agent-substrate/substrate/internal/apierror"
 	"github.com/agent-substrate/substrate/internal/proto/ateworkerpb"
+	"github.com/agent-substrate/substrate/internal/resources"
 )
 
 // TestValidateFidelity pins what this runtime serves. gVisor keeps rootfs
 // changes inside its memory checkpoint, so ROOTFS is refused until it can
 // capture them on their own; the error names the levels it does serve.
 func TestValidateFidelity(t *testing.T) {
+	validateFidelity := func(f ateworkerpb.SnapshotFidelity) error {
+		if errs := resources.ValidateSnapshotFidelity(f, config.Fidelities, field.NewPath("fidelity")); len(errs) > 0 {
+			return apierror.InvalidArgument("%v", errs.ToAggregate())
+		}
+		return nil
+	}
 	for _, tc := range []struct {
 		name     string
 		fidelity ateworkerpb.SnapshotFidelity
@@ -57,31 +64,5 @@ func TestValidateFidelity(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("rootfs rejection %q does not list %s as supported", err, want)
 		}
-	}
-}
-
-// TestRPCsRejectRootfsBeforeTouchingTheSandbox pins that a ROOTFS checkpoint
-// or restore fails validation up front, before the actor lock or any file
-// system work, so a misrouted request cannot leave the actor half-handled.
-func TestRPCsRejectRootfsBeforeTouchingTheSandbox(t *testing.T) {
-	s := &AteWorkerService{}
-	dirs := &ateworkerpb.ActorDirs{
-		RootDir:                   "/node/actors/actor-a",
-		OciBundleDir:              "/node/actors/actor-a/bundle",
-		CheckpointDir:             "/node/actors/actor-a/checkpoint-state",
-		RestoreDir:                "/node/actors/actor-a/restore-state",
-		DurableDirVolumeMountsDir: "/node/actors/actor-a/durable-dirs",
-		SystemInfoVolumeRootsDir:  "/node/actors/actor-a/system-info",
-		VolumesDir:                "/node/actors/actor-a/volumes",
-	}
-	rootfs := ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS
-
-	_, err := s.CheckpointWorkload(context.Background(), &ateworkerpb.CheckpointWorkloadRequest{ActorUid: "actor-a", ActorDirs: dirs, Fidelity: rootfs})
-	if apierror.Code(err) != codes.InvalidArgument || !strings.Contains(err.Error(), "fidelity") {
-		t.Errorf("CheckpointWorkload(ROOTFS) = %v, want InvalidArgument naming the fidelity", err)
-	}
-	_, err = s.RestoreWorkload(context.Background(), &ateworkerpb.RestoreWorkloadRequest{ActorUid: "actor-a", ActorDirs: dirs, Fidelity: rootfs})
-	if apierror.Code(err) != codes.InvalidArgument || !strings.Contains(err.Error(), "fidelity") {
-		t.Errorf("RestoreWorkload(ROOTFS) = %v, want InvalidArgument naming the fidelity", err)
 	}
 }

@@ -29,29 +29,26 @@ import (
 	"github.com/agent-substrate/substrate/internal/proto/ateworkerpb"
 )
 
-// actorResolvConf writes the resolver bind source outside the actor's rootfs.
-func actorResolvConf(actorDirs *ateworkerpb.ActorDirs) (string, error) {
+// writeActorResolvConf writes the resolver bind source outside the actor's rootfs.
+func writeActorResolvConf(actorDirs *ateworkerpb.ActorDirs) error {
 	pod, err := os.ReadFile("/etc/resolv.conf")
 	if err != nil {
-		return "", fmt.Errorf("reading the worker pod resolv.conf: %w", err)
+		return fmt.Errorf("reading the worker pod resolv.conf: %w", err)
 	}
 	path := resolvConfPath(actorDirs)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return "", fmt.Errorf("creating the actor directory: %w", err)
+		return fmt.Errorf("creating the actor directory: %w", err)
 	}
 	if err := os.WriteFile(path, actornet.SandboxResolvConf(actornet.ActorVethGateway, pod), 0o644); err != nil {
-		return "", fmt.Errorf("writing the actor resolv.conf: %w", err)
+		return fmt.Errorf("writing the actor resolv.conf: %w", err)
 	}
-	return path, nil
+	return nil
 }
 
-// removeActorResolvConf drops the file with the actor's network; atelet's
+// removeActorResolvConf drops the file with the actor's sandbox; atelet's
 // per-activation reset clears directories under the actor's path, not files.
-func removeActorResolvConf(ctx context.Context, path string) {
-	if path == "" {
-		return
-	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+func removeActorResolvConf(ctx context.Context, actorDirs *ateworkerpb.ActorDirs) {
+	if err := os.Remove(resolvConfPath(actorDirs)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		slog.WarnContext(ctx, "Failed to remove the actor resolv.conf", slog.Any("err", err))
 	}
 }

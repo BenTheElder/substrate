@@ -18,7 +18,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -33,77 +32,18 @@ import (
 	"github.com/agent-substrate/substrate/internal/actorlog"
 	"github.com/agent-substrate/substrate/internal/apierror"
 	"github.com/agent-substrate/substrate/internal/ateattr"
+	"github.com/agent-substrate/substrate/internal/ateworker"
 	"github.com/agent-substrate/substrate/internal/nodepath"
 	"github.com/agent-substrate/substrate/internal/ocispec"
-	"github.com/agent-substrate/substrate/internal/proto/ateworkerpb"
 	"github.com/agent-substrate/substrate/internal/resources"
 )
 
-// Every RPC rejects a request without ActorDirs before touching any state.
-func TestRPCsRejectMissingActorDirs(t *testing.T) {
-	s := &AteWorkerService{}
-	ctx := context.Background()
-	for name, call := range map[string]func() error{
-		"RunWorkload": func() error {
-			_, err := s.RunWorkload(ctx, &ateworkerpb.RunWorkloadRequest{})
-			return err
-		},
-		"RestoreWorkload": func() error {
-			_, err := s.RestoreWorkload(ctx, &ateworkerpb.RestoreWorkloadRequest{})
-			return err
-		},
-		"CheckpointWorkload": func() error {
-			_, err := s.CheckpointWorkload(ctx, &ateworkerpb.CheckpointWorkloadRequest{})
-			return err
-		},
-		"TerminateWorkload": func() error {
-			_, err := s.TerminateWorkload(ctx, &ateworkerpb.TerminateWorkloadRequest{})
-			return err
-		},
-	} {
-		if got := apierror.Code(call()); got != codes.InvalidArgument {
-			t.Errorf("%s() code = %v, want %v", name, got, codes.InvalidArgument)
-		}
+// Only runsc from the static files dir is executed.
+func TestValidateRejectsUntrustedRunscPath(t *testing.T) {
+	r := &gvisorRuntime{}
+	if err := r.Validate(&ateworker.Actor{RunscPath: "/bin/sh"}); apierror.Code(err) != codes.InvalidArgument {
+		t.Errorf("Validate(/bin/sh) code = %v, want %v (err: %v)", apierror.Code(err), codes.InvalidArgument, err)
 	}
-}
-
-func TestRPCsRejectUntrustedRunscPath(t *testing.T) {
-	s := &AteWorkerService{}
-	ctx := context.Background()
-	dirs := &ateworkerpb.ActorDirs{
-		RootDir:                   "/node/actors/actor-a",
-		OciBundleDir:              "/node/actors/actor-a/bundle",
-		CheckpointDir:             "/node/actors/actor-a/checkpoint-state",
-		RestoreDir:                "/node/actors/actor-a/restore",
-		DurableDirVolumeMountsDir: "/node/actors/actor-a/durable-dirs",
-		SystemInfoVolumeRootsDir:  "/node/actors/actor-a/system-info",
-		VolumesDir:                "/node/actors/actor-a/volumes",
-	}
-	for name, call := range map[string]func() error{
-		"RunWorkload": func() error {
-			_, err := s.RunWorkload(ctx, &ateworkerpb.RunWorkloadRequest{ActorDirs: dirs, RunscPath: "/bin/sh"})
-			return err
-		},
-		"RestoreWorkload": func() error {
-			_, err := s.RestoreWorkload(ctx, &ateworkerpb.RestoreWorkloadRequest{ActorDirs: dirs, RunscPath: "/bin/sh"})
-			return err
-		},
-		"CheckpointWorkload": func() error {
-			_, err := s.CheckpointWorkload(ctx, &ateworkerpb.CheckpointWorkloadRequest{ActorDirs: dirs, RunscPath: "/bin/sh"})
-			return err
-		},
-		"TerminateWorkload": func() error {
-			_, err := s.TerminateWorkload(ctx, &ateworkerpb.TerminateWorkloadRequest{ActorDirs: dirs, RunscPath: "/bin/sh"})
-			return err
-		},
-	} {
-		if got := apierror.Code(call()); got != codes.InvalidArgument {
-			t.Errorf("%s() code = %v, want %v", name, got, codes.InvalidArgument)
-		}
-	}
-}
-
-func TestRestoreWorkloadRejectsUnsupportedFidelity(t *testing.T) {
 	staticFilesDir := nodepath.StaticFilesDir
 	nodepath.StaticFilesDir = t.TempDir()
 	t.Cleanup(func() { nodepath.StaticFilesDir = staticFilesDir })
@@ -111,28 +51,8 @@ func TestRestoreWorkloadRejectsUnsupportedFidelity(t *testing.T) {
 	if err := os.WriteFile(runscPath, nil, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	dirs := &ateworkerpb.ActorDirs{
-		RootDir:                   "/node/actors/actor-a",
-		OciBundleDir:              "/node/actors/actor-a/bundle",
-		CheckpointDir:             "/node/actors/actor-a/checkpoint-state",
-		RestoreDir:                "/node/actors/actor-a/restore",
-		DurableDirVolumeMountsDir: "/node/actors/actor-a/durable-dirs",
-		SystemInfoVolumeRootsDir:  "/node/actors/actor-a/system-info",
-		VolumesDir:                "/node/actors/actor-a/volumes",
-	}
-	// A zero service cannot acquire locks, configure networking, or open log pipes.
-	s := &AteWorkerService{}
-	for _, fidelity := range []ateworkerpb.SnapshotFidelity{0, ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS, 99} {
-		t.Run(fidelity.String(), func(t *testing.T) {
-			resp, err := s.RestoreWorkload(context.Background(), &ateworkerpb.RestoreWorkloadRequest{
-				ActorDirs: dirs,
-				RunscPath: runscPath,
-				Fidelity:  fidelity,
-			})
-			if resp != nil || err == nil || apierror.Code(err) != codes.InvalidArgument {
-				t.Errorf("RestoreWorkload() = (%v, %v), want InvalidArgument for unsupported fidelity", resp, err)
-			}
-		})
+	if err := r.Validate(&ateworker.Actor{RunscPath: runscPath}); err != nil {
+		t.Errorf("Validate(%s) = %v, want nil", runscPath, err)
 	}
 }
 
