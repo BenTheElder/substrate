@@ -130,8 +130,8 @@ func TestParseValid(t *testing.T) {
 		{input: "1.5Pi", wantWhole: 1<<50 + 512<<40, wantMilli: 0, wantStyle: IEC, wantCanon: "1.5Pi"},
 		{input: "1Ei", wantWhole: 1 << 60, wantMilli: 0, wantStyle: IEC, wantCanon: "1Ei"},
 		{input: "1.5Ei", wantWhole: 1<<60 + 512<<50, wantMilli: 0, wantStyle: IEC, wantCanon: "1.5Ei"},
-		{input: "15Ei", wantWhole: 15 << 60, wantMilli: 0, wantStyle: IEC, wantCanon: "15Ei"},
-		{input: "15.999Ei", wantWhole: 18445591152204944769, wantMilli: 24, wantStyle: IEC, wantCanon: "15.999Ei"},
+		{input: "7Ei", wantWhole: 7 << 60, wantMilli: 0, wantStyle: IEC, wantCanon: "7Ei"},
+		{input: "7.999Ei", wantWhole: 9222219115350168961, wantMilli: 24, wantStyle: IEC, wantCanon: "7.999Ei"},
 	}
 
 	for _, tc := range tests {
@@ -259,9 +259,7 @@ func TestParseInvalid(t *testing.T) {
 		{name: "milli with overflowing whole part", input: "18446744073709551616m", wantOverflow: true},
 		{name: "19E overflows", input: "19E", wantOverflow: true},
 		{name: "18.447E overflows", input: "18.447E", wantOverflow: true},
-		{name: "16Ei overflows", input: "16Ei", wantOverflow: true},
 		{name: "k overflow", input: "18446744073709552k", wantOverflow: true},
-		{name: "Ki overflow", input: "18014398509481984Ki", wantOverflow: true},
 		{name: "fractional overflow after base multiply", input: "18446744073709551.616k", wantOverflow: true},
 	}
 
@@ -290,6 +288,44 @@ func TestMustParsePanicsOnInvalid(t *testing.T) {
 		}
 	}()
 	MustParse("invalid")
+}
+
+// resource.Quantity clamps BinarySI values above MaxInt64 to MaxInt64, at any
+// magnitude, and so do we
+func TestIECClamp(t *testing.T) {
+	for _, input := range []string{"8Ei", "15Ei", "15.999Ei", "16Ei", "1000Ei", "99999999999999999999999Ei", "8192Pi", "9007199254740992Ki", "18014398509481984Ki"} {
+		t.Run(input, func(t *testing.T) {
+			if err := CanParse(input); err != nil {
+				t.Fatalf("CanParse(%q) unexpected error: %v", input, err)
+			}
+			q, err := Parse(input)
+			if err != nil {
+				t.Fatalf("Parse(%q) unexpected error: %v", input, err)
+			}
+			if q.whole != math.MaxInt64 || q.milli != 0 || q.style != IEC {
+				t.Errorf("Parse(%q) = %+v, want MaxInt64", input, q)
+			}
+			if got := q.String(); got != "9223372036854775807" {
+				t.Errorf("Parse(%q).String() = %q, want the clamped value", input, got)
+			}
+		})
+	}
+	// just under the cap is exact
+	if q := MustParse("9007199254740991.999Ki"); q.whole != math.MaxInt64-1 || q.milli != 976 {
+		t.Errorf("Parse(9007199254740991.999Ki) = %+v, want MaxInt64-0.024", q)
+	}
+	for _, q := range []Qty{New(8<<60, IEC), New(math.MaxUint64, IEC), NewMilli(math.MaxUint64, IEC)} {
+		if q.whole > math.MaxInt64 || (q.whole == math.MaxInt64 && q.milli != 0) {
+			t.Errorf("constructed %+v, want it clamped to MaxInt64", q)
+		}
+	}
+	// SI and plain values are never clamped, also as in resource.Quantity
+	if q := MustParse("18E"); q.whole != 18e18 {
+		t.Errorf("Parse(18E) = %+v, want 18e18", q)
+	}
+	if q := New(math.MaxUint64, SI); q.whole != math.MaxUint64 {
+		t.Errorf("New(MaxUint64, SI) = %+v, want unclamped", q)
+	}
 }
 
 func TestAsUint64AndAsUint64Milli(t *testing.T) {

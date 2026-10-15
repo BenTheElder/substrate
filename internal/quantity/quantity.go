@@ -56,20 +56,33 @@ type Qty struct {
 
 // New returns a Qty with the given whole-number value and suffix style.
 func New(val uint64, style SuffixStyle) Qty {
-	return Qty{
+	return clampIEC(Qty{
 		whole: val,
 		style: style,
-	}
+	})
 }
 
 // NewMilli returns a Qty with the given milli-unit value (val / 1000) and
 // suffix style.
 func NewMilli(val uint64, style SuffixStyle) Qty {
-	return Qty{
+	return clampIEC(Qty{
 		whole: val / milliDivisor,
 		milli: val % milliDivisor,
 		style: style,
+	})
+}
+
+// clampIEC caps IEC quantities at math.MaxInt64, as resource.Quantity does
+// for BinarySI. SI and unsuffixed quantities are not clamped there, or here.
+func clampIEC(q Qty) Qty {
+	if q.style == IEC && (q.whole > math.MaxInt64 || (q.whole == math.MaxInt64 && q.milli > 0)) {
+		return Qty{whole: math.MaxInt64, style: IEC}
 	}
+	return q
+}
+
+func hasIECSuffix(s string) bool {
+	return len(s) > 0 && s[len(s)-1] == 'i'
 }
 
 // MustParse is like Parse but panics if the input cannot be parsed.
@@ -94,9 +107,23 @@ var ErrInvalid = errors.New("invalid quantity")
 //     (Ki, Mi, Gi, Ti, Pi, Ei).
 //
 // Scientific/exponent notation is not supported. The resulting value must fit
-// within a uint64. If a fractional "m" suffix produces sub-milli precision
+// within a uint64, except IEC values above math.MaxInt64 are clamped to it, as
+// resource.Quantity does. If a fractional "m" suffix produces sub-milli precision
 // (e.g. "0.5m"), it rounds up to the next milli.
 func Parse(s string) (Qty, error) {
+	q, err := parse(s)
+	if hasIECSuffix(s) {
+		if errors.Is(err, ErrOverflow) {
+			return Qty{whole: math.MaxInt64, style: IEC}, nil
+		}
+		if err == nil {
+			return clampIEC(q), nil
+		}
+	}
+	return q, err
+}
+
+func parse(s string) (Qty, error) {
 	end := len(s)
 	if end == 0 {
 		return Qty{}, ErrInvalid
@@ -319,8 +346,15 @@ func parseSlowBoundary(s string, wholeLen int, wholeIn, fracIn uint64, style Suf
 }
 
 // CanParse reports whether s is a valid quantity string that fits in a uint64,
-// without constructing a Qty.
+// without constructing a Qty. Like Parse, any valid IEC value fits.
 func CanParse(s string) error {
+	if err := canParse(s); err != nil && !(errors.Is(err, ErrOverflow) && hasIECSuffix(s)) {
+		return err
+	}
+	return nil
+}
+
+func canParse(s string) error {
 	end := len(s)
 	if end == 0 {
 		return ErrInvalid
