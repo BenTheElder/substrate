@@ -131,6 +131,11 @@ spec:
       containers:
       - name: fake-workersync
         image: ko://github.com/agent-substrate/substrate/cmd/benchmarking/isolate/fake-workersync
+        env:
+        - name: GOMEMLIMIT
+          valueFrom:
+            resourceFieldRef:
+              resource: limits.memory
         # Ready once it has adopted the registered fake Workers, which needs
         # ate-api-server serving.
         readinessProbe:

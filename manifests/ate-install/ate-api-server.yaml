@@ -118,6 +118,10 @@ spec:
         # set on it.
         - name: ATE_STORAGE_BACKEND
           value: "gcs"
+        - name: GOMEMLIMIT
+          valueFrom:
+            resourceFieldRef:
+              resource: limits.memory
         envFrom:
         - configMapRef:
             name: ate-otel-config
@@ -151,6 +155,10 @@ spec:
           - --drain-timeout=15s
           - --objectstore-plugin-socket=/run/objectstore-plugin/control.sock
         env:
+        - name: GOMEMLIMIT
+          valueFrom:
+            resourceFieldRef:
+              resource: limits.memory
         - name: POD_NAME
           valueFrom:
             fieldRef:

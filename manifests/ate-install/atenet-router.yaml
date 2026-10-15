@@ -262,6 +262,10 @@ spec:
         # If long turns must survive a shutdown, raise --drain-timeout and
         # terminationGracePeriodSeconds above together.
         env:
+        - name: GOMEMLIMIT
+          valueFrom:
+            resourceFieldRef:
+              resource: limits.memory
         - name: POD_NAME
           valueFrom:
             fieldRef:

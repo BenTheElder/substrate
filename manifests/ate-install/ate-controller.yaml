@@ -107,6 +107,10 @@ spec:
         - --ateapi-client-cert=/run/podidentity.podcert.ate.dev/credential-bundle.pem
         - --dns-egress-policy=enforce-in-atunnel
         env:
+        - name: GOMEMLIMIT
+          valueFrom:
+            resourceFieldRef:
+              resource: limits.memory
         - name: POD_NAME
           valueFrom:
             fieldRef:

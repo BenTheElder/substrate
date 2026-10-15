@@ -50,6 +50,11 @@ spec:
         # Enforce the atespace→project authorization policy (default-deny).
         - "--project-policy-file=/etc/gsm-credential-provider/project-policy.yaml"
         - "--log-level=info"
+        env:
+        - name: GOMEMLIMIT
+          valueFrom:
+            resourceFieldRef:
+              resource: limits.memory
         ports:
         - name: grpc
           containerPort: 50051

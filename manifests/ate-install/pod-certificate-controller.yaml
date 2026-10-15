@@ -153,6 +153,10 @@ spec:
         - --postgres-client-namespace=ate-system
         - --workers-per-signer=$(WORKERS_PER_SIGNER)
         env:
+        - name: GOMEMLIMIT
+          valueFrom:
+            resourceFieldRef:
+              resource: limits.memory
         - name: POD_NAMESPACE
           valueFrom:
             fieldRef:

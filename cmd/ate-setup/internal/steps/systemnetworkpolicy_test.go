@@ -18,6 +18,7 @@ import (
 	"maps"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -35,9 +36,10 @@ import (
 // systemPod is one ate-system workload's pod template, as the NetworkPolicies
 // see it.
 type systemPod struct {
-	workload string // kind/name, for messages
-	labels   map[string]string
-	ports    []corev1.ContainerPort
+	workload   string // kind/name, for messages
+	labels     map[string]string
+	ports      []corev1.ContainerPort
+	containers []corev1.Container
 }
 
 // systemInstall is everything an install of one configuration puts in
@@ -155,7 +157,12 @@ func loadSystemInstall(t *testing.T, cfg *config.Config) systemInstall {
 			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(raw, &tmpl); err != nil {
 				t.Fatalf("converting the pod template of %s/%s: %v", obj.GetKind(), obj.GetName(), err)
 			}
-			pod := systemPod{workload: obj.GetKind() + "/" + obj.GetName(), labels: tmpl.Labels}
+			allContainers := slices.Concat(tmpl.Spec.InitContainers, tmpl.Spec.Containers)
+			pod := systemPod{
+				workload:   obj.GetKind() + "/" + obj.GetName(),
+				labels:     tmpl.Labels,
+				containers: allContainers,
+			}
 			if obj.GetKind() == "Job" {
 				// The Job controller adds this label to its pods.
 				pod.labels = map[string]string{"batch.kubernetes.io/job-name": obj.GetName()}
@@ -163,7 +170,7 @@ func loadSystemInstall(t *testing.T, cfg *config.Config) systemInstall {
 					pod.labels[k] = v
 				}
 			}
-			for _, c := range slices.Concat(tmpl.Spec.InitContainers, tmpl.Spec.Containers) {
+			for _, c := range allContainers {
 				pod.ports = append(pod.ports, c.Ports...)
 			}
 			install.pods = append(install.pods, pod)
@@ -515,3 +522,79 @@ func TestSystemNetworkPoliciesLeastPrivilege(t *testing.T) {
 // workerPoolLabelForTest is the label the WorkerPool controller puts on
 // worker pods (cmd/atecontroller/internal/controllers/workerpool_apply.go).
 const workerPoolLabelForTest = "ate.dev/worker-pool"
+
+func requireGoContainerGOMEMLIMIT(t *testing.T, workload string, c corev1.Container) {
+	t.Helper()
+	for _, ev := range c.Env {
+		if ev.Name != "GOMEMLIMIT" {
+			continue
+		}
+		// sdsmint pins GOMEMLIMIT below its container memory limit so the Go
+		// collector starts working before the cgroup limit kills it.
+		if c.Name == "sdsmint" && ev.Value != "" {
+			return
+		}
+		if ev.ValueFrom != nil && ev.ValueFrom.ResourceFieldRef != nil && ev.ValueFrom.ResourceFieldRef.Resource == "limits.memory" {
+			return
+		}
+		t.Errorf("%s container %s sets GOMEMLIMIT to %+v, want resourceFieldRef limits.memory", workload, c.Name, ev)
+		return
+	}
+	t.Errorf("%s container %s (image %s) does not set GOMEMLIMIT", workload, c.Name, c.Image)
+}
+
+// TestGoContainersSetGOMEMLIMIT requires every Go container (ko:// image) in
+// the installed manifests to set GOMEMLIMIT via the downward API (or an
+// explicit value for sdsmint).
+func TestGoContainersSetGOMEMLIMIT(t *testing.T) {
+	for _, cfg := range installConfigs() {
+		t.Run(installName(cfg), func(t *testing.T) {
+			in := loadSystemInstall(t, cfg)
+			sawGoContainer := false
+			for _, pod := range in.pods {
+				for _, c := range pod.containers {
+					if !strings.HasPrefix(c.Image, "ko://") {
+						continue
+					}
+					sawGoContainer = true
+					requireGoContainerGOMEMLIMIT(t, pod.workload, c)
+				}
+			}
+			if !sawGoContainer {
+				t.Fatal("found no ko:// containers; the manifests changed shape and this test is checking nothing")
+			}
+		})
+	}
+
+	t.Run("pod-certificate-controller", func(t *testing.T) {
+		cfg := &config.Config{Root: repoRoot(t)}
+		objs, err := kube.LoadPath(cfg.Manifest("pod-certificate-controller.yaml"))
+		if err != nil {
+			t.Fatalf("loading pod-certificate-controller.yaml: %v", err)
+		}
+		sawGoContainer := false
+		for _, obj := range objs {
+			if obj.GetKind() != "Deployment" {
+				continue
+			}
+			raw, ok, _ := unstructured.NestedMap(obj.Object, "spec", "template")
+			if !ok {
+				t.Fatalf("%s/%s has no pod template", obj.GetKind(), obj.GetName())
+			}
+			var tmpl corev1.PodTemplateSpec
+			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(raw, &tmpl); err != nil {
+				t.Fatalf("converting the pod template of %s/%s: %v", obj.GetKind(), obj.GetName(), err)
+			}
+			for _, c := range slices.Concat(tmpl.Spec.InitContainers, tmpl.Spec.Containers) {
+				if !strings.HasPrefix(c.Image, "ko://") {
+					continue
+				}
+				sawGoContainer = true
+				requireGoContainerGOMEMLIMIT(t, obj.GetKind()+"/"+obj.GetName(), c)
+			}
+		}
+		if !sawGoContainer {
+			t.Fatal("found no ko:// containers in pod-certificate-controller.yaml")
+		}
+	})
+}
