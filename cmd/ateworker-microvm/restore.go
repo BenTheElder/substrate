@@ -147,7 +147,7 @@ func (s *AteWorkerService) RestoreWorkload(ctx context.Context, req *ateworkerpb
 	durableDir := p.actorDirs.GetDurableDirVolumeMountsDir()
 	tStart := time.Now()
 
-	attribution := p.actorAttribution()
+	attribution := p.attribution()
 	s.actorLogger.EmitLifecycleLog(ctx, "Actor restoring", attribution)
 
 	if err := s.endPreviousActivation(ctx, attribution.UID, req.GetActorDirs()); err != nil {
@@ -476,7 +476,7 @@ func (s *AteWorkerService) restoreMemoryFidelity(ctx context.Context, p actorBoo
 	// The joinable per-actor record the benchmarking tooling aggregates. The
 	// durable delta is not carried: tDurable is pinned to tLowers today, so it
 	// would always be the zero a record skips.
-	phaselog.LogSnapshotPhases(ctx, "Restore timing breakdown", p.actorAttribution(), scope,
+	phaselog.LogSnapshotPhases(ctx, "Restore timing breakdown", p.attribution(), scope,
 		phaselog.RestoreDurationKey, nil, []phaselog.Phase{
 			{Name: phasePrep, D: tPrep.Sub(tStart)},
 			{Name: phaseBundles, D: tBundles.Sub(tPrep)},
@@ -504,7 +504,7 @@ func (s *AteWorkerService) restoreMemoryFidelity(ctx context.Context, p actorBoo
 	// Re-attach stdout/stderr forwarding for each container over the agent
 	// connection dialed after resume: the restored guest's containers are alive, so
 	// ReadStdout/ReadStderr pick up where they left off.
-	attribution := p.actorAttribution()
+	attribution := p.attribution()
 	for _, c := range containers {
 		s.startActorLogForwarding(guestAC, attribution, c.GetName(), c.GetName())
 	}
