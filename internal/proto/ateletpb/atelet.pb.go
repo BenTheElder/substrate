@@ -493,7 +493,7 @@ func (x *AttributeEntry) GetValue() string {
 // WorkerResources and is validated by the same rules.
 type WorkerResources struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Resources are matched by name against actors' resources for placement.
+	// Resources are compared against actors' resources for placement.
 	//
 	// +k8s:optional
 	Resources *Resources `protobuf:"bytes,1,opt,name=resources,proto3" json:"resources,omitempty"`
@@ -554,15 +554,10 @@ func (x *WorkerResources) GetActors() int32 {
 
 type Resources struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// limits is the maximum amount of compute resources allowed. Only "cpu"
-	// and "memory" are supported, each at most once, and each quantity must be
-	// greater than zero; the cpu limit must be less than 1000 cores.
+	// limits is the maximum amount of compute resources allowed.
 	//
 	// +k8s:optional
-	// +k8s:maxItems=2
-	// +k8s:listType=map
-	// +k8s:listMapKey=name
-	Limits        []*Limits `protobuf:"bytes,1,rep,name=limits,proto3" json:"limits,omitempty"`
+	Limits        *ResourceList `protobuf:"bytes,1,opt,name=limits,proto3" json:"limits,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -597,43 +592,45 @@ func (*Resources) Descriptor() ([]byte, []int) {
 	return file_atelet_proto_rawDescGZIP(), []int{5}
 }
 
-func (x *Resources) GetLimits() []*Limits {
+func (x *Resources) GetLimits() *ResourceList {
 	if x != nil {
 		return x.Limits
 	}
 	return nil
 }
 
-// +k8s:customValidation # names, quantity parse/positivity, cpu bound
-type Limits struct {
+// ResourceList is an amount of each compute resource.
+type ResourceList struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// +k8s:required
-	// +k8s:maxLength=16 # the Limits hook restricts values to cpu/memory
-	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	// quantity is in Kubernetes resource.Quantity string form (e.g. "500m",
-	// "2Gi").
+	// cpu_millis is CPU in milli-cores (1000 = one core). 0 means none.
 	//
-	// +k8s:required
-	// +k8s:maxLength=32 # the Limits hook requires a parseable quantity
-	Quantity      string `protobuf:"bytes,2,opt,name=quantity,proto3" json:"quantity,omitempty"`
+	// +k8s:optional
+	// +k8s:minimum=0
+	// +k8s:maximum=999999 # less than 1000 cores
+	CpuMillis int64 `protobuf:"varint,1,opt,name=cpu_millis,json=cpuMillis,proto3" json:"cpu_millis,omitempty"`
+	// memory_bytes is memory in bytes. 0 means none.
+	//
+	// +k8s:optional
+	// +k8s:minimum=0
+	MemoryBytes   int64 `protobuf:"varint,2,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *Limits) Reset() {
-	*x = Limits{}
+func (x *ResourceList) Reset() {
+	*x = ResourceList{}
 	mi := &file_atelet_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *Limits) String() string {
+func (x *ResourceList) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*Limits) ProtoMessage() {}
+func (*ResourceList) ProtoMessage() {}
 
-func (x *Limits) ProtoReflect() protoreflect.Message {
+func (x *ResourceList) ProtoReflect() protoreflect.Message {
 	mi := &file_atelet_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -645,23 +642,23 @@ func (x *Limits) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use Limits.ProtoReflect.Descriptor instead.
-func (*Limits) Descriptor() ([]byte, []int) {
+// Deprecated: Use ResourceList.ProtoReflect.Descriptor instead.
+func (*ResourceList) Descriptor() ([]byte, []int) {
 	return file_atelet_proto_rawDescGZIP(), []int{6}
 }
 
-func (x *Limits) GetName() string {
+func (x *ResourceList) GetCpuMillis() int64 {
 	if x != nil {
-		return x.Name
+		return x.CpuMillis
 	}
-	return ""
+	return 0
 }
 
-func (x *Limits) GetQuantity() string {
+func (x *ResourceList) GetMemoryBytes() int64 {
 	if x != nil {
-		return x.Quantity
+		return x.MemoryBytes
 	}
-	return ""
+	return 0
 }
 
 type RegisterWorkerResponse struct {
@@ -4116,12 +4113,13 @@ const file_atelet_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value\"Z\n" +
 	"\x0fWorkerResources\x12/\n" +
 	"\tresources\x18\x01 \x01(\v2\x11.atelet.ResourcesR\tresources\x12\x16\n" +
-	"\x06actors\x18\x02 \x01(\x05R\x06actors\"3\n" +
-	"\tResources\x12&\n" +
-	"\x06limits\x18\x01 \x03(\v2\x0e.atelet.LimitsR\x06limits\"8\n" +
-	"\x06Limits\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1a\n" +
-	"\bquantity\x18\x02 \x01(\tR\bquantity\"\x18\n" +
+	"\x06actors\x18\x02 \x01(\x05R\x06actors\"9\n" +
+	"\tResources\x12,\n" +
+	"\x06limits\x18\x01 \x01(\v2\x14.atelet.ResourceListR\x06limits\"P\n" +
+	"\fResourceList\x12\x1d\n" +
+	"\n" +
+	"cpu_millis\x18\x01 \x01(\x03R\tcpuMillis\x12!\n" +
+	"\fmemory_bytes\x18\x02 \x01(\x03R\vmemoryBytes\"\x18\n" +
 	"\x16RegisterWorkerResponse\"\x7f\n" +
 	"\x1aRequestActorSuspendRequest\x12%\n" +
 	"\x0eactor_atespace\x18\x01 \x01(\tR\ractorAtespace\x12\x1d\n" +
@@ -4396,7 +4394,7 @@ var file_atelet_proto_goTypes = []any{
 	(*AttributeEntry)(nil),               // 6: atelet.AttributeEntry
 	(*WorkerResources)(nil),              // 7: atelet.WorkerResources
 	(*Resources)(nil),                    // 8: atelet.Resources
-	(*Limits)(nil),                       // 9: atelet.Limits
+	(*ResourceList)(nil),                 // 9: atelet.ResourceList
 	(*RegisterWorkerResponse)(nil),       // 10: atelet.RegisterWorkerResponse
 	(*RequestActorSuspendRequest)(nil),   // 11: atelet.RequestActorSuspendRequest
 	(*RequestActorSuspendResponse)(nil),  // 12: atelet.RequestActorSuspendResponse
@@ -4461,7 +4459,7 @@ var file_atelet_proto_depIdxs = []int32{
 	5,  // 3: atelet.SandboxRuntime.version:type_name -> atelet.VersionedSandboxCompat
 	6,  // 4: atelet.VersionedSandboxCompat.attributes:type_name -> atelet.AttributeEntry
 	8,  // 5: atelet.WorkerResources.resources:type_name -> atelet.Resources
-	9,  // 6: atelet.Resources.limits:type_name -> atelet.Limits
+	9,  // 6: atelet.Resources.limits:type_name -> atelet.ResourceList
 	15, // 7: atelet.GetActorEgressPolicyResponse.egress_policy:type_name -> atelet.EgressPolicy
 	16, // 8: atelet.EgressPolicy.rules:type_name -> atelet.EgressRule
 	17, // 9: atelet.EgressRule.http:type_name -> atelet.EgressDestinations
