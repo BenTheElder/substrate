@@ -21,9 +21,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"go.ate.dev/substrate/cmd/kubectl-ate/internal/printer"
+	"go.ate.dev/substrate/pkg/manifest"
 	"go.ate.dev/substrate/pkg/proto/ateapipb"
-	"google.golang.org/protobuf/encoding/protojson"
-	"sigs.k8s.io/yaml"
 )
 
 var (
@@ -155,19 +154,12 @@ The server also deletes the template's golden actor and golden snapshot.`,
 	},
 }
 
-// actorTemplateFromManifest parses a single protojson-shaped YAML or JSON
-// document into an ActorTemplate. Parsing is strict: unknown fields are an
-// error, so typos don't silently drop configuration.
+// actorTemplateFromManifest parses a single YAML or JSON document into an
+// ActorTemplate. Parsing is strict: unknown fields are an error, so typos
+// don't silently drop configuration.
 func actorTemplateFromManifest(data []byte) (*ateapipb.ActorTemplate, error) {
-	jsonData, err := yaml.YAMLToJSON(data)
-	if err != nil {
-		return nil, fmt.Errorf("invalid YAML: %w", err)
-	}
-	if string(jsonData) == "null" {
-		return nil, fmt.Errorf("manifest is empty")
-	}
 	template := &ateapipb.ActorTemplate{}
-	if err := protojson.Unmarshal(jsonData, template); err != nil {
+	if err := manifest.Unmarshal(data, template); err != nil {
 		return nil, err
 	}
 	return template, nil

@@ -16,15 +16,15 @@ package e2e
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"go.ate.dev/substrate/pkg/manifest"
 	"go.ate.dev/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/encoding/protojson"
-	"sigs.k8s.io/yaml"
 )
 
 // substrateTemplateSubstitutions is the placeholder set the protojson-shaped
@@ -75,16 +75,13 @@ func decodeSubstrateTemplates(t *testing.T, rendered []byte) []*ateapipb.ActorTe
 	t.Helper()
 	var templates []*ateapipb.ActorTemplate
 	for doc := range strings.SplitSeq(string(rendered), "\n---") {
-		jsonData, err := yaml.YAMLToJSON([]byte(doc))
-		if err != nil {
-			t.Fatalf("invalid YAML in ActorTemplate manifest: %v", err)
-		}
-		if string(jsonData) == "null" {
+		tmpl := &ateapipb.ActorTemplate{}
+		err := manifest.Unmarshal([]byte(doc), tmpl)
+		if errors.Is(err, manifest.ErrEmpty) {
 			continue
 		}
-		tmpl := &ateapipb.ActorTemplate{}
-		if err := protojson.Unmarshal(jsonData, tmpl); err != nil {
-			t.Fatalf("decoding protojson ActorTemplate: %v", err)
+		if err != nil {
+			t.Fatalf("decoding ActorTemplate: %v", err)
 		}
 		templates = append(templates, tmpl)
 	}

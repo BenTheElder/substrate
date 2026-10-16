@@ -22,13 +22,12 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/encoding/protojson"
-	"sigs.k8s.io/yaml"
 
 	"go.ate.dev/substrate/cmd/ate-setup/internal/log"
 	"go.ate.dev/substrate/internal/ateclient"
 	"go.ate.dev/substrate/internal/preview"
 	"go.ate.dev/substrate/internal/resources"
+	"go.ate.dev/substrate/pkg/manifest"
 	"go.ate.dev/substrate/pkg/proto/ateapipb"
 )
 
@@ -56,20 +55,13 @@ func EnsureAtespace(ctx context.Context, client *ateclient.Client, atespace stri
 	return err
 }
 
-// ActorTemplateFromManifest parses a single protojson-shaped YAML or JSON
-// document into an ActorTemplate, as `kubectl ate create actor-template`
-// does. Parsing is strict: unknown fields are an error, so typos don't
-// silently drop configuration.
-func ActorTemplateFromManifest(manifest []byte) (*ateapipb.ActorTemplate, error) {
-	jsonData, err := yaml.YAMLToJSON(manifest)
-	if err != nil {
-		return nil, fmt.Errorf("invalid YAML: %w", err)
-	}
-	if string(jsonData) == "null" {
-		return nil, fmt.Errorf("manifest is empty")
-	}
+// ActorTemplateFromManifest parses a single YAML or JSON document into an
+// ActorTemplate, as `kubectl ate create actor-template` does. Parsing is
+// strict: unknown fields are an error, so typos don't silently drop
+// configuration.
+func ActorTemplateFromManifest(data []byte) (*ateapipb.ActorTemplate, error) {
 	template := &ateapipb.ActorTemplate{}
-	if err := protojson.Unmarshal(jsonData, template); err != nil {
+	if err := manifest.Unmarshal(data, template); err != nil {
 		return nil, err
 	}
 	return template, nil
