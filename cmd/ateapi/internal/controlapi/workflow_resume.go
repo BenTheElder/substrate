@@ -780,8 +780,7 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 
 	// The actor's declared limits ride the RPC down to the sandbox so it is sized
 	// to the actor (replacing the worker-pod downward-API approach).
-	cpuMilli := actorTemplate.GetResources().GetLimits().GetCpuMillicores()
-	memBytes := actorTemplate.GetResources().GetLimits().GetMemoryBytes()
+	actorResources := toAteletResources(actorTemplate.GetResources())
 
 	// The sandbox binaries and pause image come from the assigned worker's
 	// pool SandboxConfig on every path, restores included.
@@ -815,8 +814,7 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 			SandboxRuntime: sandboxRuntime,
 			ActorUid:       actor.GetMetadata().Uid,
 			EgressGateway:  egressGateway,
-			CpuMilli:       cpuMilli,
-			MemoryBytes:    memBytes,
+			Resources:      actorResources,
 		}
 		tele.WireFidelity = ateattr.SnapshotFidelityValue(fidelity)
 
@@ -858,8 +856,7 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 			SandboxRuntime: sandboxRuntime,
 			ActorUid:       actor.GetMetadata().Uid,
 			EgressGateway:  egressGateway,
-			CpuMilli:       cpuMilli,
-			MemoryBytes:    memBytes,
+			Resources:      actorResources,
 		}
 		if _, err = client.Restore(ctx, req); err != nil {
 			return tele, handleAteletError(ctx, w.store, actorRef, ateattr.OperationResume, "Restore", false, err)
@@ -880,8 +877,7 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 			Spec:                  workloadSpec,
 			ActorUid:              actor.GetMetadata().Uid,
 			EgressGateway:         egressGateway,
-			CpuMilli:              cpuMilli,
-			MemoryBytes:           memBytes,
+			Resources:             actorResources,
 		}
 		if _, err = client.Run(ctx, req); err != nil {
 			return tele, handleAteletError(ctx, w.store, actorRef, ateattr.OperationResume, "Run", false, err)

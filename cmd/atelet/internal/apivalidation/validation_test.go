@@ -249,8 +249,7 @@ func TestValidateRunRequest(t *testing.T) {
 			ActorTemplateName:     "tmpl-1",
 			Spec:                  &ateletpb.WorkloadSpec{Containers: []*ateletpb.Container{{Name: "worker", Image: testDigestImage}}},
 			SandboxAssets:         validSandboxAssets(),
-			CpuMilli:              500,
-			MemoryBytes:           1 << 30,
+			Resources:             &ateletpb.Resources{Limits: &ateletpb.ResourceList{CpuMillicores: 500, MemoryBytes: 1 << 30}},
 		}
 		for _, m := range mutate {
 			m(r)
@@ -372,25 +371,32 @@ func TestValidateRunRequest(t *testing.T) {
 			field.Invalid(field.NewPath("egress_gateway", "address"), nil, ""),
 		},
 	}, {
-		name: "negative cpu_milli",
-		obj:  valid(func(r *ateletpb.RunRequest) { r.CpuMilli = -1 }),
-		want: field.ErrorList{field.Invalid(field.NewPath("cpu_milli"), nil, "").WithOrigin("minimum")},
+		name: "negative cpu_millicores",
+		obj: valid(func(r *ateletpb.RunRequest) {
+			r.Resources = &ateletpb.Resources{Limits: &ateletpb.ResourceList{CpuMillicores: -1}}
+		}),
+		want: field.ErrorList{field.Invalid(field.NewPath("resources", "limits", "cpu_millicores"), nil, "").WithOrigin("minimum")},
 	}, {
-		name: "cpu_milli at the bound",
-		obj:  valid(func(r *ateletpb.RunRequest) { r.CpuMilli = 999999 }),
+		name: "cpu_millicores at the bound",
+		obj: valid(func(r *ateletpb.RunRequest) {
+			r.Resources = &ateletpb.Resources{Limits: &ateletpb.ResourceList{CpuMillicores: 999999}}
+		}),
 	}, {
-		name: "cpu_milli over the bound",
-		obj:  valid(func(r *ateletpb.RunRequest) { r.CpuMilli = 1000000 }),
-		want: field.ErrorList{field.Invalid(field.NewPath("cpu_milli"), nil, "").WithOrigin("maximum")},
+		name: "cpu_millicores over the bound",
+		obj: valid(func(r *ateletpb.RunRequest) {
+			r.Resources = &ateletpb.Resources{Limits: &ateletpb.ResourceList{CpuMillicores: 1000000}}
+		}),
+		want: field.ErrorList{field.Invalid(field.NewPath("resources", "limits", "cpu_millicores"), nil, "").WithOrigin("maximum")},
 	}, {
 		name: "negative memory_bytes",
-		obj:  valid(func(r *ateletpb.RunRequest) { r.MemoryBytes = -1 }),
-		want: field.ErrorList{field.Invalid(field.NewPath("memory_bytes"), nil, "").WithOrigin("minimum")},
+		obj: valid(func(r *ateletpb.RunRequest) {
+			r.Resources = &ateletpb.Resources{Limits: &ateletpb.ResourceList{MemoryBytes: -1}}
+		}),
+		want: field.ErrorList{field.Invalid(field.NewPath("resources", "limits", "memory_bytes"), nil, "").WithOrigin("minimum")},
 	}, {
 		name: "unset sizes are allowed",
 		obj: valid(func(r *ateletpb.RunRequest) {
-			r.CpuMilli = 0
-			r.MemoryBytes = 0
+			r.Resources = nil
 		}),
 	}, {
 		name: "valid sandbox_runtime",
@@ -730,8 +736,7 @@ func TestValidateRestoreRequest(t *testing.T) {
 	}, {
 		name: "valid size and egress",
 		obj: valid(func(r *ateletpb.RestoreRequest) {
-			r.CpuMilli = 999999
-			r.MemoryBytes = 1 << 30
+			r.Resources = &ateletpb.Resources{Limits: &ateletpb.ResourceList{CpuMillicores: 999999, MemoryBytes: 1 << 30}}
 			r.EgressGateway = &ateletpb.EgressGateway{Address: "10.0.0.1:15001"}
 		}),
 	}, {
@@ -822,17 +827,23 @@ func TestValidateRestoreRequest(t *testing.T) {
 			r.Snapshot.Fidelity = ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS
 		}),
 	}, {
-		name: "negative cpu_milli",
-		obj:  valid(func(r *ateletpb.RestoreRequest) { r.CpuMilli = -1 }),
-		want: field.ErrorList{field.Invalid(field.NewPath("cpu_milli"), nil, "").WithOrigin("minimum")},
+		name: "negative cpu_millicores",
+		obj: valid(func(r *ateletpb.RestoreRequest) {
+			r.Resources = &ateletpb.Resources{Limits: &ateletpb.ResourceList{CpuMillicores: -1}}
+		}),
+		want: field.ErrorList{field.Invalid(field.NewPath("resources", "limits", "cpu_millicores"), nil, "").WithOrigin("minimum")},
 	}, {
-		name: "cpu_milli too large",
-		obj:  valid(func(r *ateletpb.RestoreRequest) { r.CpuMilli = 1000000 }),
-		want: field.ErrorList{field.Invalid(field.NewPath("cpu_milli"), nil, "").WithOrigin("maximum")},
+		name: "cpu_millicores too large",
+		obj: valid(func(r *ateletpb.RestoreRequest) {
+			r.Resources = &ateletpb.Resources{Limits: &ateletpb.ResourceList{CpuMillicores: 1000000}}
+		}),
+		want: field.ErrorList{field.Invalid(field.NewPath("resources", "limits", "cpu_millicores"), nil, "").WithOrigin("maximum")},
 	}, {
 		name: "negative memory_bytes",
-		obj:  valid(func(r *ateletpb.RestoreRequest) { r.MemoryBytes = -1 }),
-		want: field.ErrorList{field.Invalid(field.NewPath("memory_bytes"), nil, "").WithOrigin("minimum")},
+		obj: valid(func(r *ateletpb.RestoreRequest) {
+			r.Resources = &ateletpb.Resources{Limits: &ateletpb.ResourceList{MemoryBytes: -1}}
+		}),
+		want: field.ErrorList{field.Invalid(field.NewPath("resources", "limits", "memory_bytes"), nil, "").WithOrigin("minimum")},
 	}, {
 		name: "empty egress gateway address",
 		obj:  valid(func(r *ateletpb.RestoreRequest) { r.EgressGateway = &ateletpb.EgressGateway{} }),
@@ -1484,9 +1495,9 @@ func TestValidateWorkloadSpec(t *testing.T) {
 	}, {
 		name: "container errors surface at the container's path",
 		obj: valid(func(s *ateletpb.WorkloadSpec) {
-			s.Containers[0].Resources = &ateletpb.ResourceLimits{CpuMillis: -1}
+			s.Containers[0].Resources = &ateletpb.Resources{Limits: &ateletpb.ResourceList{CpuMillicores: -1}}
 		}),
-		want: field.ErrorList{field.Invalid(field.NewPath("containers").Index(0).Child("resources", "cpu_millis"), nil, "").WithOrigin("minimum")},
+		want: field.ErrorList{field.Invalid(field.NewPath("containers").Index(0).Child("resources", "limits", "cpu_millicores"), nil, "").WithOrigin("minimum")},
 	}, {
 		name: "mount references a declared volume",
 		obj: valid(func(s *ateletpb.WorkloadSpec) {
@@ -1798,7 +1809,7 @@ func TestValidateContainer(t *testing.T) {
 			c.SecurityContext = &ateletpb.SecurityContext{Capabilities: &ateletpb.Capabilities{Add: add, Drop: drop}}
 		})
 	}
-	limits := func(r *ateletpb.ResourceLimits) *ateletpb.Container {
+	limits := func(r *ateletpb.Resources) *ateletpb.Container {
 		return valid(func(c *ateletpb.Container) { c.Resources = r })
 	}
 
@@ -1958,28 +1969,28 @@ func TestValidateContainer(t *testing.T) {
 			want: field.ErrorList{field.Duplicate(capsPath.Child("add").Index(1), nil)},
 		},
 
-		// ResourceLimits.
+		// Resources.
 		{
 			name: "valid limits",
-			obj:  limits(&ateletpb.ResourceLimits{MemoryBytes: 1 << 30, CpuMillis: 500}),
+			obj:  limits(&ateletpb.Resources{Limits: &ateletpb.ResourceList{MemoryBytes: 1 << 30, CpuMillicores: 500}}),
 		}, {
 			name: "limits: zero means unset",
-			obj:  limits(&ateletpb.ResourceLimits{}),
+			obj:  limits(&ateletpb.Resources{Limits: &ateletpb.ResourceList{}}),
 		}, {
 			name: "limits: negative memory_bytes",
-			obj:  limits(&ateletpb.ResourceLimits{MemoryBytes: -1}),
-			want: field.ErrorList{field.Invalid(field.NewPath("resources", "memory_bytes"), nil, "").WithOrigin("minimum")},
+			obj:  limits(&ateletpb.Resources{Limits: &ateletpb.ResourceList{MemoryBytes: -1}}),
+			want: field.ErrorList{field.Invalid(field.NewPath("resources", "limits", "memory_bytes"), nil, "").WithOrigin("minimum")},
 		}, {
 			name: "limits: negative cpu_millis",
-			obj:  limits(&ateletpb.ResourceLimits{CpuMillis: -1}),
-			want: field.ErrorList{field.Invalid(field.NewPath("resources", "cpu_millis"), nil, "").WithOrigin("minimum")},
+			obj:  limits(&ateletpb.Resources{Limits: &ateletpb.ResourceList{CpuMillicores: -1}}),
+			want: field.ErrorList{field.Invalid(field.NewPath("resources", "limits", "cpu_millicores"), nil, "").WithOrigin("minimum")},
 		}, {
 			name: "limits: cpu_millis at the cap",
-			obj:  limits(&ateletpb.ResourceLimits{CpuMillis: 999999}),
+			obj:  limits(&ateletpb.Resources{Limits: &ateletpb.ResourceList{CpuMillicores: 999999}}),
 		}, {
 			name: "limits: cpu_millis above the cap",
-			obj:  limits(&ateletpb.ResourceLimits{CpuMillis: 1000000}),
-			want: field.ErrorList{field.Invalid(field.NewPath("resources", "cpu_millis"), nil, "").WithOrigin("maximum")},
+			obj:  limits(&ateletpb.Resources{Limits: &ateletpb.ResourceList{CpuMillicores: 1000000}}),
+			want: field.ErrorList{field.Invalid(field.NewPath("resources", "limits", "cpu_millicores"), nil, "").WithOrigin("maximum")},
 		},
 	}
 	for _, tt := range tests {
