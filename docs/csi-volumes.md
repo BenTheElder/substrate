@@ -83,12 +83,12 @@ To attach a CSI volume to an actor:
 volumes:
 - name: my-data-volume
   externalVolumeTemplate:
-    capacity: 10Gi
+    capacityBytes: 10Gi
     storageClassName: standard-rwx
 ```
 
 * `name`: Unique DNS-label-compliant volume name.
-* `externalVolumeTemplate.capacity`: Quantity string representing the requested volume size (e.g. `1Gi`, `50Gi`).
+* `externalVolumeTemplate.capacityBytes`: The requested volume size in bytes, written as an integer or a quantity string (e.g. `1Gi`, `50Gi`).
 * `externalVolumeTemplate.storageClassName`: Name of a Kubernetes `StorageClass` present in the cluster whose `provisioner` matches a registered `CSIDriverConfig`.
 
 #### `containers[].volumeMounts[]`
@@ -192,15 +192,13 @@ sandboxConfig:
   configName: gvisor-default
 resources:
   limits:
-  - name: cpu
-    quantity: "1"
-  - name: memory
-    quantity: 1Gi
+    cpuMillis: 1000
+    memoryBytes: 1Gi
 snapshotConfig:
   storageLocation: gs://my-snapshots-bucket/stateful-agent
 volumes:
 - name: shared-storage
   externalVolumeTemplate:
-    capacity: 5Gi
+    capacityBytes: 5Gi
     storageClassName: csi-nfs-sc
 ```

@@ -38,10 +38,8 @@ containers:
 # node's allocatable and these only need to fit the node.
 resources:
   limits:
-  - name: cpu
-    quantity: "1"
-  - name: memory
-    quantity: 512Mi
+    cpuMillis: 1000
+    memoryBytes: 512Mi
 snapshotConfig:
   preferredFidelity: SNAPSHOT_FIDELITY_MEMORY
   storageLocation: gs://ate-snapshots/ate-manual-test-multi/
@@ -51,9 +49,9 @@ sandboxConfig:
 volumes:
 - name: vol-hostpath
   externalVolumeTemplate:
-    capacity: 1Gi
+    capacityBytes: 1Gi
     storageClassName: csi-hostpath-sc
 - name: vol-nfs
   externalVolumeTemplate:
-    capacity: 1Gi
+    capacityBytes: 1Gi
     storageClassName: csi-nfs-sc

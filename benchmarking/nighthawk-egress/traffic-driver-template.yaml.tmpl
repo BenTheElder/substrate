@@ -61,10 +61,8 @@ volumes:
 # Sandbox size: headroom so the load generator is not the bottleneck.
 resources:
   limits:
-  - name: cpu
-    quantity: "2"
-  - name: memory
-    quantity: 1Gi
+    cpuMillis: 2000
+    memoryBytes: 1Gi
 sandboxConfig:
   sandboxClass: gvisor
   configName: gvisor-default

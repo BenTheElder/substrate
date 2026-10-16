@@ -43,10 +43,8 @@ containers:
 # the measured execution time, so keep it fixed across runs.
 resources:
   limits:
-  - name: cpu
-    quantity: "2"
-  - name: memory
-    quantity: 4Gi
+    cpuMillis: 2000
+    memoryBytes: 4Gi
 sandboxConfig:
   sandboxClass: ${SANDBOX_CLASS}
   configName: ${SANDBOX_CONFIG_NAME}

@@ -150,6 +150,21 @@ run_kubectl_ate() {
   "${KUBECTL_ATE_BIN}" "$@"
 }
 
+# cpu_millis converts a Kubernetes cpu quantity like 250m or 1.5 to millicores,
+# which is what ActorTemplates take
+cpu_millis() {
+  local q="$1"
+  if [[ "${q}" =~ ^([0-9]+)m$ ]]; then
+    echo "${BASH_REMATCH[1]}"
+  elif [[ "${q}" =~ ^([0-9]+)(\.([0-9]{1,3}))?$ ]]; then
+    local frac="${BASH_REMATCH[3]}000"
+    echo $((10#${BASH_REMATCH[1]} * 1000 + 10#${frac:0:3}))
+  else
+    echo "Error: --actor-cpu ${q} is not a cpu quantity like 250m or 1.5" >&2
+    return 1
+  fi
+}
+
 substitute() {
   # SandboxConfig names are pinned per class in the ActorTemplates (rather
   # than defaulted) so a stale config from a dirty teardown fails loudly
@@ -171,7 +186,7 @@ substitute() {
       -e "s|\${SANDBOX_CONFIG_NAME}|${sandbox_config_name}|g" \
       -e "s|\${OTLP_ENDPOINT}|${OTLP_ENDPOINT}|g" \
       -e "s|\${ACTOR_MEMORY}|${ACTOR_MEMORY}|g" \
-      -e "s|\${ACTOR_CPU}|${ACTOR_CPU}|g" \
+      -e "s|\${ACTOR_CPU_MILLIS}|${ACTOR_CPU_MILLIS}|g" \
       -e "s|\${WORKER_RESOURCES}|${worker_resources}|g" \
       -e "s|\${STORAGE_CLASS_NAME}|${STORAGE_CLASS_NAME}|g" \
       "${manifest}"
@@ -280,6 +295,7 @@ deploy() {
     echo "Error: --fake-atelet-env needs substrate installed with --fake-data-plane" >&2
     exit 1
   fi
+  ACTOR_CPU_MILLIS="$(cpu_millis "${ACTOR_CPU}")"
   echo "Deploying workloads (worker_count=${WORKER_COUNT}, actor_memory=${ACTOR_MEMORY}, actor_cpu=${ACTOR_CPU}, worker_memory=${WORKER_MEMORY:-unset}, storage_class=${STORAGE_CLASS_NAME:-none}, otlp_endpoint=${OTLP_ENDPOINT})..."
   substitute "${POOL_MANIFEST}" | hack/run-tool.sh ko apply -f -
   echo "Waiting for worker pool to be ready (timeout: ${WAIT_TIMEOUT_SECS}s)..."

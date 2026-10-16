@@ -38,13 +38,10 @@ containers:
 # advertises capacity, gate scheduling). CPU=2 makes NumCPU() inside the
 # sandbox a distinct, assertable value — the vCPU count of the micro-VM guest,
 # or what runsc --cpu-num-from-quota provisions the gVisor sentry with.
-# Quantities are strings in the proto.
 resources:
   limits:
-  - name: cpu
-    quantity: "2"
-  - name: memory
-    quantity: 512Mi
+    cpuMillis: 2000
+    memoryBytes: 512Mi
 ${TEMPLATE_SANDBOX_CONFIG}
 snapshotConfig:
   storageLocation: gs://${BUCKET_NAME}/ate-e2e${FIXTURE_SUFFIX}/

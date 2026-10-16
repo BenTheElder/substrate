@@ -57,10 +57,8 @@ volumes:
 # node's allocatable and these only need to fit the node.
 resources:
   limits:
-  - name: cpu
-    quantity: "1"
-  - name: memory
-    quantity: 512Mi
+    cpuMillis: 1000
+    memoryBytes: 512Mi
 sandboxConfig:
   sandboxClass: gvisor
   configName: gvisor-default
