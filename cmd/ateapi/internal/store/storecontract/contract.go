@@ -2476,10 +2476,7 @@ func runWorkerAssignmentContractTests(t *testing.T, setup func(t *testing.T) sto
 				t.Fatalf("ListWorkerAssignments(%s) failed: %v", name, err)
 			}
 			assignments := assignmentsPage.Items
-			want, err := resources.SumAllocated(assignments)
-			if err != nil {
-				t.Fatalf("%s: summing assignments: %v", name, err)
-			}
+			want := resources.SumAllocated(assignments)
 			// A Worker that never took anything has no allocation at all, while
 			// a sum over no assignments is a zeroed message; the two say the
 			// same thing, so compare what they mean rather than the messages.
@@ -2759,10 +2756,7 @@ func runWorkerAssignmentContractTests(t *testing.T, setup func(t *testing.T) sto
 				t.Fatalf("ListWorkerAssignments failed: %v", err)
 			}
 			assignments := assignmentsPage.Items
-			want, err := resources.SumAllocated(assignments)
-			if err != nil {
-				t.Fatalf("summing assignments: %v", err)
-			}
+			want := resources.SumAllocated(assignments)
 			if diff := cmp.Diff(want, worker.GetStatus().GetAllocated(), protocmp.Transform()); diff != "" {
 				t.Fatalf("after step %d (actor %s) the total no longer matches the assignments (-want +got):\n%s", step, actorUID, diff)
 			}

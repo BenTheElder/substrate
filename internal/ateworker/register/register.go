@@ -31,9 +31,7 @@ import (
 
 	"go.ate.dev/substrate/internal/ateletdial"
 	"go.ate.dev/substrate/internal/hardware"
-	"go.ate.dev/substrate/internal/resources"
 	"go.ate.dev/substrate/internal/workercapacity"
-	"k8s.io/apimachinery/pkg/api/resource"
 
 	"go.ate.dev/substrate/internal/proto/ateletpb"
 )
@@ -81,20 +79,13 @@ func defaultRuntime(sandboxClass string) *ateletpb.SandboxRuntime {
 	}
 }
 
-// cpuMemory is the Resources for those two dimensions. A zero dimension is
-// left out, which the control plane reads as none of it; nil when both are.
+// cpuMemory is the Resources for those two dimensions; nil when both are
+// zero.
 func cpuMemory(cpuMilli, memoryBytes int64) *ateletpb.Resources {
-	var limits []*ateletpb.Limits
-	if cpuMilli != 0 {
-		limits = append(limits, &ateletpb.Limits{Name: resources.ResourceCPU, Quantity: resource.NewMilliQuantity(cpuMilli, resource.DecimalSI).String()})
-	}
-	if memoryBytes != 0 {
-		limits = append(limits, &ateletpb.Limits{Name: resources.ResourceMemory, Quantity: resource.NewQuantity(memoryBytes, resource.BinarySI).String()})
-	}
-	if len(limits) == 0 {
+	if cpuMilli == 0 && memoryBytes == 0 {
 		return nil
 	}
-	return &ateletpb.Resources{Limits: limits}
+	return &ateletpb.Resources{Limits: &ateletpb.ResourceList{CpuMillis: cpuMilli, MemoryBytes: memoryBytes}}
 }
 
 func readLimit(path string) int64 {

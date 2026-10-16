@@ -49,7 +49,7 @@ func TestActorTemplateCRUD(t *testing.T) {
 				SandboxClass: "gvisor",
 				ConfigName:   "gvisor-default",
 			},
-			Resources: &ateapipb.Resources{Limits: []*ateapipb.Limits{{Name: "cpu", Quantity: "1"}, {Name: "memory", Quantity: "1Gi"}}},
+			Resources: resources.CPUMemory(1000, 1<<30),
 			// Server-owned status on the request is ignored.
 			Status: &ateapipb.ActorTemplateStatus{
 				GoldenSnapshotStatus: &ateapipb.GoldenSnapshotStatus{
@@ -73,7 +73,7 @@ func TestActorTemplateCRUD(t *testing.T) {
 			SandboxClass: "gvisor",
 			ConfigName:   "gvisor-default",
 		},
-		Resources: &ateapipb.Resources{Limits: []*ateapipb.Limits{{Name: "cpu", Quantity: "1"}, {Name: "memory", Quantity: "1Gi"}}},
+		Resources: resources.CPUMemory(1000, 1<<30),
 		Status:    &ateapipb.ActorTemplateStatus{},
 	}
 	if diff := cmp.Diff(want, created, protocmp.Transform(), ignoreUID, ignoreTimestamps); diff != "" {
@@ -431,7 +431,7 @@ func TestCreateActorTemplate_ExternalVolumesPreview(t *testing.T) {
 						Name:                   "data",
 						ExternalVolumeTemplate: &ateapipb.ExternalVolumeTemplate{StorageClassName: "standard", Capacity: "1Gi"},
 					}},
-					Resources:      &ateapipb.Resources{Limits: []*ateapipb.Limits{{Name: "cpu", Quantity: "1"}, {Name: "memory", Quantity: "1Gi"}}},
+					Resources:      resources.CPUMemory(1000, 1<<30),
 					SnapshotConfig: &ateapipb.SnapshotConfig{StorageLocation: "gs://my-bucket/snapshots"},
 					SandboxConfig: &ateapipb.SandboxConfig{
 						SandboxClass: "gvisor",
