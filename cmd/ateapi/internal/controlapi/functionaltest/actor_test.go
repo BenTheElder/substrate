@@ -123,7 +123,7 @@ func TestCreateActor_WithExternalVolumes(t *testing.T) {
 			Name: "ext-vol-1",
 			ExternalVolumeTemplate: &ateapipb.ExternalVolumeTemplate{
 				StorageClassName: "standard",
-				Capacity:         "10Gi",
+				CapacityBytes:    10 << 30,
 			},
 		},
 	}
@@ -184,7 +184,7 @@ func TestCreateActor_ExternalVolumesWithoutOptIn(t *testing.T) {
 	createTemplateWithVolumes(t, tc, ns,
 		[]*ateapipb.Volume{{
 			Name:                   "ext-vol-1",
-			ExternalVolumeTemplate: &ateapipb.ExternalVolumeTemplate{StorageClassName: "standard", Capacity: "10Gi"},
+			ExternalVolumeTemplate: &ateapipb.ExternalVolumeTemplate{StorageClassName: "standard", CapacityBytes: 10 << 30},
 		}},
 		[]*ateapipb.VolumeMount{{Name: "ext-vol-1", MountPath: "/data"}})
 
@@ -216,7 +216,7 @@ func TestActorLifecycle_ExternalVolumesWithoutOptIn(t *testing.T) {
 	createTemplateWithVolumes(t, tc, ns,
 		[]*ateapipb.Volume{{
 			Name:                   "data-vol",
-			ExternalVolumeTemplate: &ateapipb.ExternalVolumeTemplate{StorageClassName: "fast", Capacity: "20Gi"},
+			ExternalVolumeTemplate: &ateapipb.ExternalVolumeTemplate{StorageClassName: "fast", CapacityBytes: 20 << 30},
 		}},
 		[]*ateapipb.VolumeMount{{Name: "data-vol", MountPath: "/mnt/data"}})
 	createWorkerPod(t, tc, ns, "worker-1", "node1", "pool1")
@@ -414,7 +414,7 @@ func TestCreateActor_RejectsSnapshotWithExternalVolumes(t *testing.T) {
 			Volumes: []*ateapipb.Volume{{
 				Name: "data",
 				ExternalVolumeTemplate: &ateapipb.ExternalVolumeTemplate{
-					Capacity: "1Gi", StorageClassName: "standard",
+					CapacityBytes: 1 << 30, StorageClassName: "standard",
 				},
 			}},
 			Resources: resources.CPUMemory(1000, 512<<20),
@@ -1721,7 +1721,7 @@ func TestActorLifecycle_WithExternalVolumes(t *testing.T) {
 			Name: "data-vol",
 			ExternalVolumeTemplate: &ateapipb.ExternalVolumeTemplate{
 				StorageClassName: "fast",
-				Capacity:         "20Gi",
+				CapacityBytes:    20 << 30,
 			},
 		},
 	}
@@ -1869,14 +1869,14 @@ func TestResumeActor_VolumeCreationFailure(t *testing.T) {
 			Name: "succ-vol1",
 			ExternalVolumeTemplate: &ateapipb.ExternalVolumeTemplate{
 				StorageClassName: "standard",
-				Capacity:         "10Gi",
+				CapacityBytes:    10 << 30,
 			},
 		},
 		{
 			Name: "fail-vol2",
 			ExternalVolumeTemplate: &ateapipb.ExternalVolumeTemplate{
 				StorageClassName: "standard",
-				Capacity:         "10Gi",
+				CapacityBytes:    10 << 30,
 			},
 		},
 	}
@@ -2013,14 +2013,14 @@ func TestResumeActor_VolumeCreationRetrySuccess(t *testing.T) {
 			Name: "succ-vol1",
 			ExternalVolumeTemplate: &ateapipb.ExternalVolumeTemplate{
 				StorageClassName: "standard",
-				Capacity:         "10Gi",
+				CapacityBytes:    10 << 30,
 			},
 		},
 		{
 			Name: "retry-vol2",
 			ExternalVolumeTemplate: &ateapipb.ExternalVolumeTemplate{
 				StorageClassName: "standard",
-				Capacity:         "10Gi",
+				CapacityBytes:    10 << 30,
 			},
 		},
 	}
@@ -2169,7 +2169,7 @@ func TestResumeActor_VolumeAttachFailureAndRetry(t *testing.T) {
 			Name: "vol1",
 			ExternalVolumeTemplate: &ateapipb.ExternalVolumeTemplate{
 				StorageClassName: "standard",
-				Capacity:         "10Gi",
+				CapacityBytes:    10 << 30,
 			},
 		},
 	}
@@ -2273,7 +2273,7 @@ func TestResumeActor_VolumeAttachFailure_DeleteActor(t *testing.T) {
 			Name: "vol1",
 			ExternalVolumeTemplate: &ateapipb.ExternalVolumeTemplate{
 				StorageClassName: "standard",
-				Capacity:         "10Gi",
+				CapacityBytes:    10 << 30,
 			},
 		},
 	}
@@ -2430,14 +2430,14 @@ func TestResumeActor_MultiVolumePartialAttachFailure_Retry(t *testing.T) {
 			Name: "vol1",
 			ExternalVolumeTemplate: &ateapipb.ExternalVolumeTemplate{
 				StorageClassName: "standard",
-				Capacity:         "10Gi",
+				CapacityBytes:    10 << 30,
 			},
 		},
 		{
 			Name: "vol2",
 			ExternalVolumeTemplate: &ateapipb.ExternalVolumeTemplate{
 				StorageClassName: "standard",
-				Capacity:         "10Gi",
+				CapacityBytes:    10 << 30,
 			},
 		},
 	}
@@ -2602,7 +2602,7 @@ func TestSuspendActor_VolumeDetachFailure_RetrySuccess(t *testing.T) {
 			Name: "vol1",
 			ExternalVolumeTemplate: &ateapipb.ExternalVolumeTemplate{
 				StorageClassName: "standard",
-				Capacity:         "10Gi",
+				CapacityBytes:    10 << 30,
 			},
 		},
 	}
@@ -2714,7 +2714,7 @@ func TestSuspendActor_VolumeDetachFailure_DeleteActorAnyState(t *testing.T) {
 			Name: "vol1",
 			ExternalVolumeTemplate: &ateapipb.ExternalVolumeTemplate{
 				StorageClassName: "standard",
-				Capacity:         "10Gi",
+				CapacityBytes:    10 << 30,
 			},
 		},
 	}
@@ -2815,7 +2815,7 @@ func TestPauseActor_VolumeLifecycle_DetachAndResumeAttach(t *testing.T) {
 			Name: "vol1",
 			ExternalVolumeTemplate: &ateapipb.ExternalVolumeTemplate{
 				StorageClassName: "standard",
-				Capacity:         "10Gi",
+				CapacityBytes:    10 << 30,
 			},
 		},
 	}
@@ -2943,7 +2943,7 @@ func TestPauseActor_VolumeDetachFailure_RetrySuccess(t *testing.T) {
 			Name: "vol1",
 			ExternalVolumeTemplate: &ateapipb.ExternalVolumeTemplate{
 				StorageClassName: "standard",
-				Capacity:         "10Gi",
+				CapacityBytes:    10 << 30,
 			},
 		},
 	}

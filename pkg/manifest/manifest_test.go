@@ -38,6 +38,11 @@ resources:
   limits:
     cpuMillis: 1000
     memoryBytes: 1073741824
+volumes:
+- name: data
+  externalVolumeTemplate:
+    capacity_bytes: 10Gi
+    storageClassName: fast
 `
 
 func TestUnmarshal(t *testing.T) {
@@ -53,6 +58,10 @@ func TestUnmarshal(t *testing.T) {
 			Resources: &ateapipb.Resources{Limits: &ateapipb.ResourceList{CpuMillis: 250, MemoryBytes: 128 << 20}},
 		}},
 		Resources: &ateapipb.Resources{Limits: &ateapipb.ResourceList{CpuMillis: 1000, MemoryBytes: 1 << 30}},
+		Volumes: []*ateapipb.Volume{{
+			Name:                   "data",
+			ExternalVolumeTemplate: &ateapipb.ExternalVolumeTemplate{CapacityBytes: 10 << 30, StorageClassName: "fast"},
+		}},
 	}
 	if diff := cmp.Diff(want, got, protocmp.Transform()); diff != "" {
 		t.Errorf("Unmarshal mismatch (-want +got):\n%s", diff)
@@ -95,7 +104,7 @@ func TestMarshalYAMLRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MarshalYAML: %v", err)
 	}
-	for _, want := range []string{`cpuMillis: "250"`, "memoryBytes: 128Mi", "memoryBytes: 1Gi"} {
+	for _, want := range []string{`cpuMillis: "250"`, "memoryBytes: 128Mi", "memoryBytes: 1Gi", "capacityBytes: 10Gi"} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("MarshalYAML output missing %q:\n%s", want, b)
 		}
