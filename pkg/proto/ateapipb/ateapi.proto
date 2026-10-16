@@ -1182,7 +1182,7 @@ message ResourceList {
   //
   // +k8s:optional
   // +k8s:minimum=0
-  int64 memory_bytes = 2;
+  int64 memory_bytes = 2 [ (typehint) = {format : TYPE_HINT_FORMAT_QUANTITY, scale : 1} ];
 }
 
 message GoldenSnapshotStatus {
@@ -3030,4 +3030,28 @@ extend google.protobuf.MessageOptions {
 
 extend google.protobuf.MethodOptions {
   MethodAnnotation method = 50000;
+}
+
+// TypeHint tells clients about another way to write a field's value in
+// manifests. The field keeps its name, e.g. memoryBytes: 512Mi.
+message TypeHint {
+  // The alternate form of the value.
+  TypeHintFormat format = 1;
+
+  // How many field units make one unit of the alternate form. Only 1 is
+  // supported for now.
+  int64 scale = 2;
+}
+
+// TypeHintFormat is an alternate form of a field's value in manifests.
+enum TypeHintFormat {
+  // The format is not set.
+  TYPE_HINT_FORMAT_UNSPECIFIED = 0;
+  // A Kubernetes resource.Quantity string, e.g. "512Mi". Clients print it with
+  // binary suffixes and still accept plain integers.
+  TYPE_HINT_FORMAT_QUANTITY = 1;
+}
+
+extend google.protobuf.FieldOptions {
+  TypeHint typehint = 50000;
 }

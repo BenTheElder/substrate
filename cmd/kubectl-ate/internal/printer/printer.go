@@ -28,6 +28,7 @@ import (
 	"go.ate.dev/substrate/pkg/proto/ateapipb"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/duration"
 	"sigs.k8s.io/yaml"
 )
@@ -122,30 +123,19 @@ func workerActorsColumn(worker *ateapipb.Worker) string {
 	return fmt.Sprintf("%d/%d", worker.GetStatus().GetAllocated().GetActors(), worker.GetStatus().GetCapacity().GetActors())
 }
 
-// resourceLimit returns the quantity of the named limit (e.g. "cpu",
-// "memory"), or "" if it isn't set.
-func resourceLimit(res *ateapipb.Resources, name string) string {
-	for _, limit := range res.GetLimits() {
-		if limit.GetName() == name {
-			return limit.GetQuantity()
-		}
-	}
-	return ""
-}
-
-// workerResourceColumn renders a Worker's named resource limit as
-// allocated/capacity (e.g. "500m/2"). "-" if the Worker has no capacity
-// limit for that resource, since there is then nothing to compare against.
-func workerResourceColumn(worker *ateapipb.Worker, name string) string {
-	capacity := resourceLimit(worker.GetStatus().GetCapacity().GetResources(), name)
-	if capacity == "" {
+// workerResourceColumn renders one compute dimension of a Worker as
+// allocated/capacity (e.g. "500m/2"). "-" if the Worker has no capacity for
+// it, since there is then nothing to compare against.
+func workerResourceColumn(allocated, capacity int64, format func(int64) string) string {
+	if capacity == 0 {
 		return "-"
 	}
-	allocated := resourceLimit(worker.GetStatus().GetAllocated().GetResources(), name)
-	if allocated == "" {
-		allocated = "0"
-	}
-	return allocated + "/" + capacity
+	return format(allocated) + "/" + format(capacity)
+}
+
+// formatMillicores renders millicores kubectl-style, e.g. 1500 as "1500m"
+func formatMillicores(n int64) string {
+	return resource.NewMilliQuantity(n, resource.DecimalSI).String()
 }
 
 // PrintWorkersTo prints a slice of workers to the provided writer.
@@ -165,7 +155,10 @@ func PrintWorkersTo(out io.Writer, workers []*ateapipb.Worker, format string) er
 			age := formatAge(worker.GetMetadata().GetCreateTime())
 			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 				name, pool, state, workerActorsColumn(worker),
-				workerResourceColumn(worker, "cpu"), workerResourceColumn(worker, "memory"),
+				workerResourceColumn(worker.GetStatus().GetAllocated().GetResources().GetLimits().GetCpuMillis(),
+					worker.GetStatus().GetCapacity().GetResources().GetLimits().GetCpuMillis(), formatMillicores),
+				workerResourceColumn(worker.GetStatus().GetAllocated().GetResources().GetLimits().GetMemoryBytes(),
+					worker.GetStatus().GetCapacity().GetResources().GetLimits().GetMemoryBytes(), manifest.FormatQuantity),
 				pod, age)
 		}
 		return w.Flush()

@@ -283,13 +283,9 @@ func TestPrintWorkersTo_Table(t *testing.T) {
 			WorkerPod:       "pod-1",
 			SandboxClass:    "gvisor",
 			Status: &ateapipb.WorkerStatus{
-				State: ateapipb.WorkerState_WORKER_STATE_ACTIVE,
-				Capacity: &ateapipb.WorkerResources{Actors: 4, Resources: &ateapipb.Resources{Limits: []*ateapipb.Limits{
-					{Name: "cpu", Quantity: "2"}, {Name: "memory", Quantity: "4Gi"},
-				}}},
-				Allocated: &ateapipb.WorkerResources{Actors: 1, Resources: &ateapipb.Resources{Limits: []*ateapipb.Limits{
-					{Name: "cpu", Quantity: "500m"}, {Name: "memory", Quantity: "1Gi"},
-				}}},
+				State:     ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+				Capacity:  &ateapipb.WorkerResources{Actors: 4, Resources: &ateapipb.Resources{Limits: &ateapipb.ResourceList{CpuMillis: 2000, MemoryBytes: 4 << 30}}},
+				Allocated: &ateapipb.WorkerResources{Actors: 1, Resources: &ateapipb.Resources{Limits: &ateapipb.ResourceList{CpuMillis: 500, MemoryBytes: 1 << 30}}},
 			},
 		},
 	}
