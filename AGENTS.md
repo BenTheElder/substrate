@@ -3,6 +3,8 @@
 ## Rules for contributors
 
 - Read the "Using AI" section of `COLLABORATING.md`. You are responsible for everything your agent submits.
+- Say in the PR description that you used AI, and how. Don't add AI co-author or assisted-by trailers. Submit commits and PRs from your own account. We can't accept contributions from agent or bot accounts (a human must sign the contribution agreement).
+- Before asking for review, review your own diff, then have a fresh agent session review it adversarially. Fix what it finds.
 - **Be brief.** Code comments, commit messages, PR descriptions and issues should be short, plain English, and read the way an experienced maintainer writes by hand. Reviewer time and agent context windows are limited.
   - `COLLABORATING.md` doesn't allow AI-generated commit messages, because they have usually been low quality and unreviewed. If you are asked to write one anyway, hold it to the same standard, and the person submitting it must review it.
   - Write short, direct sentences with one idea each, subject first.
@@ -19,9 +21,36 @@
     - filler words: load-bearing, footgun, surfaced, robust, comprehensive, seamless, leverage
     - "No behavior change" unless the diff is a pure refactor
     - long sentences that pile up clauses, or put the subject after a long lead-in
+
+### Scope
+
+- Keep each PR to one change. Send refactors, cleanups and follow-ups as separate PRs. For how to batch small fixes, see "Sizing PRs for review" in `CONTRIBUTING.md`.
+- Follow "Contribution process" in `CONTRIBUTING.md`: open an issue first for anything beyond a small fix, and search open PRs and issues before you start.
+- Start the PR description with why the change is needed, or link the issue. Only write "Fixes #N" if the PR fully fixes it, and keep the description in sync with the final diff.
+- Rebase onto upstream `main` before opening or updating a PR, and don't merge main into your branch. This file may have changed there. Follow that version.
+- After a rebase, check your diff against what main renamed or rewrote since you branched: packages, the module path, helpers you call.
+
+### Code
+
+- Search the repo and its dependencies before writing a helper, cache, client, flag set or test fixture. Reuse or extend what exists, and handle a case the way nearby code already does.
+- Build only what the change needs. Don't add options, interfaces, wrappers, flags, exports or API fields for later. Prefer a sensible default to a new knob. Delete code your change makes unused.
+- Pass dependencies through constructors or functional options. Don't add callback hooks, setters or package globals just so tests can swap behavior.
+- Fail loudly. Ignore only the specific errors you expect, like ENOENT. Don't guard against states the code can't reach, and don't fall back silently to an insecure or no-op mode.
 - Comment the final state of the code. Bugs that only existed while you were writing the change, and links to planning docs outside the repository, are noise to the next reader.
+- Check every claim in comments, docs and the PR description against the code. Don't claim a guarantee the code doesn't enforce. When you change behavior, update the comments, docs and scripts elsewhere that describe it. Link to existing docs instead of copying them.
+- Find the root cause before fixing a symptom. Back performance claims with a measurement.
+- Keep atelet and the worker runtimes opaque to each other. The only knowledge they may share is `internal/proto/ateworkerpb` and the paths in `internal/nodepath`. Using the same library code is fine; depending on how the other side is built is not. We want atelet to roll ahead of workers eventually, so don't widen that interface casually. Until v1.0.0 nothing enforces this; see Backward Compatibility.
+- Actor features work on both gVisor and micro-VM, with e2e coverage for both, unless the issue or PR description scopes the change to one runtime.
+- Don't assume kind, GKE, amd64 or a newer kernel than the repo already needs. Dev scripts must work on arm64 macOS. Don't change host-wide state.
+- Read the `CI` environment variable only inside a named fail-closed predicate, never inline. See Testing Instructions 5.
+- Before changing an API, read `docs/api-style-guide.md` and `docs/api-validation.md`.
+- Pin image references you add or update by digest, and look the digest up yourself: `go run github.com/google/go-containerregistry/cmd/crane@latest digest <image>`.
+
+### Tests
+
 - Test new behavior in ways that help future changes. Update tests when you change existing behavior. Don't add tests just for coverage. Every test costs CI time on every PR.
-- Rebase onto upstream `main` before opening or updating a PR. This file may have changed there. Follow that version.
+- Make sure each new test fails without your change. Follow the Testing section of `docs/code-style-guide.md`; prefer adding rows to an existing table test.
+- Don't use fixed sleeps or wall-clock waits. Run new tests locally with `-count=3 -shuffle=on`.
 
 ## Project Overview
 
@@ -123,7 +152,7 @@ However! Take care to respect security best practices when writing code in order
 The following is what Substrate currently offers.
 Keep this up to date when updating AGENTS.md.
 
-- **Workload Isolation**: The project uses `gVisor` (`runsc`) for sandboxing and security isolation of workloads on pods.
+- **Workload Isolation**: Every actor runs in a sandbox on a worker pod, either gVisor (`runsc`) or a Cloud Hypervisor micro-VM. See `docs/security.md` for the security principles and `docs/threat-model.md` for known risks.
 - **JWTs and JWKs**: Signing and JWK set encoding (`internal/localjwtauthority`) and verification (`internal/oidcjwt`) are built on the standard library's crypto packages. Extend those packages rather than adding go-jose or another JOSE library, so the code that decides whether a token is valid stays small and supports only the algorithms Substrate uses.
 - **Ingress Authentication**: `atenet-router --ingress-auth-mode=static-mtls` requires clients to present a SPIFFE certificate signed by `--ingress-client-ca-file` whose ID is in `--ingress-allowed-spiffe-ids`; that list is the whole authorization policy, so any listed client may reach any Actor. The default, `deprecated-insecure`, checks a certificate only when a client presents one, and also serves plaintext listeners that accept any client. Install with it via `ate-setup --ingress-auth-mode=static-mtls` (`manifests/ate-install/components/router-static-mtls`); the allowlist lives in `manifests/ate-install/atenet-router.yaml`.
 - **Control API Authorization**: `ate-api-server` checks every Control RPC against an embedded OpenFGA model (`cmd/ateapi/internal/authz/model.fga`), on by default. Every served unary RPC needs an entry in `defaultRPCPermissions` (`registry.go`): with enforcement on, an RPC without one is denied, and a test fails the build. Access is granted per global scope and atespace through AccessPolicy (`kubectl ate access-policy`); the install's bootstrap owner is the shared `ate-client` ServiceAccount that `kubectl ate` uses. See `docs/authorization.md` for roles and known gaps.
