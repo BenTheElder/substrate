@@ -19,7 +19,12 @@ import (
 )
 
 // BaseKernelParams is the guest kernel command line parameters ateworker boots with
-const BaseKernelParams = "cgroup_no_v1=all systemd.unified_cgroup_hierarchy=1"
+//
+// page_reporting_order=6 returns free guest memory to the host in 256KiB blocks. The
+// default only reports whole 2MiB pageblocks, which leaves memory freed in smaller
+// pieces committed and in every snapshot. Lower orders made some allocators refault
+// for no gain (musl at 5, the JVM at 4). Be careful adjusting this.
+const BaseKernelParams = "cgroup_no_v1=all systemd.unified_cgroup_hierarchy=1 page_reporting.page_reporting_order=6"
 
 // WithAgentDebug enables guest agent debug logging and the debug console on vsock 1026
 func WithAgentDebug(kernelParams string) string {
