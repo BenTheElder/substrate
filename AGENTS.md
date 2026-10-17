@@ -1,5 +1,28 @@
 # Agent Substrate
 
+## Rules for contributors
+
+- Read the "Using AI" section of `COLLABORATING.md`. You are responsible for everything your agent submits.
+- **Be brief.** Code comments, commit messages, PR descriptions and issues should be short, plain English, and read the way an experienced maintainer writes by hand. Reviewer time and agent context windows are limited.
+  - `COLLABORATING.md` doesn't allow AI-generated commit messages, because they have usually been low quality and unreviewed. If you are asked to write one anyway, hold it to the same standard, and the person submitting it must review it.
+  - Write short, direct sentences with one idea each, subject first.
+  - Use the real identifiers from the code. Don't coin new names, and avoid noun stacks like "the store-wide pin-lock pre-flight".
+  - Prefer verbs to abstract nouns: "evicts" instead of "performs eviction".
+  - Say each thing once. Don't restate the diff, open with "This PR …" or "This commit …", or repeat the same explanation in several comments.
+  - Explain why only when the code doesn't make it obvious, in a clause or a line.
+  - Avoid:
+    - em-dashes, and chains of semicolons
+    - headings, bold, or test plans in commit messages
+    - epigrams and contrast pairs, like "X, not Y" or "So treat ENOENT as what it is."
+    - numbers added for color, like "measured at a flat 51ms"
+    - giving code motives or editorializing about it, like "wants", "decides", "is responsible for", "lands", "owns", or "X is what makes Y". Plain active voice is fine: "the reaper collects" is how Go doc comments read.
+    - filler words: load-bearing, footgun, surfaced, robust, comprehensive, seamless, leverage
+    - "No behavior change" unless the diff is a pure refactor
+    - long sentences that pile up clauses, or put the subject after a long lead-in
+- Comment the final state of the code. Bugs that only existed while you were writing the change, and links to planning docs outside the repository, are noise to the next reader.
+- Test new behavior in ways that help future changes. Update tests when you change existing behavior. Don't add tests just for coverage. Every test costs CI time on every PR.
+- Rebase onto upstream `main` before opening or updating a PR. This file may have changed there. Follow that version.
+
 ## Project Overview
 
 Agent Substrate is a system built on top of Kubernetes which manages agent-like workloads to achieve higher scale and efficiency than Kubernetes alone can offer, with lower latency.
@@ -58,7 +81,6 @@ The dev entry points are the scripts under `hack/` and the `cmd/ate-setup` insta
 - **Copyright Headers**: All files must contain appropriate copyright and license headers. See templates in `hack/boilerplate/`.
 - **Modularity**: Submit small, focused Pull Requests that touch a limited part of the codebase for easier reviews and rebasing.
 - **Go Modules**: Ensure `go.mod` is clean. Run `go mod tidy` if adding or removing dependencies.
-- **Comments**: Keep them brief and to the point. Comment the final state of the code, not the path taken to it — a problem that only existed partway through writing the change is noise to the next reader, as is a pointer to a scratch or planning file that isn't in the repository.
 - **Spelling**: American English. `golangci-lint` runs `misspell` with `locale: US`, so British spellings fail lint.
 
 ## Backward Compatibility
@@ -88,11 +110,11 @@ See the [metric registry](docs/observability.md#the-metric-registry) section of 
 
 ## Testing Instructions
 
-1. Write tests for all new code. We will not merge code that lacks tests.
+1. Write tests for new behavior. Update tests when you change existing behavior. Consider the value of tests for future changes.
 2. Ensure changes do not break existing tests.
 3. Run `go test -race ./...` and `hack/verify-all.sh` locally before requesting a code review to catch common issues like missed copyright headers or formatting drift.
 4. For end-to-end tests involving the actual infrastructure, ensure you have a running cluster (setup via `hack/ate-dev-env.sh.example` and `go run ./tools/setup-gcp bootstrap`).
-5. A test that skips when a precondition is missing — Docker, a cluster, an artifact directory — must **fail** on it in CI, because a skip and a pass are the same exit code. Resolve strictness through a named predicate rather than an inline `os.Getenv("CI")`; `cmd/ateapi/internal/store/dockerenv.Required()` is the reference implementation. Prove the strict branch red before merging: a guard only ever observed passing is not known to guard anything. See `docs/dev/best-practices/ci-fail-closed.md`.
+5. A test that skips when a precondition is missing (Docker, a cluster, an artifact directory) must **fail** on it in CI, because a skip and a pass are the same exit code. Check for CI with a named predicate like `cmd/ateapi/internal/store/dockerenv.Required()` instead of an inline `os.Getenv("CI")`. Make sure the CI branch actually fails before merging. See `docs/dev/best-practices/ci-fail-closed.md`.
 
 ## Security Considerations
 
