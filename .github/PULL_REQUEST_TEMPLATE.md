@@ -1,4 +1,4 @@
-> The PR title becomes the release note. Write it for users.
+<!-- The PR title becomes the release note. Write it for users. -->
 
 Why is this needed? (Or link the issue. Open one first for features, API, install or CI changes.)
 
