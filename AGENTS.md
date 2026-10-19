@@ -27,7 +27,10 @@
 - Keep each PR to one change. Send refactors, cleanups and follow-ups as separate PRs. For how to batch small fixes, see "Sizing PRs for review" in `CONTRIBUTING.md`.
 - Follow "Contribution process" in `CONTRIBUTING.md`: open an issue first for anything beyond a small fix, and search open PRs and issues before you start.
 - Start the PR description with why the change is needed, or link the issue. Only write "Fixes #N" if the PR fully fixes it, and keep the description in sync with the final diff.
-- Rebase onto upstream `main` before opening or updating a PR, and don't merge main into your branch. This file may have changed there. Follow that version.
+- Rebase onto upstream `main` before opening a PR, and don't merge main into your branch. This file may have changed there. Follow that version.
+- When updating a PR, keep rebases and other changes in separate pushes, so reviewers can see what changed:
+  - To address review comments or test failures, push the fix without rebasing.
+  - To rebase, push only the rebase.
 - After a rebase, check your diff against what main renamed or rewrote since you branched: packages, the module path, helpers you call.
 
 ### Code
