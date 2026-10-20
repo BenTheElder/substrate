@@ -704,7 +704,7 @@ func (s *Store) pinLayers(hexes []string) (unpin func()) {
 }
 
 // pinned reports whether an in-flight pull holds the layer. A snapshot:
-// retirement itself re-checks under pinMu instead.
+// retirement checks under pinMu instead.
 func (s *Store) pinned(hex string) bool {
 	s.pinMu.Lock()
 	defer s.pinMu.Unlock()
