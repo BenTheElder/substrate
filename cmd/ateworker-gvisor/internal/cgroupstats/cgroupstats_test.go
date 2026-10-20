@@ -294,3 +294,22 @@ func TestReadMalformedMemoryCurrent(t *testing.T) {
 		t.Errorf("Read() error = %v, want one that does not match fs.ErrNotExist", err)
 	}
 }
+
+func TestMemoryCurrentBytes(t *testing.T) {
+	dir := writeCgroup(t, map[string]string{"memory.current": "157286400\n"})
+	got, err := MemoryCurrentBytes(dir)
+	if err != nil || got != 157286400 {
+		t.Errorf("MemoryCurrentBytes() = %d, %v, want 157286400", got, err)
+	}
+	if _, err := MemoryCurrentBytes(t.TempDir()); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("MemoryCurrentBytes(empty dir) error = %v, want fs.ErrNotExist", err)
+	}
+}
+
+func TestFileCacheBytes(t *testing.T) {
+	dir := writeCgroup(t, map[string]string{"memory.stat": fullMemoryStat})
+	got, err := FileCacheBytes(dir)
+	if want := uint64(20971520 + 31457280); err != nil || got != want {
+		t.Errorf("FileCacheBytes() = %d, %v, want %d", got, err, want)
+	}
+}

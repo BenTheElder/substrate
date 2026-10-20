@@ -187,3 +187,33 @@ func readKeyedUint(path, key string) (uint64, bool, error) {
 	}
 	return 0, false, nil
 }
+
+// MemoryCurrentBytes reads memory.current alone, for callers polling more often
+// than a full Read is worth. A missing file is an error wrapping fs.ErrNotExist.
+func MemoryCurrentBytes(dir string) (uint64, error) {
+	path := filepath.Join(dir, "memory.current")
+	v, ok, err := readUint(path)
+	if err != nil {
+		return 0, err
+	}
+	if !ok {
+		return 0, fmt.Errorf("reading %q: %w", path, fs.ErrNotExist)
+	}
+	return v, nil
+}
+
+// FileCacheBytes is memory.stat's active_file plus inactive_file: the page cache
+// on the file LRU, which the kernel can reclaim. shmem sits on the anon LRU, so
+// memfd-backed memory such as the sentry's is not counted.
+func FileCacheBytes(dir string) (uint64, error) {
+	path := filepath.Join(dir, "memory.stat")
+	active, _, err := readKeyedUint(path, "active_file")
+	if err != nil {
+		return 0, err
+	}
+	inactive, _, err := readKeyedUint(path, "inactive_file")
+	if err != nil {
+		return 0, err
+	}
+	return active + inactive, nil
+}

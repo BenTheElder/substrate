@@ -249,6 +249,9 @@ func do(ctx context.Context) error {
 	defer usageStdout.Close()
 	ateworkerService.usage = workerstats.NewUsageEmitter(lp, usageStdout, pool)
 	defer workerstats.StartSampler(ctx, *usageSampleInterval, func(ctx context.Context) { ateworkerService.sweepUsage(ctx) })()
+	if cgroupDelegated {
+		go ateworkerService.watchMemory(ctx)
+	}
 
 	svr := grpc.NewServer(
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
@@ -652,6 +655,9 @@ func (s *AteWorkerService) RunWorkload(ctx context.Context, req *ateworkerpb.Run
 	var containersToDelete []string
 	defer func() {
 		if retErr != nil {
+			if hosted.oomKilled.Load() {
+				retErr = fmt.Errorf("killed for exceeding its memory limit: %w", retErr)
+			}
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cancel()
 			if err := s.tunnel.Deactivate(cleanupCtx, workerstats.ActorAttributionFromRequest(req)); err != nil {
@@ -682,6 +688,7 @@ func (s *AteWorkerService) RunWorkload(ctx context.Context, req *ateworkerpb.Run
 		return nil, fmt.Errorf("while creating the sandbox: %w", err)
 	}
 	s.pinSandbox(ctx, hosted, req.GetActorDirs())
+	s.throttleSandboxMemory(ctx, hosted)
 	if err := rcmd.cmdStart(ctx, pw, ocispec.SandboxID); err != nil {
 		return nil, fmt.Errorf("while starting the sandbox: %w", err)
 	}
@@ -1068,6 +1075,9 @@ func (s *AteWorkerService) RestoreWorkload(ctx context.Context, req *ateworkerpb
 	var containersToDelete []string
 	defer func() {
 		if retErr != nil {
+			if hosted.oomKilled.Load() {
+				retErr = fmt.Errorf("killed for exceeding its memory limit: %w", retErr)
+			}
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cancel()
 			if err := s.tunnel.Deactivate(cleanupCtx, attribution); err != nil {
@@ -1106,6 +1116,7 @@ func (s *AteWorkerService) RestoreWorkload(ctx context.Context, req *ateworkerpb
 			return nil, fmt.Errorf("while creating the sandbox: %w", err)
 		}
 		s.pinSandbox(ctx, hosted, req.GetActorDirs())
+		s.throttleSandboxMemory(ctx, hosted)
 		err = rcmd.cmdStart(ctx, pw, ocispec.SandboxID)
 		timing.sandboxRestore = lap(&tLast)
 		if err != nil {
@@ -1120,6 +1131,7 @@ func (s *AteWorkerService) RestoreWorkload(ctx context.Context, req *ateworkerpb
 			return nil, fmt.Errorf("while creating the sandbox: %w", err)
 		}
 		s.pinSandbox(ctx, hosted, req.GetActorDirs())
+		s.throttleSandboxMemory(ctx, hosted)
 		err = rcmd.cmdRestore(ctx, pw, ocispec.SandboxID, checkpointDir)
 		timing.sandboxRestore = lap(&tLast)
 		if err != nil {

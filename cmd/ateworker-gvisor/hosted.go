@@ -53,6 +53,12 @@ type hostedActor struct {
 	// nothing that waits on it later can be fooled by a reused pid. Nil if it
 	// could not be pinned. Set once, under the actor's lock.
 	sandbox *sandboxProcess
+	// memoryLimit is the sandbox leaf's memory.high, or 0 while watchMemory
+	// should leave it alone.
+	memoryLimit atomic.Uint64
+	// oomKilled is set before watchMemory kills the sandbox.
+	oomKilled  atomic.Bool
+	overMemory memoryOverage
 }
 
 // admitActor reserves capacity before network setup. An actor that is already
