@@ -313,7 +313,7 @@ type bindErrorStore struct {
 	err error
 }
 
-func (s *bindErrorStore) BindActorToWorker(context.Context, string, *ateapi.ActorAssignment, func(*ateapi.Worker) *ateapi.Resources, func(*ateapi.Worker) error) error {
+func (s *bindErrorStore) BindActorToWorker(context.Context, string, *ateapi.ActorAssignment, func(*ateapi.Worker) (*ateapi.Resources, error), func(*ateapi.Worker) error) error {
 	return s.err
 }
 
@@ -2282,7 +2282,7 @@ func (s *contentionStore) FindWorkerHostingActor(context.Context, string) (strin
 
 // BindActorToWorker runs admit as the real store does under the Worker's row
 // lock, and returns its refusal unchanged.
-func (s *contentionStore) BindActorToWorker(_ context.Context, workerName string, _ *ateapi.ActorAssignment, _ func(*ateapi.Worker) *ateapi.Resources, admit func(*ateapi.Worker) error) error {
+func (s *contentionStore) BindActorToWorker(_ context.Context, workerName string, _ *ateapi.ActorAssignment, _ func(*ateapi.Worker) (*ateapi.Resources, error), admit func(*ateapi.Worker) error) error {
 	worker, ok := s.workers[workerName]
 	if !ok {
 		return store.ErrNotFound
