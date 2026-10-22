@@ -3177,6 +3177,9 @@ func Validate_RuntimeOverhead(
 			if earlyReturn {
 				return // do not proceed
 			}
+			if e := validate.Maximum(ctx, op, fldPath, obj, oldObj, 1099511627776); len(e) != 0 {
+				errs = append(errs, e...)
+			}
 			if e := validate.Minimum(ctx, op, fldPath, obj, oldObj, 0); len(e) != 0 {
 				errs = append(errs, e...)
 			}
@@ -3207,6 +3210,9 @@ func Validate_RuntimeOverhead(
 			}
 			if earlyReturn {
 				return // do not proceed
+			}
+			if e := validate.Maximum(ctx, op, fldPath, obj, oldObj, 1073741824); len(e) != 0 {
+				errs = append(errs, e...)
 			}
 			if e := validate.Minimum(ctx, op, fldPath, obj, oldObj, 0); len(e) != 0 {
 				errs = append(errs, e...)

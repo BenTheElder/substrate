@@ -174,12 +174,14 @@ message RuntimeOverhead {
   //
   // +k8s:optional
   // +k8s:minimum=0
+  // +k8s:maximum=1099511627776 # 1TiB
   int64 memory_bytes = 1;
 
   // memory_bytes_per_gib is booked for each GiB of the actor's memory limit.
   //
   // +k8s:optional
   // +k8s:minimum=0
+  // +k8s:maximum=1073741824 # as much again as the limit
   int64 memory_bytes_per_gib = 2;
 }
 
