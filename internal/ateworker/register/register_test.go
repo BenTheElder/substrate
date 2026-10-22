@@ -62,7 +62,10 @@ func TestFromFiles(t *testing.T) {
 				t.Fatalf("writing memory limit: %v", err)
 			}
 
-			got := fromDir(dir, testActors, 0)
+			got, err := fromDir(dir, testActors, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if diff := cmp.Diff(tc.want, got, protocmp.Transform()); diff != "" {
 				t.Errorf("reported capacity mismatch (-want +got):\n%s", diff)
 			}
@@ -71,7 +74,10 @@ func TestFromFiles(t *testing.T) {
 }
 
 func TestFromFilesMissing(t *testing.T) {
-	got := fromDir(t.TempDir(), testActors, 1<<20)
+	got, err := fromDir(t.TempDir(), testActors, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
 	want := &ateletpb.WorkerResources{Actors: testActors}
 	if diff := cmp.Diff(want, got, protocmp.Transform()); diff != "" {
 		t.Errorf("unset environment capacity mismatch (-want +got):\n%s", diff)
@@ -87,12 +93,20 @@ func TestFromFilesMemoryReserved(t *testing.T) {
 		name     string
 		reserved int64
 		want     int64
+		wantErr  bool
 	}{
 		{name: "some", reserved: 64 << 20, want: 960 << 20},
-		{name: "all of it", reserved: 2 << 30, want: 1},
+		{name: "all of it", reserved: 1 << 30, wantErr: true},
+		{name: "more than all of it", reserved: 2 << 30, wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := fromDir(dir, testActors, tc.reserved)
+			got, err := fromDir(dir, testActors, tc.reserved)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("fromDir() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				return
+			}
 			want := &ateletpb.WorkerResources{Actors: testActors, MemoryBytes: tc.want}
 			if diff := cmp.Diff(want, got, protocmp.Transform()); diff != "" {
 				t.Errorf("reported capacity mismatch (-want +got):\n%s", diff)
@@ -894,6 +908,9 @@ func TestReconcilerSyncReportsActorOverhead(t *testing.T) {
 	for _, rt := range append([]*ateletpb.WorkerSandboxRuntime{c.GetDefaultRuntime()}, c.GetRestorableRuntimes()...) {
 		if diff := cmp.Diff(overhead, rt.GetActorOverhead(), protocmp.Transform()); diff != "" {
 			t.Errorf("actor_overhead mismatch (-want +got):\n%s", diff)
+		}
+		if rt.GetActorOverhead() == overhead {
+			t.Error("runtime shares the worker's actor_overhead message")
 		}
 	}
 	if len(c.GetRestorableRuntimes()) != 1 {
