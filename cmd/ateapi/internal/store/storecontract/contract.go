@@ -2548,9 +2548,9 @@ func runWorkerAssignmentContractTests(t *testing.T, setup func(t *testing.T) sto
 		// the caller's own estimate is replaced by what book prices
 		booked := &ateapi.Resources{CpuMillicores: 500, MemoryBytes: 528 << 20}
 		var priced *ateapi.Worker
-		book := func(locked *ateapi.Worker) *ateapi.Resources {
+		book := func(locked *ateapi.Worker) (*ateapi.Resources, error) {
 			priced = locked
-			return booked
+			return booked, nil
 		}
 		if err := s.BindActorToWorker(ctx, testWorkerName, newTestAssignment("uid-1", 500, 516<<20), book, nil); err != nil {
 			t.Fatalf("BindActorToWorker failed: %v", err)
@@ -2581,31 +2581,41 @@ func runWorkerAssignmentContractTests(t *testing.T, setup func(t *testing.T) sto
 		}
 	})
 
-	t.Run("BindActorToWorker_RefusedAdmissionLeavesNothingBehind", func(t *testing.T) {
-		s := setup(t)
-		ctx := context.Background()
-
-		if _, err := s.CreateWorker(ctx, newTestWorker(testWorkerName, "pod-1")); err != nil {
-			t.Fatalf("CreateWorker failed: %v", err)
-		}
-
+	t.Run("BindActorToWorker_RefusalLeavesNothingBehind", func(t *testing.T) {
 		full := errors.New("worker is full")
-		err := s.BindActorToWorker(ctx, testWorkerName, newTestAssignment("uid-1", 500, 0), nil,
-			func(*ateapi.Worker) error { return full })
-		if !errors.Is(err, full) {
-			t.Errorf("BindActorToWorker with a refusing admit = %v, want %v", err, full)
-		}
-		// The bind speculates the row in before it asks, so a refusal has to
-		// take it back out.
-		if _, err := s.GetWorkerAssignment(ctx, testWorkerName, "uid-1"); !errors.Is(err, store.ErrNotFound) {
-			t.Errorf("a refused bind left an assignment behind: %v", err)
-		}
-		worker, err := s.GetWorker(ctx, testWorkerName)
-		if err != nil {
-			t.Fatalf("GetWorker failed: %v", err)
-		}
-		if got := worker.GetStatus().GetAllocated().GetActors(); got != 0 {
-			t.Errorf("a refused bind left %d actors allocated, want 0", got)
+		for _, tc := range []struct {
+			name  string
+			book  func(*ateapi.Worker) (*ateapi.Resources, error)
+			admit func(*ateapi.Worker) error
+		}{
+			{name: "admit", admit: func(*ateapi.Worker) error { return full }},
+			{name: "book", book: func(*ateapi.Worker) (*ateapi.Resources, error) { return nil, full }},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				s := setup(t)
+				ctx := context.Background()
+
+				if _, err := s.CreateWorker(ctx, newTestWorker(testWorkerName, "pod-1")); err != nil {
+					t.Fatalf("CreateWorker failed: %v", err)
+				}
+
+				err := s.BindActorToWorker(ctx, testWorkerName, newTestAssignment("uid-1", 500, 0), tc.book, tc.admit)
+				if !errors.Is(err, full) {
+					t.Errorf("BindActorToWorker with a refusing %s = %v, want %v", tc.name, err, full)
+				}
+				// The bind speculates the row in before it asks, so a refusal has to
+				// take it back out.
+				if _, err := s.GetWorkerAssignment(ctx, testWorkerName, "uid-1"); !errors.Is(err, store.ErrNotFound) {
+					t.Errorf("a refused bind left an assignment behind: %v", err)
+				}
+				worker, err := s.GetWorker(ctx, testWorkerName)
+				if err != nil {
+					t.Fatalf("GetWorker failed: %v", err)
+				}
+				if got := worker.GetStatus().GetAllocated().GetActors(); got != 0 {
+					t.Errorf("a refused bind left %d actors allocated, want 0", got)
+				}
+			})
 		}
 	})
 

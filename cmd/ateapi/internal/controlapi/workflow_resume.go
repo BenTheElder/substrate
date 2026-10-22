@@ -510,10 +510,13 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 		ActorUid: actor.GetMetadata().GetUid(),
 	}
 	// Recorded from the same locked Worker admit checks, so release returns
-	// exactly what was added. admit refuses a booking that doesn't fit.
-	book := func(fresh *ateapi.Worker) *ateapi.Resources {
-		booking, _ := scheduling.Booking(fresh, constraints)
-		return booking
+	// exactly what was added.
+	book := func(fresh *ateapi.Worker) (*ateapi.Resources, error) {
+		booking, ok := scheduling.Booking(fresh, constraints)
+		if !ok {
+			return nil, errWorkerFilledUp
+		}
+		return booking, nil
 	}
 
 	// The candidate came from a watch-fed cache, so it may already be full or no
