@@ -22,6 +22,7 @@ import (
 	"go.ate.dev/substrate/api/ateapi/v1"
 	"go.ate.dev/substrate/internal/hardware"
 	"go.ate.dev/substrate/internal/resources"
+	"google.golang.org/protobuf/proto"
 	"k8s.io/apimachinery/pkg/labels"
 )
 
@@ -710,5 +711,62 @@ func TestSchedulePowerOfTwoChoicesShiftedSecondSample(t *testing.T) {
 	}
 	if got.GetWorkerPod() != "w-2" {
 		t.Fatalf("Schedule() = %q, want %q", got.GetWorkerPod(), "w-2")
+	}
+}
+
+// withOverhead sets the actor overhead on the worker's runtimes: def on the
+// default, restorable on the restorable ones in order.
+func withOverhead(def *ateapi.RuntimeOverhead, restorable ...*ateapi.RuntimeOverhead) func(*ateapi.Worker) {
+	return func(w *ateapi.Worker) {
+		c := w.Status.SandboxClasses[0]
+		c.DefaultRuntime.ActorOverhead = def
+		for i, o := range restorable {
+			c.RestorableRuntimes[i].ActorOverhead = o
+		}
+	}
+}
+
+func TestBooking(t *testing.T) {
+	const gib = 1 << 30
+	limits := &ateapi.Resources{CpuMillicores: 500, MemoryBytes: gib / 2}
+	current, old := sandboxRuntime("microvm", "amd64", "new"), sandboxRuntime("microvm", "amd64", "old")
+	w := worker("w", "", "node-a", nil,
+		withRuntimes(current, old),
+		withOverhead(&ateapi.RuntimeOverhead{MemoryBytes: 4 << 20, MemoryBytesPerGib: 8 << 20}, &ateapi.RuntimeOverhead{MemoryBytes: 16 << 20}))
+	for _, tc := range []struct {
+		name    string
+		require hardware.Requirement
+		want    int64
+	}{
+		{name: "cold boot books the default runtime's", want: gib/2 + 4<<20 + 4<<20},
+		{name: "a restore books the matching runtime's", require: hardware.NewRequirement(old), want: gib/2 + 16<<20},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Booking(w, Constraints{Limits: limits, RequiredRuntime: tc.require})
+			if got.GetMemoryBytes() != tc.want || got.GetCpuMillicores() != 500 {
+				t.Errorf("Booking() = %v, want %d memory bytes and 500 millicores", got, tc.want)
+			}
+		})
+	}
+	plain := worker("plain", "gvisor", "node-a", nil)
+	if got := Booking(plain, Constraints{Limits: limits}); !proto.Equal(got, limits) {
+		t.Errorf("Booking() without overhead = %v, want the limits %v", got, limits)
+	}
+}
+
+// An actor that fits the worker's free memory alone can still not fit with its
+// runtime's overhead.
+func TestHasRoomBooksRuntimeOverhead(t *testing.T) {
+	const gib = 1 << 30
+	constraints := Constraints{Limits: &ateapi.Resources{MemoryBytes: gib}}
+	overhead := withOverhead(&ateapi.RuntimeOverhead{MemoryBytes: 4 << 20})
+	tight := worker("tight", "microvm", "node-a", nil, withMaxActors(10), withCapacity(0, gib), overhead)
+	roomy := worker("roomy", "microvm", "node-a", nil, withMaxActors(10), withCapacity(0, gib+4<<20), overhead)
+	s := New(fleet{tight, roomy})
+	if s.HasRoom(tight, constraints) {
+		t.Error("HasRoom() = true without room for the actor's overhead, want false")
+	}
+	if !s.HasRoom(roomy, constraints) {
+		t.Error("HasRoom() = false with room for the actor and its overhead, want true")
 	}
 }

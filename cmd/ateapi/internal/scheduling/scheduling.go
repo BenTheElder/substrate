@@ -123,7 +123,7 @@ func (s *scheduler) Schedule(ctx context.Context, constraints Constraints) (*ate
 		if !s.Applies(worker, constraints) {
 			continue
 		}
-		if cand, ok := checkRoom(worker, constraints.Limits); ok {
+		if cand, ok := checkRoom(worker, Booking(worker, constraints)); ok {
 			candidates = append(candidates, cand)
 		}
 	}
@@ -252,8 +252,28 @@ func (s *scheduler) Applies(worker *ateapi.Worker, constraints Constraints) bool
 // this size. A dimension the worker does not report is unconstrained, so
 // placement is never blocked by missing data.
 func (s *scheduler) HasRoom(worker *ateapi.Worker, constraints Constraints) bool {
-	_, ok := checkRoom(worker, constraints.Limits)
+	_, ok := checkRoom(worker, Booking(worker, constraints))
 	return ok
+}
+
+// Booking is what an actor takes from the worker's capacity: its limits plus
+// the overhead of the worker runtime it would run under there.
+func Booking(worker *ateapi.Worker, constraints Constraints) *ateapi.Resources {
+	overhead := constraints.RequiredRuntime.WorkerRuntimeFor(worker.GetStatus()).GetActorOverhead()
+	if overhead == nil {
+		return constraints.Limits
+	}
+	memory := constraints.Limits.GetMemoryBytes()
+	return &ateapi.Resources{
+		CpuMillicores: constraints.Limits.GetCpuMillicores(),
+		MemoryBytes:   memory + overhead.GetMemoryBytes() + perGiB(memory, overhead.GetMemoryBytesPerGib()),
+	}
+}
+
+// perGiB scales perGiB bytes per GiB to n bytes without overflowing.
+func perGiB(n, perGiB int64) int64 {
+	const gib = 1 << 30
+	return n/gib*perGiB + n%gib*perGiB/gib
 }
 
 func checkRoom(worker *ateapi.Worker, want *ateapi.Resources) (candidate, bool) {
