@@ -174,8 +174,7 @@ tests:
   # GluttonUser fills the actor's RAM to --mem-target through the
   # glutton WriteRAM API before the first suspend, so every suspend/resume
   # cycle is measured against a realistically-sized actor. actorMemory =
-  # target + headroom (glutton itself, the guest, and on microvm the 128Mi
-  # VMM reserve). The golden snapshot and cold boot stay small: the working
+  # target + headroom (glutton itself and the guest). The golden snapshot and cold boot stay small: the working
   # set exists from the first fill onward. --mem-churn re-randomizes 64Mi
   # each cycle through an advancing window (WriteRAM rotate), so repeated
   # suspends snapshot changing memory rather than a static set and the dirty

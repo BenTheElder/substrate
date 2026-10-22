@@ -57,10 +57,9 @@ fi
 
 WORKER_COUNT=1
 SANDBOX_CLASS="gvisor"
-# Actor memory limit (ActorTemplate resources.limits.memory). The default
-# is the smallest size microvm admits (128Mi VMM reserve + 128Mi guest floor),
-# since a bigger guest drags more page cache into every memory snapshot. Raise
-# it for RAM-consuming suites.
+# Actor memory limit (ActorTemplate resources.limits.memory). Small by
+# default, since a bigger guest drags more page cache into every memory
+# snapshot. Raise it for RAM-consuming suites.
 ACTOR_MEMORY="256Mi"
 # Actor CPU limit (ActorTemplate resources.limits.cpu). The scheduler books
 # it against the worker's CPU capacity, so it bounds how many actors a worker
