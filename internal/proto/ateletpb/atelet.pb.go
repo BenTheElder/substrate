@@ -678,11 +678,13 @@ type RuntimeOverhead struct {
 	//
 	// +k8s:optional
 	// +k8s:minimum=0
+	// +k8s:maximum=1099511627776 # 1TiB
 	MemoryBytes int64 `protobuf:"varint,1,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"`
 	// memory_bytes_per_gib is booked for each GiB of the actor's memory limit.
 	//
 	// +k8s:optional
 	// +k8s:minimum=0
+	// +k8s:maximum=1073741824 # as much again as the limit
 	MemoryBytesPerGib int64 `protobuf:"varint,2,opt,name=memory_bytes_per_gib,json=memoryBytesPerGib,proto3" json:"memory_bytes_per_gib,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache

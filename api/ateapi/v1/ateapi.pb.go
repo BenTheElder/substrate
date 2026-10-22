@@ -7725,7 +7725,11 @@ type WorkerSandboxRuntime struct {
 	Version *VersionedSandboxCompat `protobuf:"bytes,1,opt,name=version,proto3" json:"version,omitempty"`
 	// What each Actor running under this runtime costs the Worker on top of its
 	// own limits. Placement books it with every Actor placed under this
-	// runtime, so it counts against capacity and shows in allocated.
+	// runtime, so it counts against capacity and shows in allocated. Unset, an
+	// Actor books only its limits. Today the microVM worker reports 4MiB plus
+	// 8MiB per GiB of the Actor's memory limit, and the gVisor worker reports
+	// none. Either way, a Worker keeps some of its memory limit for itself out
+	// of the capacity it reports.
 	//
 	// +k8s:optional
 	ActorOverhead *RuntimeOverhead `protobuf:"bytes,2,opt,name=actor_overhead,json=actorOverhead,proto3" json:"actor_overhead,omitempty"`
@@ -7785,12 +7789,14 @@ type RuntimeOverhead struct {
 	//
 	// +k8s:optional
 	// +k8s:minimum=0
+	// +k8s:maximum=1099511627776 # 1TiB
 	MemoryBytes int64 `protobuf:"varint,1,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"`
 	// memory_bytes_per_gib is booked for each GiB of the Actor's memory limit,
-	// e.g. host page tables for a micro-VM's guest RAM.
+	// e.g. host page tables for a microVM's guest RAM.
 	//
 	// +k8s:optional
 	// +k8s:minimum=0
+	// +k8s:maximum=1073741824 # as much again as the limit
 	MemoryBytesPerGib int64 `protobuf:"varint,2,opt,name=memory_bytes_per_gib,json=memoryBytesPerGib,proto3" json:"memory_bytes_per_gib,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
