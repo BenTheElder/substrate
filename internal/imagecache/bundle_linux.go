@@ -155,7 +155,7 @@ func mountImageVolume(mountpoint string, layers []string) error {
 // makes read-only.
 //
 // Requires overlayfs's "lowerdir+" option: Linux 6.7+, or 6.6.23+ where it was
-// backported. COS 121 (6.6.74+) and later have it.
+// backported.
 // https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=24e16e385f2272b1a9df51337a5c32d28a29c7ad
 // https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/commit/?id=cc0918b3582c98f12cfb30bf7496496d14bff3e9
 func mountOverlay(mountpoint string, lowers []string, upper, work string) error {
