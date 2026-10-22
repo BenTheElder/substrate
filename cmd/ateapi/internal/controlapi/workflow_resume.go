@@ -407,12 +407,6 @@ func (w *ActorWorkflow) validateAssignedWorker(ctx context.Context, actorRef res
 	return worker, nil
 }
 
-// admittedResources is what an assignment books against its worker: the
-// actor's limits plus its runtime's overhead there, or nil when neither is set.
-func admittedResources(worker *ateapi.Worker, constraints scheduling.Constraints) *ateapi.Resources {
-	return scheduling.Booking(worker, constraints)
-}
-
 // workerHoldingStaleClaim recovers a claim written before the Actor update.
 // It releases the claim if the Worker is no longer eligible.
 func (w *ActorWorkflow) workerHoldingStaleClaim(ctx context.Context, actor *ateapi.Actor, constraints scheduling.Constraints, relaxable bool) (*ateapi.Worker, error) {
@@ -474,7 +468,7 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 	}()
 
 	constraints := schedulingConstraints(actor, actorTemplate)
-	snapRuntime := constraints.RequiredRuntime
+	snapRuntime := constraints.SnapshotRuntime
 	class = constraints.SandboxClass
 	relaxable := canRelaxRuntime(actor, constraints)
 
@@ -514,8 +508,12 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 			Name:     actor.GetMetadata().GetName(),
 		},
 		ActorUid: actor.GetMetadata().GetUid(),
-		// Record what this claim reserves so release returns the same amount.
-		Resources: admittedResources(assignedWorker, constraints),
+	}
+	// Recorded from the same locked Worker admit checks, so release returns
+	// exactly what was added. admit refuses a booking that doesn't fit.
+	book := func(fresh *ateapi.Worker) *ateapi.Resources {
+		booking, _ := scheduling.Booking(fresh, constraints)
+		return booking
 	}
 
 	// The candidate came from a watch-fed cache, so it may already be full or no
@@ -531,7 +529,7 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 		bound = fresh
 		return nil
 	}
-	if err := w.store.BindActorToWorker(ctx, assignedWorker.GetMetadata().GetName(), assignment, admit); err != nil {
+	if err := w.store.BindActorToWorker(ctx, assignedWorker.GetMetadata().GetName(), assignment, book, admit); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			w.workerCache.Forget(assignedWorker.GetMetadata().GetName())
 			return nil, nil, fmt.Errorf("selected worker disappeared before claim: %w", store.ErrVersionConflict)
@@ -623,9 +621,11 @@ func schedulingConstraints(actor *ateapi.Actor, tmpl *ateapi.ActorTemplate) sche
 	if node := actor.GetStatus().GetAssignedNode(); node != "" {
 		requiredNodes = []string{node}
 	}
+	required := hardware.NewRequirement(requiredSnapshotRuntime(snap, tmpl))
 	c := scheduling.Constraints{
 		SandboxClass:    snap.GetSandboxRuntime().GetSandboxClass(),
-		RequiredRuntime: hardware.NewRequirement(requiredSnapshotRuntime(snap, tmpl)),
+		RequiredRuntime: required,
+		SnapshotRuntime: required,
 		ActorSelector:   labels.SelectorFromSet(labels.Set(actor.GetWorkerSelector().GetMatchLabels())),
 		RequiredNodes:   requiredNodes,
 		Limits:          tmpl.GetResources().GetLimits(),

@@ -69,7 +69,7 @@ func saveWorker(ctx context.Context, tx pgx.Tx, worker *ateapi.Worker) error {
 	return nil
 }
 
-func (p *Persistence) BindActorToWorker(ctx context.Context, workerName string, assignment *ateapi.ActorAssignment, admit func(*ateapi.Worker) error) error {
+func (p *Persistence) BindActorToWorker(ctx context.Context, workerName string, assignment *ateapi.ActorAssignment, book func(*ateapi.Worker) *ateapi.Resources, admit func(*ateapi.Worker) error) error {
 	actorUID := assignment.GetActorUid()
 	if actorUID == "" {
 		return fmt.Errorf("binding an assignment with no actor_uid to worker %s", workerName)
@@ -89,6 +89,10 @@ func (p *Persistence) BindActorToWorker(ctx context.Context, workerName string, 
 			worker.Status = &ateapi.WorkerStatus{}
 		}
 
+		// priced under the row lock, from the worker this binds to
+		if book != nil {
+			assignment.Resources = book(worker)
+		}
 		assignmentBytes, err := proto.Marshal(assignment)
 		if err != nil {
 			return nil, fmt.Errorf("marshaling assignment: %w", err)
