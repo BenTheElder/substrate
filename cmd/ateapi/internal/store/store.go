@@ -288,7 +288,8 @@ type Interface interface {
 	// book, when set, prices the assignment against the Worker with its row
 	// locked, before the assignment is written: its result replaces the
 	// assignment's resources, so what is recorded and what is added to the
-	// Worker's allocation come from the same view as admit.
+	// Worker's allocation come from the same view as admit. Returning an error
+	// from it refuses the bind and is returned unchanged.
 	//
 	// admit decides whether the Worker will take the Actor, and runs against the
 	// Worker as it stands with its row locked, so the answer cannot go stale
@@ -297,7 +298,7 @@ type Interface interface {
 	// Actor already on this Worker is already counted against it.
 	//
 	// ErrNotFound if the Worker is gone.
-	BindActorToWorker(ctx context.Context, workerName string, assignment *ateapi.ActorAssignment, book func(*ateapi.Worker) *ateapi.Resources, admit func(*ateapi.Worker) error) error
+	BindActorToWorker(ctx context.Context, workerName string, assignment *ateapi.ActorAssignment, book func(*ateapi.Worker) (*ateapi.Resources, error), admit func(*ateapi.Worker) error) error
 
 	// ReleaseActorFromWorker removes an assignment and updates allocation,
 	// returning the Worker as it now stands so the caller can feed the
