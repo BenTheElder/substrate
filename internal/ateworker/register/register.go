@@ -101,22 +101,23 @@ func (e *Epoch) Require() (int64, error) {
 //
 // memoryReserved is how much of the memory limit the worker keeps for itself
 // rather than offering to actors.
-func FromFiles(actors int, memoryReserved int64) *ateletpb.WorkerResources {
+func FromFiles(actors int, memoryReserved int64) (*ateletpb.WorkerResources, error) {
 	return fromDir(workercapacity.MountPath, actors, memoryReserved)
 }
 
-func fromDir(dir string, actors int, memoryReserved int64) *ateletpb.WorkerResources {
+func fromDir(dir string, actors int, memoryReserved int64) (*ateletpb.WorkerResources, error) {
 	memory := readLimit(filepath.Join(dir, workercapacity.MemoryLimitFile))
 	if memory > 0 {
-		// a limit too small to leave anything still has to report some, since
-		// zero reads as unconstrained
-		memory = max(memory-memoryReserved, 1)
+		if memory <= memoryReserved {
+			return nil, fmt.Errorf("pod memory limit %d bytes is no more than the %d the worker keeps for itself, raise the pool's limits.memory", memory, memoryReserved)
+		}
+		memory -= memoryReserved
 	}
 	return &ateletpb.WorkerResources{
 		CpuMillicores: readLimit(filepath.Join(dir, workercapacity.CPULimitFile)),
 		MemoryBytes:   memory,
 		Actors:        int32(actors),
-	}
+	}, nil
 }
 
 // ParsePodIPs splits the comma-separated pod IPs the downward API exposes for
@@ -170,16 +171,16 @@ func buildRuntimesRequest(epoch int64, class *sandboxruntimes.Class) *ateletpb.S
 	}
 }
 
-// setActorOverhead reports overhead on every runtime in req. The restorable
-// runtimes run under this worker too, so they cost it the same.
+// setActorOverhead reports a copy of overhead on every runtime in req. The
+// restorable runtimes run under this worker too, so they cost it the same.
 func setActorOverhead(req *ateletpb.SetWorkerSandboxRuntimesRequest, overhead *ateletpb.RuntimeOverhead) {
 	if overhead == nil {
 		return
 	}
 	for _, c := range req.GetSandboxClasses() {
-		c.GetDefaultRuntime().ActorOverhead = overhead
+		c.GetDefaultRuntime().ActorOverhead = proto.CloneOf(overhead)
 		for _, rt := range c.GetRestorableRuntimes() {
-			rt.ActorOverhead = overhead
+			rt.ActorOverhead = proto.CloneOf(overhead)
 		}
 	}
 }
@@ -271,9 +272,13 @@ func Report(ctx context.Context, cfg ReportConfig, epoch *Epoch) error {
 	if err != nil {
 		return fmt.Errorf("register worker: %w", err)
 	}
+	capacity, err := FromFiles(cfg.Actors, cfg.MemoryReservedBytes)
+	if err != nil {
+		return fmt.Errorf("register worker: %w", err)
+	}
 	client := &dialingClient{socketPath: cfg.SocketPath, tlsConfig: tlsConfig}
 	changes := WatchFilePath(ctx, cfg.RuntimesFile)
-	return run(ctx, cfg, FromFiles(cfg.Actors, cfg.MemoryReservedBytes), client, epoch, changes)
+	return run(ctx, cfg, capacity, client, epoch, changes)
 }
 
 // run registers, then reports runtimes until ctx ends or the epoch is refused.
