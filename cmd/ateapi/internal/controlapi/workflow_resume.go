@@ -407,10 +407,10 @@ func (w *ActorWorkflow) validateAssignedWorker(ctx context.Context, actorRef res
 	return worker, nil
 }
 
-// admittedResources is what an assignment books against its worker, or nil
-// when the actor declared no limits and so reserves nothing.
-func admittedResources(constraints scheduling.Constraints) *ateapi.Resources {
-	return constraints.Limits
+// admittedResources is what an assignment books against its worker: the
+// actor's limits plus its runtime's overhead there, or nil when neither is set.
+func admittedResources(worker *ateapi.Worker, constraints scheduling.Constraints) *ateapi.Resources {
+	return scheduling.Booking(worker, constraints)
 }
 
 // workerHoldingStaleClaim recovers a claim written before the Actor update.
@@ -515,7 +515,7 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 		},
 		ActorUid: actor.GetMetadata().GetUid(),
 		// Record what this claim reserves so release returns the same amount.
-		Resources: admittedResources(constraints),
+		Resources: admittedResources(assignedWorker, constraints),
 	}
 
 	// The candidate came from a watch-fed cache, so it may already be full or no
