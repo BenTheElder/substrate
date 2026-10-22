@@ -98,14 +98,23 @@ func (e *Epoch) Require() (int64, error) {
 // TODO: Watch the projected files and report changes. For now we do not support
 // in-place Pod vertical scaling (IPPR); capacity is read once at startup.
 // NOTE: Please do not implement this yet. IPPR needs more general consideration.
-func FromFiles(actors int) *ateletpb.WorkerResources {
-	return fromDir(workercapacity.MountPath, actors)
+//
+// memoryReserved is how much of the memory limit the worker keeps for itself
+// rather than offering to actors.
+func FromFiles(actors int, memoryReserved int64) *ateletpb.WorkerResources {
+	return fromDir(workercapacity.MountPath, actors, memoryReserved)
 }
 
-func fromDir(dir string, actors int) *ateletpb.WorkerResources {
+func fromDir(dir string, actors int, memoryReserved int64) *ateletpb.WorkerResources {
+	memory := readLimit(filepath.Join(dir, workercapacity.MemoryLimitFile))
+	if memory > 0 {
+		// a limit too small to leave anything still has to report some, since
+		// zero reads as unconstrained
+		memory = max(memory-memoryReserved, 1)
+	}
 	return &ateletpb.WorkerResources{
 		CpuMillicores: readLimit(filepath.Join(dir, workercapacity.CPULimitFile)),
-		MemoryBytes:   readLimit(filepath.Join(dir, workercapacity.MemoryLimitFile)),
+		MemoryBytes:   memory,
 		Actors:        int32(actors),
 	}
 }
@@ -161,6 +170,20 @@ func buildRuntimesRequest(epoch int64, class *sandboxruntimes.Class) *ateletpb.S
 	}
 }
 
+// setActorOverhead reports overhead on every runtime in req. The restorable
+// runtimes run under this worker too, so they cost it the same.
+func setActorOverhead(req *ateletpb.SetWorkerSandboxRuntimesRequest, overhead *ateletpb.RuntimeOverhead) {
+	if overhead == nil {
+		return
+	}
+	for _, c := range req.GetSandboxClasses() {
+		c.GetDefaultRuntime().ActorOverhead = overhead
+		for _, rt := range c.GetRestorableRuntimes() {
+			rt.ActorOverhead = overhead
+		}
+	}
+}
+
 // classOf returns f's entry for class, or nil when the file has none.
 func classOf(f *sandboxruntimes.File, class string) *sandboxruntimes.Class {
 	for i := range f.SandboxClasses {
@@ -200,6 +223,12 @@ type ReportConfig struct {
 	Actors int
 	// PodIPs are the worker pod's IPs, from the downward API.
 	PodIPs []string
+	// MemoryReservedBytes is how much of its memory limit the worker keeps for
+	// itself rather than reporting as capacity.
+	MemoryReservedBytes int64
+	// ActorOverhead is what each actor costs the worker on top of its own
+	// limits, reported on every runtime. Nil is none.
+	ActorOverhead *ateletpb.RuntimeOverhead
 	// SandboxClass is the class this worker implements ("gvisor", "microvm").
 	SandboxClass string
 	// RuntimesFile is the sandbox runtimes file atelet keeps for this worker
@@ -244,7 +273,7 @@ func Report(ctx context.Context, cfg ReportConfig, epoch *Epoch) error {
 	}
 	client := &dialingClient{socketPath: cfg.SocketPath, tlsConfig: tlsConfig}
 	changes := WatchFilePath(ctx, cfg.RuntimesFile)
-	return run(ctx, cfg, FromFiles(cfg.Actors), client, epoch, changes)
+	return run(ctx, cfg, FromFiles(cfg.Actors, cfg.MemoryReservedBytes), client, epoch, changes)
 }
 
 // run registers, then reports runtimes until ctx ends or the epoch is refused.
@@ -414,6 +443,7 @@ func (r *reconciler) sync(ctx context.Context) (retry bool, err error) {
 		return false, nil
 	}
 	req := buildRuntimesRequest(r.epoch, class)
+	setActorOverhead(req, r.cfg.ActorOverhead)
 	if proto.Equal(req, r.reported) {
 		return false, nil
 	}

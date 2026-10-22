@@ -2505,8 +2505,32 @@ message WorkerSandboxRuntime {
   // +k8s:required
   VersionedSandboxCompat version = 1;
 
+  // What each Actor running under this runtime costs the Worker on top of its
+  // own limits. Placement books it with every Actor placed under this
+  // runtime, so it counts against capacity and shows in allocated.
+  //
+  // +k8s:optional
+  RuntimeOverhead actor_overhead = 2;
+
   // TODO: Add an informational SandboxConfig version name (e.g. "gvisor-2")
   // once workers report one.
+}
+
+// RuntimeOverhead is what an Actor costs the Worker outside its own limits: a
+// fixed amount plus an amount per GiB of its memory limit.
+message RuntimeOverhead {
+  // memory_bytes is booked once per Actor.
+  //
+  // +k8s:optional
+  // +k8s:minimum=0
+  int64 memory_bytes = 1;
+
+  // memory_bytes_per_gib is booked for each GiB of the Actor's memory limit,
+  // e.g. host page tables for a micro-VM's guest RAM.
+  //
+  // +k8s:optional
+  // +k8s:minimum=0
+  int64 memory_bytes_per_gib = 2;
 }
 
 // ActorSandboxRuntime is the runtime an actor runs under, as recorded on its
