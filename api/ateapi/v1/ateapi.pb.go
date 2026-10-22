@@ -7726,7 +7726,7 @@ type WorkerSandboxRuntime struct {
 	// What each Actor running under this runtime costs the Worker on top of its
 	// own limits. Placement books it with every Actor placed under this
 	// runtime, so it counts against capacity and shows in allocated. Unset, an
-	// Actor books only its limits. Today the microVM worker reports 4MiB plus
+	// Actor books only its limits. Today the microVM worker reports 128MiB plus
 	// 8MiB per GiB of the Actor's memory limit, and the gVisor worker reports
 	// none. Either way, a Worker keeps some of its memory limit for itself out
 	// of the capacity it reports.
