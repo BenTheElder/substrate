@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -58,7 +59,10 @@ type hostedActor struct {
 	// should leave it alone.
 	memoryLimit atomic.Uint64
 	// oomKilled is set before watchMemory kills the sandbox.
-	oomKilled   atomic.Bool
+	oomKilled atomic.Bool
+	// memoryMu is held while watchMemory checks or kills the sandbox, and
+	// guards memoryWatch.
+	memoryMu    sync.Mutex
 	memoryWatch cgroup.MemoryWatch
 }
 

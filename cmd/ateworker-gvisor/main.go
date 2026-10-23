@@ -238,6 +238,10 @@ func do(ctx context.Context) error {
 		return err
 	}
 	ateworkerService := NewService(tunnel, actorLogger, *maxActors, flags)
+	ateworkerService.throttleMemory = psiEnabled(defaultCgroupRoot)
+	if !ateworkerService.throttleMemory {
+		slog.WarnContext(ctx, "Kernel has no cgroup memory pressure (PSI), so sandboxes keep memory.max and an OOM kill in one can restart the worker")
+	}
 	// The controller sets both from the downward API.
 	pool := workerstats.Pool{Namespace: os.Getenv("POD_NAMESPACE"), Name: os.Getenv("WORKER_POOL_NAME")}
 	if pool.Namespace == "" || pool.Name == "" {
@@ -247,7 +251,7 @@ func do(ctx context.Context) error {
 	defer usageStdout.Close()
 	ateworkerService.usage = workerstats.NewUsageEmitter(lp, usageStdout, pool)
 	defer workerstats.StartSampler(ctx, *usageSampleInterval, func(ctx context.Context) { ateworkerService.sweepUsage(ctx) })()
-	if cgroupDelegated {
+	if ateworkerService.throttleMemory {
 		go ateworkerService.watchMemory(ctx)
 	}
 
@@ -364,6 +368,10 @@ type AteWorkerService struct {
 	// own cgroup scope, which cgroup.Delegate prepares. A field rather
 	// than a constant so tests can point GetWorkloadStats at a fixture tree.
 	cgroupRoot string
+
+	// throttleMemory is set when sandboxes get memory.high in place of
+	// memory.max, with watchMemory killing the ones stuck there.
+	throttleMemory bool
 
 	// readSandboxCgroup overrides cgroupstats.Read when set. Only tests set it:
 	// it is the seam that lets them interleave a lifecycle transition with the
@@ -623,6 +631,9 @@ func (s *AteWorkerService) RunWorkload(ctx context.Context, req *ateworkerpb.Run
 	}
 	defer release()
 	if err := resetRunscStateAndPidFileDirs(req.GetActorDirs()); err != nil {
+		return nil, err
+	}
+	if err := s.removeStaleSandboxLeaf(ctx, req.GetActorUid()); err != nil {
 		return nil, err
 	}
 
@@ -908,7 +919,15 @@ func (s *AteWorkerService) CheckpointWorkload(ctx context.Context, req *ateworke
 	default:
 		return nil, fmt.Errorf("unsupported snapshot fidelity: %v", fidelity)
 	}
+	// the sentry leaves its sandbox leaf for the checkpoint cgroup
+	var memoryLimit uint64
+	if hosted != nil {
+		memoryLimit = pauseMemoryWatch(hosted)
+	}
 	if err := checkpointIsolated(ctx, s.cgroupRoot, req.GetActorUid(), req.GetActorDirs(), checkpointFn, terminate); err != nil {
+		if hosted != nil && memoryLimit != 0 {
+			resumeMemoryWatch(hosted, memoryLimit)
+		}
 		return nil, err
 	}
 
@@ -1060,6 +1079,9 @@ func (s *AteWorkerService) RestoreWorkload(ctx context.Context, req *ateworkerpb
 	}
 	defer release()
 	if err := resetRunscStateAndPidFileDirs(req.GetActorDirs()); err != nil {
+		return nil, err
+	}
+	if err := s.removeStaleSandboxLeaf(ctx, req.GetActorUid()); err != nil {
 		return nil, err
 	}
 

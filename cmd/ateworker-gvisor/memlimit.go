@@ -48,7 +48,7 @@ const memoryWatchInterval = 250 * time.Millisecond
 // sentry's --total-memory when create launches the sandbox, so this runs after
 // the sandbox's create. On failure the leaf keeps its memory.max.
 func (s *AteWorkerService) throttleSandboxMemory(ctx context.Context, hosted *hostedActor) {
-	if !s.cgroupDelegated {
+	if !s.throttleMemory {
 		return
 	}
 	limit, err := swapMemoryMaxForHigh(s.sandboxLeaf(hosted.attribution.UID))
@@ -58,6 +58,31 @@ func (s *AteWorkerService) throttleSandboxMemory(ctx context.Context, hosted *ho
 		return
 	}
 	hosted.memoryLimit.Store(limit)
+}
+
+// psiEnabled reports whether the kernel tracks memory pressure for cgroups
+// under root, which the watch needs to tell a stuck sandbox from a busy one.
+func psiEnabled(root string) bool {
+	_, err := os.Stat(filepath.Join(root, "memory.pressure"))
+	return err == nil
+}
+
+// removeStaleSandboxLeaf removes a sandbox leaf an earlier activation of the
+// actor left behind when its runsc delete never ran. runsc joins an existing
+// cgroup as is, so the new sandbox would get no memory.max, a sentry sized to
+// the host's RAM, and no watch.
+// https://github.com/google/gvisor/blob/0068142bdeb9de91fe72bf9794204de6dec92cb4/runsc/cgroup/cgroup_v2.go#L138-L153
+func (s *AteWorkerService) removeStaleSandboxLeaf(ctx context.Context, actorUID string) error {
+	dir := s.sandboxLeaf(actorUID)
+	killCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := cgroup.KillLeafUnder(killCtx, s.cgroupRoot, filepath.Base(dir)); err != nil {
+		return fmt.Errorf("while clearing a leftover sandbox cgroup: %w", err)
+	}
+	if err := os.Remove(dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("while removing leftover sandbox cgroup %q: %w", dir, err)
+	}
+	return nil
 }
 
 func (s *AteWorkerService) sandboxLeaf(actorUID string) string {
@@ -101,24 +126,31 @@ func (s *AteWorkerService) watchMemory(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case now := <-ticker.C:
+		case <-ticker.C:
 			for _, h := range s.hostedActors() {
-				s.checkMemory(ctx, h, now)
+				s.checkMemory(ctx, h)
 			}
 		}
 	}
 }
 
-func (s *AteWorkerService) checkMemory(ctx context.Context, h *hostedActor, now time.Time) {
+// checkMemory kills h's sandbox if the watch finds it stuck at its limit. The
+// kill runs in the background, holding h.memoryMu until the sandbox is gone.
+func (s *AteWorkerService) checkMemory(ctx context.Context, h *hostedActor) {
+	if !h.memoryMu.TryLock() {
+		// being killed, or paused for a checkpoint
+		return
+	}
 	limit := h.memoryLimit.Load()
-	// a stopping sandbox may already be in its checkpoint cgroup
 	if limit == 0 || h.stopping.Load() || h.oomKilled.Load() {
+		h.memoryMu.Unlock()
 		return
 	}
 	dir := s.sandboxLeaf(h.attribution.UID)
-	over, current, err := h.memoryWatch.Check(dir, limit, now)
+	over, current, err := h.memoryWatch.Check(dir, limit, time.Now())
 	if err != nil || !over {
 		// a read fails when the sandbox is going away
+		h.memoryMu.Unlock()
 		return
 	}
 	h.oomKilled.Store(true)
@@ -126,10 +158,30 @@ func (s *AteWorkerService) checkMemory(ctx context.Context, h *hostedActor, now 
 		slog.Uint64("memoryLimitBytes", limit),
 		slog.Uint64(string(ateattr.StatsMemoryUsageKey), current))
 	slog.LogAttrs(ctx, slog.LevelWarn, "Killing a sandbox over its memory limit", attrs...)
-	killCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	if err := cgroup.KillLeafUnder(killCtx, s.cgroupRoot, filepath.Base(dir)); err != nil {
-		attrs = append(attrs, slog.Any("err", err))
-		slog.LogAttrs(ctx, slog.LevelError, "Failed to kill a sandbox over its memory limit", attrs...)
-	}
+	go func() {
+		defer h.memoryMu.Unlock()
+		killCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		if err := cgroup.KillLeafUnder(killCtx, s.cgroupRoot, filepath.Base(dir)); err != nil {
+			attrs = append(attrs, slog.Any("err", err))
+			slog.LogAttrs(ctx, slog.LevelError, "Failed to kill a sandbox over its memory limit", attrs...)
+		}
+	}()
+}
+
+// pauseMemoryWatch stops the watch on h's sandbox leaf, e.g. while its sentry
+// sits in the checkpoint cgroup, waiting out a kill in progress. It returns
+// the limit to resume with.
+func pauseMemoryWatch(h *hostedActor) uint64 {
+	h.memoryMu.Lock()
+	defer h.memoryMu.Unlock()
+	return h.memoryLimit.Swap(0)
+}
+
+// resumeMemoryWatch watches h's sandbox leaf again, from a fresh window.
+func resumeMemoryWatch(h *hostedActor, limit uint64) {
+	h.memoryMu.Lock()
+	defer h.memoryMu.Unlock()
+	h.memoryWatch = cgroup.MemoryWatch{}
+	h.memoryLimit.Store(limit)
 }
