@@ -99,7 +99,7 @@ func seedAPIWorker(t *testing.T, ctx context.Context, persistence store.Interfac
 // in-process, through the store. There is no AssignWorker RPC to go through.
 func assignAPIWorker(t *testing.T, ctx context.Context, persistence store.Interface, name, actorUID string) *ateapi.Worker {
 	t.Helper()
-	if err := persistence.BindActorToWorker(ctx, name, newAPIAssignment(actorUID), nil, nil); err != nil {
+	if err := persistence.BindActorToWorker(ctx, name, newAPIAssignment(actorUID), nil); err != nil {
 		t.Fatalf("assigning worker %s: %v", name, err)
 	}
 	assigned, err := persistence.GetWorker(ctx, name)

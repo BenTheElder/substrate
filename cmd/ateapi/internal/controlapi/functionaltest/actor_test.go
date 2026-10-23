@@ -5225,7 +5225,7 @@ func TestResumeActor_CrashesIfAssignedWorkerIsDraining(t *testing.T) {
 	if err := tc.persistence.BindActorToWorker(context.Background(), podA, &ateapi.ActorAssignment{
 		Actor:    &ateapi.ObjectRef{Atespace: testAtespace, Name: id},
 		ActorUid: suspended.GetMetadata().GetUid(),
-	}, nil, nil); err != nil {
+	}, nil); err != nil {
 		t.Fatalf("BindActorToWorker failed: %v", err)
 	}
 	if _, err := tc.persistence.UpdateActor(context.Background(), actorRef, store.PreconditionFrom(suspended), func(toUpdate *ateapi.Actor) error {
@@ -5476,7 +5476,7 @@ func TestResumeActor_DanglingWorker(t *testing.T) {
 	if err := tc.persistence.BindActorToWorker(context.Background(), podA, &ateapi.ActorAssignment{
 		Actor:    &ateapi.ObjectRef{Atespace: testAtespace, Name: name},
 		ActorUid: suspended.GetMetadata().GetUid(),
-	}, nil, nil); err != nil {
+	}, nil); err != nil {
 		t.Fatalf("BindActorToWorker failed: %v", err)
 	}
 	if _, err := tc.persistence.UpdateActor(context.Background(), actorRef, store.PreconditionFrom(suspended), func(toUpdate *ateapi.Actor) error {
@@ -6268,7 +6268,7 @@ func TestDeleteActor_ReleasesAnAssignmentTheActorDoesNotReference(t *testing.T) 
 	if err := tc.persistence.BindActorToWorker(ctx, podUID, &ateapi.ActorAssignment{
 		Actor:    &ateapi.ObjectRef{Atespace: testAtespace, Name: "orphaned"},
 		ActorUid: actorUID,
-	}, nil, nil); err != nil {
+	}, nil); err != nil {
 		t.Fatalf("BindActorToWorker failed: %v", err)
 	}
 

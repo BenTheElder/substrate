@@ -238,7 +238,7 @@ func TestReconcileAssignments_ReleasesOrphanedAssignments(t *testing.T) {
 	assignAPIWorker(t, ctx, persistence, apiWorkerName, "11111111-1111-1111-1111-111111111111")
 	orphan := newAPIAssignment("22222222-2222-2222-2222-222222222222")
 	orphan.Actor = &ateapi.ObjectRef{Atespace: "team-a", Name: "gone"}
-	if err := persistence.BindActorToWorker(ctx, apiWorkerName, orphan, nil, nil); err != nil {
+	if err := persistence.BindActorToWorker(ctx, apiWorkerName, orphan, nil); err != nil {
 		t.Fatalf("BindActorToWorker() failed: %v", err)
 	}
 	mustRaiseEpoch(t, ctx, persistence, 2)
@@ -262,7 +262,7 @@ func TestReconcileAssignments_WaitsForBusyActor(t *testing.T) {
 	seedRunningActor(t, ctx, persistence)
 	orphan := newAPIAssignment("22222222-2222-2222-2222-222222222222")
 	orphan.Actor = &ateapi.ObjectRef{Atespace: "team-a", Name: "gone"}
-	if err := persistence.BindActorToWorker(ctx, apiWorkerName, orphan, nil, nil); err != nil {
+	if err := persistence.BindActorToWorker(ctx, apiWorkerName, orphan, nil); err != nil {
 		t.Fatalf("BindActorToWorker() failed: %v", err)
 	}
 	mustRaiseEpoch(t, ctx, persistence, 2)
