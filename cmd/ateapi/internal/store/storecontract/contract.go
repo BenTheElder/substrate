@@ -2424,7 +2424,7 @@ func runWorkerAssignmentContractTests(t *testing.T, setup func(t *testing.T) sto
 	bind := func(t *testing.T, s store.Interface, workerName string, assignment *ateapi.ActorAssignment) {
 		t.Helper()
 		ctx := context.Background()
-		if err := s.BindActorToWorker(ctx, workerName, assignment, nil, nil); err != nil {
+		if err := s.BindActorToWorker(ctx, workerName, assignment, nil); err != nil {
 			t.Fatalf("BindActorToWorker(%s) failed: %v", assignment.GetActorUid(), err)
 		}
 	}
@@ -2537,7 +2537,7 @@ func runWorkerAssignmentContractTests(t *testing.T, setup func(t *testing.T) sto
 		}
 	})
 
-	t.Run("BindActorToWorker_BookPricesFromTheLockedWorker", func(t *testing.T) {
+	t.Run("BindActorToWorker_RefusedAdmissionLeavesNothingBehind", func(t *testing.T) {
 		s := setup(t)
 		ctx := context.Background()
 
@@ -2545,77 +2545,23 @@ func runWorkerAssignmentContractTests(t *testing.T, setup func(t *testing.T) sto
 			t.Fatalf("CreateWorker failed: %v", err)
 		}
 
-		// the caller's own estimate is replaced by what book prices
-		booked := &ateapi.Resources{CpuMillicores: 500, MemoryBytes: 528 << 20}
-		var priced *ateapi.Worker
-		book := func(locked *ateapi.Worker) (*ateapi.Resources, error) {
-			priced = locked
-			return booked, nil
+		full := errors.New("worker is full")
+		err := s.BindActorToWorker(ctx, testWorkerName, newTestAssignment("uid-1", 500, 0),
+			func(*ateapi.Worker) error { return full })
+		if !errors.Is(err, full) {
+			t.Errorf("BindActorToWorker with a refusing admit = %v, want %v", err, full)
 		}
-		if err := s.BindActorToWorker(ctx, testWorkerName, newTestAssignment("uid-1", 500, 516<<20), book, nil); err != nil {
-			t.Fatalf("BindActorToWorker failed: %v", err)
-		}
-		if priced.GetMetadata().GetName() != testWorkerName {
-			t.Errorf("book priced against %v, want worker %s", priced.GetMetadata(), testWorkerName)
-		}
-		got, err := s.GetWorkerAssignment(ctx, testWorkerName, "uid-1")
-		if err != nil {
-			t.Fatalf("GetWorkerAssignment failed: %v", err)
-		}
-		if diff := cmp.Diff(booked, got.GetResources(), protocmp.Transform()); diff != "" {
-			t.Errorf("recorded resources (-want +got):\n%s", diff)
+		// The bind speculates the row in before it asks, so a refusal has to
+		// take it back out.
+		if _, err := s.GetWorkerAssignment(ctx, testWorkerName, "uid-1"); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("a refused bind left an assignment behind: %v", err)
 		}
 		worker, err := s.GetWorker(ctx, testWorkerName)
 		if err != nil {
 			t.Fatalf("GetWorker failed: %v", err)
 		}
-		if got := worker.GetStatus().GetAllocated().GetMemoryBytes(); got != booked.GetMemoryBytes() {
-			t.Errorf("allocated memory = %d, want the booked %d", got, booked.GetMemoryBytes())
-		}
-		released, err := s.ReleaseActorFromWorker(ctx, testWorkerName, "uid-1")
-		if err != nil {
-			t.Fatalf("ReleaseActorFromWorker failed: %v", err)
-		}
-		if got := released.GetStatus().GetAllocated().GetMemoryBytes(); got != 0 {
-			t.Errorf("allocated memory after release = %d, want 0", got)
-		}
-	})
-
-	t.Run("BindActorToWorker_RefusalLeavesNothingBehind", func(t *testing.T) {
-		full := errors.New("worker is full")
-		for _, tc := range []struct {
-			name  string
-			book  func(*ateapi.Worker) (*ateapi.Resources, error)
-			admit func(*ateapi.Worker) error
-		}{
-			{name: "admit", admit: func(*ateapi.Worker) error { return full }},
-			{name: "book", book: func(*ateapi.Worker) (*ateapi.Resources, error) { return nil, full }},
-		} {
-			t.Run(tc.name, func(t *testing.T) {
-				s := setup(t)
-				ctx := context.Background()
-
-				if _, err := s.CreateWorker(ctx, newTestWorker(testWorkerName, "pod-1")); err != nil {
-					t.Fatalf("CreateWorker failed: %v", err)
-				}
-
-				err := s.BindActorToWorker(ctx, testWorkerName, newTestAssignment("uid-1", 500, 0), tc.book, tc.admit)
-				if !errors.Is(err, full) {
-					t.Errorf("BindActorToWorker with a refusing %s = %v, want %v", tc.name, err, full)
-				}
-				// The bind speculates the row in before it asks, so a refusal has to
-				// take it back out.
-				if _, err := s.GetWorkerAssignment(ctx, testWorkerName, "uid-1"); !errors.Is(err, store.ErrNotFound) {
-					t.Errorf("a refused bind left an assignment behind: %v", err)
-				}
-				worker, err := s.GetWorker(ctx, testWorkerName)
-				if err != nil {
-					t.Fatalf("GetWorker failed: %v", err)
-				}
-				if got := worker.GetStatus().GetAllocated().GetActors(); got != 0 {
-					t.Errorf("a refused bind left %d actors allocated, want 0", got)
-				}
-			})
+		if got := worker.GetStatus().GetAllocated().GetActors(); got != 0 {
+			t.Errorf("a refused bind left %d actors allocated, want 0", got)
 		}
 	})
 
@@ -2637,7 +2583,7 @@ func runWorkerAssignmentContractTests(t *testing.T, setup func(t *testing.T) sto
 
 		var admitted []*ateapi.WorkerResources
 		full := errors.New("worker is full")
-		err := s.BindActorToWorker(ctx, testWorkerName, newTestAssignment("uid-1", 5000, 0), nil,
+		err := s.BindActorToWorker(ctx, testWorkerName, newTestAssignment("uid-1", 5000, 0),
 			func(fresh *ateapi.Worker) error {
 				admitted = append(admitted, fresh.GetStatus().GetAllocated())
 				return full
@@ -2687,7 +2633,7 @@ func runWorkerAssignmentContractTests(t *testing.T, setup func(t *testing.T) sto
 		for i := range claims {
 			wg.Go(func() {
 				err := s.BindActorToWorker(ctx, testWorkerName,
-					newTestAssignment(fmt.Sprintf("uid-%d", i), 0, 0), nil, roomForOne)
+					newTestAssignment(fmt.Sprintf("uid-%d", i), 0, 0), roomForOne)
 				won[i] = err == nil
 			})
 		}
@@ -2729,7 +2675,7 @@ func runWorkerAssignmentContractTests(t *testing.T, setup func(t *testing.T) sto
 		if err != nil {
 			t.Fatalf("GetWorker failed: %v", err)
 		}
-		if err := s.BindActorToWorker(ctx, otherTestWorkerName, newTestAssignment("uid-1", 500, 1<<20), nil, nil); err == nil {
+		if err := s.BindActorToWorker(ctx, otherTestWorkerName, newTestAssignment("uid-1", 500, 1<<20), nil); err == nil {
 			t.Fatal("BindActorToWorker onto a second worker succeeded, want an error")
 		}
 
@@ -2790,7 +2736,7 @@ func runWorkerAssignmentContractTests(t *testing.T, setup func(t *testing.T) sto
 			go func() {
 				defer wg.Done()
 				start.Wait()
-				won[i] = s.BindActorToWorker(ctx, name, newTestAssignment("uid-1", 500, 1<<20), nil, nil) == nil
+				won[i] = s.BindActorToWorker(ctx, name, newTestAssignment("uid-1", 500, 1<<20), nil) == nil
 			}()
 		}
 		start.Done()
@@ -2824,7 +2770,7 @@ func runWorkerAssignmentContractTests(t *testing.T, setup func(t *testing.T) sto
 
 	t.Run("BindActorToWorker_WorkerNotFound", func(t *testing.T) {
 		s := setup(t)
-		err := s.BindActorToWorker(context.Background(), "no-such-worker", newTestAssignment("uid-1", 0, 0), nil, nil)
+		err := s.BindActorToWorker(context.Background(), "no-such-worker", newTestAssignment("uid-1", 0, 0), nil)
 		if !errors.Is(err, store.ErrNotFound) {
 			t.Errorf("BindActorToWorker on a missing worker = %v, want ErrNotFound", err)
 		}
@@ -3074,7 +3020,7 @@ func runWorkerAssignmentContractTests(t *testing.T, setup func(t *testing.T) sto
 				// Bind, sometimes over an actor already there and at a different
 				// size, which is the case that has to subtract before it adds.
 				assignment := newTestAssignment(actorUID, int64(rng.IntN(4)+1)*500, int64(rng.IntN(4)+1)<<24)
-				if err := s.BindActorToWorker(ctx, testWorkerName, assignment, nil, nil); err != nil {
+				if err := s.BindActorToWorker(ctx, testWorkerName, assignment, nil); err != nil {
 					t.Fatalf("step %d: BindActorToWorker(%s) failed: %v", step, actorUID, err)
 				}
 			} else if _, err := s.ReleaseActorFromWorker(ctx, testWorkerName, actorUID); err != nil {

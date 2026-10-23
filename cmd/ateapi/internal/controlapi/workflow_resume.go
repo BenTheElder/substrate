@@ -509,15 +509,14 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 		},
 		ActorUid: actor.GetMetadata().GetUid(),
 	}
-	// Recorded from the same locked Worker admit checks, so release returns
-	// exactly what was added.
-	book := func(fresh *ateapi.Worker) (*ateapi.Resources, error) {
-		booking, ok := scheduling.Booking(fresh, constraints)
-		if !ok {
-			return nil, errWorkerFilledUp
-		}
-		return booking, nil
+	// Record what this claim books so release returns the same amount. It
+	// includes the overhead the cached Worker reports, which admit checks
+	// again under the row lock.
+	booking, ok := scheduling.Booking(assignedWorker, constraints)
+	if !ok {
+		return nil, nil, errWorkerFilledUp
 	}
+	assignment.Resources = booking
 
 	// The candidate came from a watch-fed cache, so it may already be full or no
 	// longer eligible. The store re-asks under the Worker's row lock, where the
@@ -529,10 +528,15 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 		if !w.scheduler.Applies(fresh, constraints) || !w.scheduler.HasRoom(fresh, constraints) {
 			return errWorkerFilledUp
 		}
+		// The Worker re-registered with a different overhead since the cache
+		// saw it. Rare, and the retry reads the new one.
+		if got, _ := scheduling.Booking(fresh, constraints); !proto.Equal(got, booking) {
+			return errWorkerFilledUp
+		}
 		bound = fresh
 		return nil
 	}
-	if err := w.store.BindActorToWorker(ctx, assignedWorker.GetMetadata().GetName(), assignment, book, admit); err != nil {
+	if err := w.store.BindActorToWorker(ctx, assignedWorker.GetMetadata().GetName(), assignment, admit); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			w.workerCache.Forget(assignedWorker.GetMetadata().GetName())
 			return nil, nil, fmt.Errorf("selected worker disappeared before claim: %w", store.ErrVersionConflict)
