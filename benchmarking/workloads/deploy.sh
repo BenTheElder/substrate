@@ -66,8 +66,8 @@ ACTOR_MEMORY="256Mi"
 # hosts at once as much as the memory limit does.
 ACTOR_CPU="1"
 # Worker pod memory (WorkerPool spec.template.resources), set as both request
-# and limit. Empty leaves the pod unsized. The limit, less the 64Mi the
-# worker keeps for itself, is the memory it reports as its actor capacity.
+# and limit. Empty leaves the pod unsized. The limit, less what the worker
+# keeps for itself, is the memory it reports as its actor capacity.
 WORKER_MEMORY=""
 # The StorageClass for the glutton-storage external volume. Empty means the
 # template is not deployed.
