@@ -285,15 +285,6 @@ type Interface interface {
 	// BindActorToWorker assigns an Actor and updates the Worker's allocation.
 	// Rebinding the same Actor replaces its assignment.
 	//
-	// book, when set, returns what the Actor takes from the Worker's capacity,
-	// and replaces the assignment's resources with it. It is a callback because
-	// the answer depends on the Worker, e.g. the overhead of the runtime the
-	// Actor runs under there, which can change between the caller's read and
-	// the bind. It runs against the Worker with its row locked, before the
-	// assignment is written, so what is recorded and what is added to the
-	// Worker's allocation come from the same view as admit. Returning an error
-	// from it refuses the bind and is returned unchanged.
-	//
 	// admit decides whether the Worker will take the Actor, and runs against the
 	// Worker as it stands with its row locked, so the answer cannot go stale
 	// between the check and the bind. Returning an error from it refuses the
@@ -301,7 +292,7 @@ type Interface interface {
 	// Actor already on this Worker is already counted against it.
 	//
 	// ErrNotFound if the Worker is gone.
-	BindActorToWorker(ctx context.Context, workerName string, assignment *ateapi.ActorAssignment, book func(*ateapi.Worker) (*ateapi.Resources, error), admit func(*ateapi.Worker) error) error
+	BindActorToWorker(ctx context.Context, workerName string, assignment *ateapi.ActorAssignment, admit func(*ateapi.Worker) error) error
 
 	// ReleaseActorFromWorker removes an assignment and updates allocation,
 	// returning the Worker as it now stands so the caller can feed the
