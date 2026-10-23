@@ -616,8 +616,8 @@ type WorkerSandboxRuntime struct {
 	//
 	// +k8s:required
 	Version *VersionedSandboxCompat `protobuf:"bytes,1,opt,name=version,proto3" json:"version,omitempty"`
-	// What each actor running under this runtime costs the worker on top of its
-	// own limits.
+	// The resource overhead incurred by the worker for each actor running under
+	// this runtime, on top of the actor's stated limits.
 	//
 	// +k8s:optional
 	ActorOverhead *RuntimeOverhead `protobuf:"bytes,2,opt,name=actor_overhead,json=actorOverhead,proto3" json:"actor_overhead,omitempty"`
@@ -669,22 +669,22 @@ func (x *WorkerSandboxRuntime) GetActorOverhead() *RuntimeOverhead {
 	return nil
 }
 
-// RuntimeOverhead is what an actor costs the worker outside its own limits: a
-// fixed amount plus an amount per GiB of its memory limit. It mirrors the
-// control plane's RuntimeOverhead.
+// RuntimeOverhead is the memory an actor uses on its worker outside its own
+// limits. It mirrors the control plane's RuntimeOverhead.
 type RuntimeOverhead struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// memory_bytes is booked once per actor.
+	// memory_bytes is a fixed amount of memory for each actor.
 	//
 	// +k8s:optional
 	// +k8s:minimum=0
 	// +k8s:maximum=1099511627776 # 1TiB
 	MemoryBytes int64 `protobuf:"varint,1,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"`
-	// memory_bytes_per_gib is booked for each GiB of the actor's memory limit.
+	// memory_bytes_per_gib is memory per GiB of the actor's memory limit, in
+	// proportion and rounded down to a byte.
 	//
 	// +k8s:optional
 	// +k8s:minimum=0
-	// +k8s:maximum=1073741824 # as much again as the limit
+	// +k8s:maximum=1073741824 # 1GiB
 	MemoryBytesPerGib int64 `protobuf:"varint,2,opt,name=memory_bytes_per_gib,json=memoryBytesPerGib,proto3" json:"memory_bytes_per_gib,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache

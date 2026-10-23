@@ -285,9 +285,12 @@ type Interface interface {
 	// BindActorToWorker assigns an Actor and updates the Worker's allocation.
 	// Rebinding the same Actor replaces its assignment.
 	//
-	// book, when set, prices the assignment against the Worker with its row
-	// locked, before the assignment is written: its result replaces the
-	// assignment's resources, so what is recorded and what is added to the
+	// book, when set, returns what the Actor takes from the Worker's capacity,
+	// and replaces the assignment's resources with it. It is a callback because
+	// the answer depends on the Worker, e.g. the overhead of the runtime the
+	// Actor runs under there, which can change between the caller's read and
+	// the bind. It runs against the Worker with its row locked, before the
+	// assignment is written, so what is recorded and what is added to the
 	// Worker's allocation come from the same view as admit. Returning an error
 	// from it refuses the bind and is returned unchanged.
 	//
