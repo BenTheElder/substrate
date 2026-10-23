@@ -2409,7 +2409,8 @@ message WorkerStatus {
   WorkerResources capacity = 2;
 
   // The allocated resources of the Worker.  This is the sum of all the
-  // resources consumed by the Actors currently assigned to this Worker.
+  // resources consumed by the Actors currently assigned to this Worker,
+  // including their runtime's actor_overhead.
   //
   // +k8s:optional
   WorkerResources allocated = 3;
@@ -2659,7 +2660,8 @@ message ActorAssignment {
   // +k8s:format=k8s-uuid
   string actor_uid = 3;
 
-  // The resources allocated to the Actor when it was assigned.
+  // The resources allocated to the Actor when it was assigned: its limits,
+  // plus the actor_overhead of the runtime it runs under on the Worker.
   //
   // +k8s:optional
   Resources resources = 4;

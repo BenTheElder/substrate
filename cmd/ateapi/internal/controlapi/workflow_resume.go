@@ -542,8 +542,9 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 			return nil, nil, fmt.Errorf("selected worker disappeared before claim: %w", store.ErrVersionConflict)
 		}
 		// errWorkerFilledUp leaves the cache alone: it reports no room for
-		// this actor's size, so forgetting the worker would hide it from
-		// every smaller actor until the next watch event or relist.
+		// this actor's size, or an overhead the cache hasn't seen yet, so
+		// forgetting the worker would hide it from every smaller actor until
+		// the next watch event or relist.
 		return nil, nil, err
 	}
 
