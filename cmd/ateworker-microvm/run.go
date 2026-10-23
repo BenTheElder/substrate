@@ -137,12 +137,12 @@ const kataAgentPath = "/usr/bin/kata-agent"
 
 // actorOverhead is what an actor costs outside its guest, in the same worker
 // pod cgroup, which the control plane books with every actor: cloud-hypervisor
-// and virtiofsd (~3.5MiB), and the host page tables for guest RAM, KVM's EPT
-// and the memfd's xarray (~6.5MiB per GiB the guest has touched).
+// and virtiofsd, and the host page tables for guest RAM, KVM's EPT and the
+// memfd's xarray.
 //
-// The fixed part also keeps 124MiB per actor for the page cache of its snapshot
-// writes, which are not capped yet, so tight pods don't OOM on suspend.
-// TODO: drop MemoryBytes back to 4MiB once snapshot writes are capped
+// The fixed part also covers the page cache of the actor's snapshot writes,
+// which are not capped yet, so tight pods don't OOM on suspend.
+// TODO: drop that part once snapshot writes are capped
 var actorOverhead = &ateletpb.RuntimeOverhead{MemoryBytes: 128 << 20, MemoryBytesPerGib: 8 << 20}
 
 // memoryReservedBytes is how much of the worker pod's memory limit we keep from

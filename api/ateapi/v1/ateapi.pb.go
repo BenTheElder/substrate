@@ -7723,13 +7723,11 @@ type WorkerSandboxRuntime struct {
 	//
 	// +k8s:required
 	Version *VersionedSandboxCompat `protobuf:"bytes,1,opt,name=version,proto3" json:"version,omitempty"`
-	// What each Actor running under this runtime costs the Worker on top of its
-	// own limits. Placement books it with every Actor placed under this
-	// runtime, so it counts against capacity and shows in allocated. Unset, an
-	// Actor books only its limits. Today the microVM worker reports 128MiB plus
-	// 8MiB per GiB of the Actor's memory limit, and the gVisor worker reports
-	// none. Either way, a Worker keeps some of its memory limit for itself out
-	// of the capacity it reports.
+	// The resource overhead incurred by a Worker for each Actor running under
+	// this runtime, on top of the Actor's stated limits. Placement considers
+	// this when deciding if a Worker has enough capacity for an Actor, and it is
+	// accounted for in allocated. If not specified, Actors under this runtime
+	// are assumed to have negligible overhead.
 	//
 	// +k8s:optional
 	ActorOverhead *RuntimeOverhead `protobuf:"bytes,2,opt,name=actor_overhead,json=actorOverhead,proto3" json:"actor_overhead,omitempty"`
@@ -7781,22 +7779,23 @@ func (x *WorkerSandboxRuntime) GetActorOverhead() *RuntimeOverhead {
 	return nil
 }
 
-// RuntimeOverhead is what an Actor costs the Worker outside its own limits: a
-// fixed amount plus an amount per GiB of its memory limit.
+// RuntimeOverhead is the memory an Actor uses on its Worker outside its own
+// limits: a fixed amount, plus an amount in proportion to its memory limit.
 type RuntimeOverhead struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// memory_bytes is booked once per Actor.
+	// memory_bytes is a fixed amount of memory for each Actor.
 	//
 	// +k8s:optional
 	// +k8s:minimum=0
 	// +k8s:maximum=1099511627776 # 1TiB
 	MemoryBytes int64 `protobuf:"varint,1,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"`
-	// memory_bytes_per_gib is booked for each GiB of the Actor's memory limit,
-	// e.g. host page tables for a microVM's guest RAM.
+	// memory_bytes_per_gib is memory per GiB of the Actor's memory limit, e.g.
+	// host page tables for a microVM's guest RAM. It scales in proportion and
+	// rounds down to a byte, so an Actor with a 512MiB limit adds half of it.
 	//
 	// +k8s:optional
 	// +k8s:minimum=0
-	// +k8s:maximum=1073741824 # as much again as the limit
+	// +k8s:maximum=1073741824 # 1GiB
 	MemoryBytesPerGib int64 `protobuf:"varint,2,opt,name=memory_bytes_per_gib,json=memoryBytesPerGib,proto3" json:"memory_bytes_per_gib,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
