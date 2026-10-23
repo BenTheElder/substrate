@@ -94,7 +94,9 @@ var (
 
 // memoryReservedBytes is how much of the worker pod's memory limit we keep from
 // actors: the worker process itself, and the page cache of checkpoints in
-// flight. An actor's sentry and gofers are charged to its own cgroup.
+// flight, which leaves the actor's own cgroup with its sentry (see
+// isolateCheckpointCache). Otherwise an actor's sentry and gofers are charged
+// to its own cgroup, so gVisor reports no actor overhead.
 const memoryReservedBytes = 64 << 20
 
 // minUsageSampleInterval is the floor of --usage-sample-interval, the same as

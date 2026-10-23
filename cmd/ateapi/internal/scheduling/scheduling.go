@@ -46,7 +46,8 @@ type Constraints struct {
 	// asks it of every candidate.
 	RequiredRuntime hardware.Requirement
 
-	// SnapshotRuntime is the runtime of the snapshot the actor restores from.
+	// SnapshotRuntime is the runtime of the snapshot the actor restores from,
+	// or the zero Requirement when it starts on a worker's default runtime.
 	// Unlike RequiredRuntime it is never relaxed: it picks the worker runtime
 	// the actor runs under, and so the overhead it is booked with.
 	SnapshotRuntime hardware.Requirement
@@ -273,7 +274,7 @@ func (s *scheduler) HasRoom(worker *ateapi.Worker, constraints Constraints) bool
 
 // Booking is what an actor takes from the worker's capacity: its limits plus
 // the overhead of the worker runtime it would run under there. It reports
-// false when that doesn't fit in an int64, and the actor fits nowhere.
+// false when that doesn't fit in an int64, and the actor doesn't fit on the worker.
 func Booking(worker *ateapi.Worker, constraints Constraints) (*ateapi.Resources, bool) {
 	overhead := constraints.SnapshotRuntime.WorkerRuntimeFor(worker.GetStatus()).GetActorOverhead()
 	if overhead == nil {
@@ -291,13 +292,12 @@ func Booking(worker *ateapi.Worker, constraints Constraints) (*ateapi.Resources,
 	return &ateapi.Resources{CpuMillicores: constraints.Limits.GetCpuMillicores(), MemoryBytes: memory}, true
 }
 
-// perGiB scales perGiB bytes per GiB to n bytes, and reports false on
-// overflow.
-func perGiB(n, perGiB int64) (int64, bool) {
-	if n < 0 || perGiB < 0 {
+// perGiB scales rate bytes per GiB to n bytes, and reports false on overflow.
+func perGiB(n, rate int64) (int64, bool) {
+	if n < 0 || rate < 0 {
 		return 0, false
 	}
-	hi, lo := bits.Mul64(uint64(n), uint64(perGiB))
+	hi, lo := bits.Mul64(uint64(n), uint64(rate))
 	// divide the 128-bit product by 1<<30
 	if hi>>30 != 0 {
 		return 0, false

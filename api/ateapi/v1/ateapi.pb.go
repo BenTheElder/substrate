@@ -7492,7 +7492,8 @@ type WorkerStatus struct {
 	// +k8s:optional
 	Capacity *WorkerResources `protobuf:"bytes,2,opt,name=capacity,proto3" json:"capacity,omitempty"`
 	// The allocated resources of the Worker.  This is the sum of all the
-	// resources consumed by the Actors currently assigned to this Worker.
+	// resources consumed by the Actors currently assigned to this Worker,
+	// including their runtime's actor_overhead.
 	//
 	// +k8s:optional
 	Allocated *WorkerResources `protobuf:"bytes,3,opt,name=allocated,proto3" json:"allocated,omitempty"`
@@ -8146,7 +8147,8 @@ type ActorAssignment struct {
 	// +k8s:required
 	// +k8s:format=k8s-uuid
 	ActorUid string `protobuf:"bytes,3,opt,name=actor_uid,json=actorUid,proto3" json:"actor_uid,omitempty"`
-	// The resources allocated to the Actor when it was assigned.
+	// The resources allocated to the Actor when it was assigned: its limits,
+	// plus the actor_overhead of the runtime it runs under on the Worker.
 	//
 	// +k8s:optional
 	Resources     *Resources `protobuf:"bytes,4,opt,name=resources,proto3" json:"resources,omitempty"`
