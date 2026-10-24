@@ -43,7 +43,7 @@ Setting `resources.limits` (CPU and Memory) on a `WorkerPool` establishes each w
 
 - Worker capacity is a shared budget: each actor placed on a worker subtracts its declared limits from what is left. Size a pool's `limits` for the actors it should host together.
 - A worker also has an actor limit, set by the ateworker's `--max-actors` flag (default 1000). Placement stops at whichever runs out first.
-- A worker keeps some of its memory limit for itself and reports the rest as capacity. Each actor can also use memory on its worker outside its own limits, e.g. for the micro-VM's VMM. The worker reports this overhead with each runtime, placement counts it against capacity, and it shows in the worker's allocated resources.
+- A worker keeps some of its memory limit for itself and reports the rest as capacity. Each actor can also use memory on its worker outside its own limits, e.g. for the microVM's VMM. The worker reports this overhead with each runtime, placement counts it against capacity, and it shows in the worker's allocated resources.
 - Capacity is advisory for placement only: a worker that declares no CPU/memory limit reports zero capacity for that dimension, which the scheduler treats as **unconstrained** (placement is never blocked by missing data). The actual sandbox size still comes from the `ActorTemplate`.
 
 ### Example

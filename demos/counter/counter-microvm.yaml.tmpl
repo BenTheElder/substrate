@@ -49,7 +49,7 @@ spec:
     # scheduling capacity (the per-actor ceiling). The micro-VM sandbox itself is
     # sized by the ActorTemplate's resources in counter-microvm-template.yaml.tmpl,
     # not by these. The worker keeps some of this limit for itself, and each
-    # actor books its limit plus the micro-VM overhead, so keep this limit
+    # actor books its limit plus the microVM overhead, so keep this limit
     # above what the actors need together (see docs/api-guide.md).
     #
     # Capacity comes from the limits (workerCapacity reads limits only), while the

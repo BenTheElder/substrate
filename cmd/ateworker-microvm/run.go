@@ -748,7 +748,7 @@ func resolveGuestMemMiB(declaredBytes int64) (int, error) {
 	}
 	m := int(declaredBytes / (1024 * 1024))
 	if m < minGuestMemMiB {
-		return 0, fmt.Errorf("actor memory limit %dMiB is too small for a micro-VM, the minimum is %dMiB",
+		return 0, fmt.Errorf("actor memory limit %dMiB is too small for a microVM, the minimum is %dMiB",
 			m, minGuestMemMiB)
 	}
 	return m, nil
