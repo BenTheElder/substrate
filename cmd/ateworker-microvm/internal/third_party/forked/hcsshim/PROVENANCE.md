@@ -63,7 +63,9 @@ read-only dm-verity layers. We want a writable filesystem of a chosen size, so w
 All of it is guarded by `w.fixedSize > 0`, the upstream path is unchanged:
 
 - `fixedGroupGeometry` spans the group count to the requested size and provisions
-  `max(content, inodeCount)` inodes, instead of `bestGroupCount` shrinking to the contents
+  `max(content, inodeCount)` inodes, instead of `bestGroupCount` shrinking to the contents.
+  `inodeCount` 0 means one inode per 16KiB, like `mkfs.ext4`
+- the unused tail of the inode table is left a hole instead of zero filled
 - `Close` sets `BlocksCountLow` to the requested size, the existing bitmap loop marks the
   trailing blocks free
 - the tail zero fill is skipped and the file is truncated to the full size instead, so

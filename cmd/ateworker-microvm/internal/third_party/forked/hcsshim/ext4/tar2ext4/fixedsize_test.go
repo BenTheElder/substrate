@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"testing"
 	"time"
@@ -99,10 +100,11 @@ func TestFixedSizeSuperblock(t *testing.T) {
 }
 
 func TestFixedSizeSparse(t *testing.T) {
-	const sizeBytes = int64(128) << 20 // 128 MiB logical
+	// default inodes, so the 16MiB inode table must stay a hole too
+	const sizeBytes = int64(1) << 30
 	dir := t.TempDir()
 	img := filepath.Join(dir, "fs.ext4")
-	convertFixed(t, sampleTar(t), img, sizeBytes, 4096)
+	convertFixed(t, sampleTar(t), img, sizeBytes, 0)
 
 	fi, err := os.Stat(img)
 	if err != nil {
@@ -111,18 +113,34 @@ func TestFixedSizeSparse(t *testing.T) {
 	if fi.Size() != sizeBytes {
 		t.Errorf("logical size = %d, want %d", fi.Size(), sizeBytes)
 	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok {
-		t.Skip("no syscall.Stat_t on this platform")
+	// APFS fills in seek gaps of up to 16MiB, so only check holes on linux
+	if runtime.GOOS != "linux" {
+		t.Skip("allocation check needs linux")
 	}
+	st := fi.Sys().(*syscall.Stat_t)
 	allocated := int64(st.Blocks) * 512 // st_blocks is always in 512-byte units
-	// A near-empty 128 MiB ext4 only materializes metadata; the free data region is a
-	// hole. Allocated bytes should be a tiny fraction of the logical size.
-	if allocated >= sizeBytes/4 {
-		t.Errorf("allocated %d bytes for a %d-byte image; expected sparse (<%d)",
-			allocated, sizeBytes, sizeBytes/4)
+	if allocated >= 1<<20 {
+		t.Errorf("allocated %d bytes for a %d-byte image; expected sparse (<1MiB)", allocated, sizeBytes)
 	}
 	t.Logf("sparse OK: logical=%d allocated=%d (%.2f%%)", sizeBytes, allocated, 100*float64(allocated)/float64(sizeBytes))
+}
+
+func TestFixedSizeDefaultInodes(t *testing.T) {
+	const sizeBytes = int64(64) << 20
+	img := filepath.Join(t.TempDir(), "fs.ext4")
+	convertFixed(t, sampleTar(t), img, sizeBytes, 0)
+	f, err := os.Open(img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	sb, err := ReadExt4SuperBlockReadSeeker(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := uint32(sizeBytes / 16384); sb.InodesCount < want {
+		t.Errorf("InodesCount = %d, want >= %d", sb.InodesCount, want)
+	}
 }
 
 func TestFixedSizeDeterministic(t *testing.T) {

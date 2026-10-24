@@ -104,6 +104,7 @@ const (
 	blocksPerGroup          = BlockSize * 8
 	inodeSize               = 256
 	maxInodesPerGroup       = BlockSize * 8 // Limited by the inode bitmap
+	defaultBytesPerInode    = 16384         // mke2fs.conf inode_ratio, for FixedSize
 	inodesPerGroupIncrement = BlockSize / inodeSize
 
 	defaultMaxDiskSize = 16 * (1 << 30)                 // 16GB
@@ -1046,6 +1047,7 @@ func (w *Writer) writeDirectoryRecursive(dir, parent *inode) error {
 }
 
 func (w *Writer) writeInodeTable(tableSize uint32) error {
+	end := w.pos + int64(tableSize)
 	var b bytes.Buffer
 	for _, inode := range w.inodes {
 		if inode != nil {
@@ -1099,6 +1101,13 @@ func (w *Writer) writeInodeTable(tableSize uint32) error {
 			return err
 		}
 	}
+	if w.fixedSize > 0 {
+		// leave the unused tail a hole. without uninit_bg / metadata_csum the
+		// kernel never lazily zeroes inode tables, it reads them as zeroed inodes
+		w.nextBlock()
+		w.seekBlock(uint32(end / BlockSize))
+		return w.err
+	}
 	rest := tableSize - uint32(len(w.inodes)*inodeSize)
 	if _, err := w.zero(int64(rest)); err != nil {
 		return err
@@ -1145,12 +1154,17 @@ func MaximumDiskSize(size int64) Option {
 }
 
 // FixedSize makes Close write a writable filesystem spanning sizeBytes (rounded up to a
-// block) with at least inodeCount inodes, leaving free blocks as holes in a sparse file
-// instead of shrinking to the contents. Added in this fork.
-// Close errors if the contents and metadata don't fit. inodeCount 0 sizes from the contents
+// block) with at least inodeCount inodes, leaving free blocks and unused inode table
+// as holes in a sparse file instead of shrinking to the contents. Added in this fork.
+// Close errors if the contents and metadata don't fit. inodeCount 0 means one inode
+// per 16KiB, the mkfs.ext4 default
+// NOTE: the output must start empty, unwritten regions are assumed to read as zero
 func FixedSize(sizeBytes int64, inodeCount int64) Option {
 	return func(w *Writer) {
 		w.fixedSize = (sizeBytes + BlockSize - 1) &^ (BlockSize - 1)
+		if inodeCount == 0 {
+			inodeCount = w.fixedSize / defaultBytesPerInode
+		}
 		w.fixedInodes = inodeCount
 		// reserve the group descriptor table for the full size
 		w.maxDiskSize = w.fixedSize
