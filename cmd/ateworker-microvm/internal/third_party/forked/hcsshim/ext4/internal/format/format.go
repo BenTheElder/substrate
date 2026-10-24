@@ -151,6 +151,18 @@ const (
 	RoCompatProject      RoCompatFeature = 0x2000
 )
 
+// SuperBlock.Flags
+const (
+	SuperBlockFlagSignedHash   uint32 = 0x1
+	SuperBlockFlagUnsignedHash uint32 = 0x2
+)
+
+// SuperBlock.DefHashVersion
+const (
+	HashLegacy  uint8 = 0
+	HashHalfMD4 uint8 = 1
+)
+
 type BlockGroupFlag uint16
 
 const (

@@ -97,6 +97,12 @@ func TestFixedSizeSuperblock(t *testing.T) {
 	if sb.FeatureRoCompat&format.RoCompatReadonly != 0 {
 		t.Error("FeatureRoCompat has RoCompatReadonly set; fixed-size image must be writable")
 	}
+	if sb.FeatureCompat&format.CompatDirIndex == 0 || sb.FeatureRoCompat&format.RoCompatDirNlink == 0 {
+		t.Error("want dir_index and dir_nlink set")
+	}
+	if sb.Flags&format.SuperBlockFlagUnsignedHash == 0 || sb.DefHashVersion != format.HashHalfMD4 {
+		t.Errorf("Flags = %#x, DefHashVersion = %d, want unsigned half_md4", sb.Flags, sb.DefHashVersion)
+	}
 }
 
 func TestFixedSizeSparse(t *testing.T) {

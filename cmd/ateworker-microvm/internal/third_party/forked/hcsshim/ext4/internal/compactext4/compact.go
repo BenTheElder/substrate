@@ -1429,6 +1429,13 @@ func (w *Writer) Close() error {
 	if w.fixedSize > 0 {
 		// fixed size images are writable
 		sb.FeatureRoCompat &^= format.RoCompatReadonly
+		// let the kernel index directories that it grows, and lift the 65000
+		// subdirectory limit for indexed ones. set the hash signedness, otherwise
+		// the kernel picks it from the arch's char signedness on first mount
+		sb.FeatureCompat |= format.CompatDirIndex
+		sb.FeatureRoCompat |= format.RoCompatDirNlink
+		sb.DefHashVersion = format.HashHalfMD4
+		sb.Flags |= format.SuperBlockFlagUnsignedHash
 	}
 	_ = binary.Write(b, binary.LittleEndian, sb)
 	w.seekBlock(0)

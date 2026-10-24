@@ -71,6 +71,9 @@ All of it is guarded by `w.fixedSize > 0`, the upstream path is unchanged:
 - the tail zero fill is skipped and the file is truncated to the full size instead, so
   free blocks stay holes
 - the `RoCompatReadonly` marker is cleared so the image mounts read-write
+- `dir_index` and `dir_nlink` are set, with an unsigned `half_md4` default hash, so the
+  kernel indexes directories it grows and lifts the 65000 subdirectory limit for them.
+  Directories we write stay linear
 
 See `ext4/tar2ext4/fixedsize_test.go`.
 
