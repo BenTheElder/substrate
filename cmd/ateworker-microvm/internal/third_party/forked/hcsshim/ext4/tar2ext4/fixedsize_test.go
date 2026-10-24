@@ -224,3 +224,48 @@ func TestFixedSizeTooSmall(t *testing.T) {
 		t.Error("Convert(FixedSize too small): want error, got nil")
 	}
 }
+
+func TestFixedSizeLarge(t *testing.T) {
+	// 16M inodes, a 4GiB inode table
+	const sizeBytes = int64(256) << 30
+	img := filepath.Join(t.TempDir(), "fs.ext4")
+	convertFixed(t, sampleTar(t), img, sizeBytes, 0)
+	f, err := os.Open(img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	sb, err := ReadExt4SuperBlockReadSeeker(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockSize := int64(1024) * (1 << sb.LogBlockSize)
+	var gd format.GroupDescriptor
+	if _, err := f.Seek(blockSize, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	if err := binary.Read(f, binary.LittleEndian, &gd); err != nil {
+		t.Fatal(err)
+	}
+	// the bitmaps follow the inode table
+	tableBlocks := int64(sb.InodesCount) * int64(sb.InodeSize) / blockSize
+	if got, want := int64(gd.BlockBitmapLow), int64(gd.InodeTableLow)+tableBlocks; got != want {
+		t.Errorf("group 0 block bitmap at %d, want %d", got, want)
+	}
+}
+
+func TestFixedSizeTooLarge(t *testing.T) {
+	for _, opt := range []Option{
+		FixedSize(16<<40+4096, 0),
+		FixedSize(64<<20, 1<<32),
+	} {
+		f, err := os.Create(filepath.Join(t.TempDir(), "fs.ext4"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := Convert(bytes.NewReader(sampleTar(t)), f, opt); err == nil {
+			t.Error("want error, got nil")
+		}
+		f.Close()
+	}
+}

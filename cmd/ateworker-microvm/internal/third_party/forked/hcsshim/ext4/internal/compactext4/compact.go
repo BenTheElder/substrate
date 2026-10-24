@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"path"
 	"sort"
 	"strings"
@@ -1046,8 +1047,8 @@ func (w *Writer) writeDirectoryRecursive(dir, parent *inode) error {
 	return nil
 }
 
-func (w *Writer) writeInodeTable(tableSize uint32) error {
-	end := w.pos + int64(tableSize)
+func (w *Writer) writeInodeTable(tableSize int64) error {
+	end := w.pos + tableSize
 	var b bytes.Buffer
 	for _, inode := range w.inodes {
 		if inode != nil {
@@ -1108,8 +1109,8 @@ func (w *Writer) writeInodeTable(tableSize uint32) error {
 		w.seekBlock(uint32(end / BlockSize))
 		return w.err
 	}
-	rest := tableSize - uint32(len(w.inodes)*inodeSize)
-	if _, err := w.zero(int64(rest)); err != nil {
+	rest := tableSize - int64(len(w.inodes)*inodeSize)
+	if _, err := w.zero(rest); err != nil {
 		return err
 	}
 	return nil
@@ -1225,6 +1226,13 @@ func bestGroupCount(blocks uint32, inodes uint32) (groups uint32, inodesPerGroup
 // fixedGroupGeometry picks enough groups to span w.fixedSize and enough inodes for
 // max(content inodes, w.fixedInodes), unlike bestGroupCount which shrinks to the contents
 func (w *Writer) fixedGroupGeometry(dataBlocks uint32) (groups uint32, inodesPerGroup uint32, err error) {
+	// without the 64bit feature block numbers are 32 bits
+	if w.fixedSize/BlockSize > math.MaxUint32 {
+		return 0, 0, fmt.Errorf("fixed size %d exceeds the maximum of %d", w.fixedSize, int64(math.MaxUint32)*BlockSize)
+	}
+	if w.fixedInodes > math.MaxUint32 {
+		return 0, 0, fmt.Errorf("inode count %d exceeds the maximum of %d", w.fixedInodes, uint32(math.MaxUint32))
+	}
 	fixedBlocks := uint32(w.fixedSize / BlockSize)
 	groups = (fixedBlocks + blocksPerGroup - 1) / blocksPerGroup
 	if groups == 0 {
@@ -1278,7 +1286,8 @@ func (w *Writer) Close() error {
 	} else {
 		groups, inodesPerGroup = bestGroupCount(inodeTableOffset, uint32(len(w.inodes)))
 	}
-	err := w.writeInodeTable(groups * inodesPerGroup * inodeSize)
+	// int64, this overflows uint32 past 16M inodes
+	err := w.writeInodeTable(int64(groups) * int64(inodesPerGroup) * inodeSize)
 	if err != nil {
 		return err
 	}
