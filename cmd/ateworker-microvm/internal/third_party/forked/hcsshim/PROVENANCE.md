@@ -49,11 +49,17 @@ Mechanical only:
 4. Replaced `github.com/pkg/errors` with the stdlib `errors`/`fmt` in `tar2ext4.go`, and
    dropped `IsDeviceExt4` (it only existed to use `github.com/Microsoft/hcsshim/internal/log`).
 
+### Inode Bitmap Padding
+
+Upstream leaves the inode bitmap bits past `inodesPerGroup` unset, and `e2fsck` reports
+"Padding at end of inode bitmap is not set" on every image, read-only or not (upstream's
+own tests fail on this on Linux with e2fsprogs 1.47.2). We mark them used, like e2fsprogs.
+
 ## Refreshing From Upstream
 
 1. Check out the new hcsshim tag and copy `ext4/internal/format`,
    `ext4/internal/compactext4`, and `ext4/tar2ext4/tar2ext4.go` over this subtree.
 2. Re-apply the mechanical changes above (import repoint, drop VHD / dm-verity, inline the
    `memory` / `log` / `pkg/errors` deps).
-3. Re-apply any functional patches on top, as their own commit.
+3. Re-apply the functional patches above on top, each as its own commit.
 4. Update the version / commit pin above and run `hack/update/licenses.sh`.

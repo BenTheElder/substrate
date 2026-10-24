@@ -1275,6 +1275,12 @@ func (w *Writer) Close() error {
 				dirCount++
 			}
 		}
+		// mark the padding bits past inodesPerGroup used, like e2fsprogs, otherwise
+		// e2fsck reports "Padding at end of inode bitmap is not set".
+		// these inodes don't exist, so they're not counted in usedInodeCount
+		for j := inodesPerGroup; j < BlockSize*8; j++ {
+			b[BlockSize+j/8] |= 1 << (j % 8)
+		}
 		_, err := w.write(b[:])
 		if err != nil {
 			return err
