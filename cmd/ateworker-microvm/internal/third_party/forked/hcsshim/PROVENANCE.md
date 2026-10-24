@@ -55,6 +55,23 @@ Upstream leaves the inode bitmap bits past `inodesPerGroup` unset, and `e2fsck` 
 "Padding at end of inode bitmap is not set" on every image, read-only or not (upstream's
 own tests fail on this on Linux with e2fsprogs 1.47.2). We mark them used, like e2fsprogs.
 
+### Fixed Size, Sparse, Writable
+
+Upstream shrinks the image to its contents and zero-fills the tail, its images are
+read-only dm-verity layers. We want a writable filesystem of a chosen size, so we added a
+`FixedSize(sizeBytes, inodeCount)` option to `compactext4` (re-exported from `tar2ext4`).
+All of it is guarded by `w.fixedSize > 0`, the upstream path is unchanged:
+
+- `fixedGroupGeometry` spans the group count to the requested size and provisions
+  `max(content, inodeCount)` inodes, instead of `bestGroupCount` shrinking to the contents
+- `Close` sets `BlocksCountLow` to the requested size, the existing bitmap loop marks the
+  trailing blocks free
+- the tail zero fill is skipped and the file is truncated to the full size instead, so
+  free blocks stay holes
+- the `RoCompatReadonly` marker is cleared so the image mounts read-write
+
+See `ext4/tar2ext4/fixedsize_test.go`.
+
 ## Refreshing From Upstream
 
 1. Check out the new hcsshim tag and copy `ext4/internal/format`,

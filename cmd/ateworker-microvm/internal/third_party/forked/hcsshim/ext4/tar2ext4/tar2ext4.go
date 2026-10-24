@@ -52,6 +52,13 @@ func MaximumDiskSize(size int64) Option {
 	}
 }
 
+// FixedSize wraps compactext4.FixedSize, added in this fork
+func FixedSize(sizeBytes int64, inodeCount int64) Option {
+	return func(p *params) {
+		p.ext4opts = append(p.ext4opts, compactext4.FixedSize(sizeBytes, inodeCount))
+	}
+}
+
 const (
 	whiteoutPrefix = ".wh."
 	opaqueWhiteout = ".wh..wh..opq"

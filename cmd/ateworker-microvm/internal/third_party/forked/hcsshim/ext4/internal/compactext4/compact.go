@@ -31,6 +31,9 @@ type Writer struct {
 	supportInlineData    bool
 	maxDiskSize          int64
 	gdBlocks             uint32
+	// set by FixedSize (added in this fork)
+	fixedSize   int64
+	fixedInodes int64
 }
 
 // Mode flags for Linux files.
@@ -1141,6 +1144,19 @@ func MaximumDiskSize(size int64) Option {
 	}
 }
 
+// FixedSize makes Close write a writable filesystem spanning sizeBytes (rounded up to a
+// block) with at least inodeCount inodes, leaving free blocks as holes in a sparse file
+// instead of shrinking to the contents. Added in this fork.
+// Close errors if the contents and metadata don't fit. inodeCount 0 sizes from the contents
+func FixedSize(sizeBytes int64, inodeCount int64) Option {
+	return func(w *Writer) {
+		w.fixedSize = (sizeBytes + BlockSize - 1) &^ (BlockSize - 1)
+		w.fixedInodes = inodeCount
+		// reserve the group descriptor table for the full size
+		w.maxDiskSize = w.fixedSize
+	}
+}
+
 func (w *Writer) init() error {
 	// Skip the defective block inode.
 	w.inodes = make([]*inode, 1, 32)
@@ -1192,6 +1208,37 @@ func bestGroupCount(blocks uint32, inodes uint32) (groups uint32, inodesPerGroup
 	return
 }
 
+// fixedGroupGeometry picks enough groups to span w.fixedSize and enough inodes for
+// max(content inodes, w.fixedInodes), unlike bestGroupCount which shrinks to the contents
+func (w *Writer) fixedGroupGeometry(dataBlocks uint32) (groups uint32, inodesPerGroup uint32, err error) {
+	fixedBlocks := uint32(w.fixedSize / BlockSize)
+	groups = (fixedBlocks + blocksPerGroup - 1) / blocksPerGroup
+	if groups == 0 {
+		groups = 1
+	}
+
+	wantInodes := uint32(len(w.inodes))
+	if w.fixedInodes > int64(wantInodes) {
+		wantInodes = uint32(w.fixedInodes)
+	}
+	// round up so the inode table is whole blocks, cap at one bitmap block
+	ipg := (wantInodes + groups - 1) / groups
+	ipg = ((ipg + inodesPerGroupIncrement - 1) / inodesPerGroupIncrement) * inodesPerGroupIncrement
+	if ipg < inodesPerGroupIncrement {
+		ipg = inodesPerGroupIncrement
+	}
+	if ipg > maxInodesPerGroup {
+		ipg = maxInodesPerGroup
+	}
+
+	// contents, inode table and bitmaps must fit
+	inodeTableBlocks := groups * (ipg * inodeSize / BlockSize)
+	if dataBlocks+inodeTableBlocks+groups*2 > fixedBlocks {
+		return 0, 0, exceededMaxSizeError{w.maxDiskSize}
+	}
+	return groups, ipg, nil
+}
+
 func (w *Writer) Close() error {
 	if err := w.finishInode(); err != nil {
 		return err
@@ -1207,7 +1254,16 @@ func (w *Writer) Close() error {
 
 	// Write the inode table
 	inodeTableOffset := w.block()
-	groups, inodesPerGroup := bestGroupCount(inodeTableOffset, uint32(len(w.inodes)))
+	var groups, inodesPerGroup uint32
+	if w.fixedSize > 0 {
+		var gerr error
+		groups, inodesPerGroup, gerr = w.fixedGroupGeometry(inodeTableOffset)
+		if gerr != nil {
+			return gerr
+		}
+	} else {
+		groups, inodesPerGroup = bestGroupCount(inodeTableOffset, uint32(len(w.inodes)))
+	}
 	err := w.writeInodeTable(groups * inodesPerGroup * inodeSize)
 	if err != nil {
 		return err
@@ -1221,6 +1277,14 @@ func (w *Writer) Close() error {
 	minSize := (groups-1)*blocksPerGroup + 1
 	if diskSize < minSize {
 		diskSize = minSize
+	}
+	if w.fixedSize > 0 {
+		// the bitmap loop below leaves [validDataSize, diskSize) free
+		fixedBlocks := uint32(w.fixedSize / BlockSize)
+		if fixedBlocks < diskSize {
+			return exceededMaxSizeError{w.maxDiskSize}
+		}
+		diskSize = fixedBlocks
 	}
 
 	usedGdBlocks := (groups-1)/groupsPerDescriptorBlock + 1
@@ -1298,10 +1362,12 @@ func (w *Writer) Close() error {
 		totalUsedInodes += uint32(usedInodeCount)
 	}
 
-	// Zero up to the disk size.
-	_, err = w.zero(int64(diskSize-bitmapOffset-bitmapSize) * BlockSize)
-	if err != nil {
-		return err
+	// Zero up to the disk size. fixed size images truncate at the end instead, to stay sparse
+	if w.fixedSize == 0 {
+		_, err = w.zero(int64(diskSize-bitmapOffset-bitmapSize) * BlockSize)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Write the block descriptors
@@ -1346,11 +1412,37 @@ func (w *Writer) Close() error {
 	if w.supportInlineData {
 		sb.FeatureIncompat |= format.IncompatInlineData
 	}
+	if w.fixedSize > 0 {
+		// fixed size images are writable
+		sb.FeatureRoCompat &^= format.RoCompatReadonly
+	}
 	_ = binary.Write(b, binary.LittleEndian, sb)
 	w.seekBlock(0)
 	if _, err := w.write(blk[:]); err != nil {
 		return err
 	}
 	w.seekBlock(diskSize)
+	if w.err != nil {
+		return w.err
+	}
+	if w.fixedSize > 0 {
+		// we skipped the zero fill, extend the file to the full size
+		if err := w.truncateTo(int64(diskSize) * BlockSize); err != nil {
+			return err
+		}
+	}
 	return w.err
+}
+
+// truncateTo extends the file to size without writing the gap, so it stays a hole
+// falls back to writing one trailing byte if f has no Truncate
+func (w *Writer) truncateTo(size int64) error {
+	if t, ok := w.f.(interface{ Truncate(int64) error }); ok {
+		return t.Truncate(size)
+	}
+	if _, err := w.f.Seek(size-1, io.SeekStart); err != nil {
+		return err
+	}
+	_, err := w.f.Write([]byte{0})
+	return err
 }
