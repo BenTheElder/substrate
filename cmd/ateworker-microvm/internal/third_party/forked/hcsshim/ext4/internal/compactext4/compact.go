@@ -1368,7 +1368,14 @@ func (w *Writer) Close() error {
 		for j := inodesPerGroup; j < BlockSize*8; j++ {
 			b[BlockSize+j/8] |= 1 << (j % 8)
 		}
-		_, err := w.write(b[:])
+		var err error
+		if w.fixedSize > 0 && usedBlockCount == 0 {
+			// leave an empty block bitmap a hole
+			w.seekBlock(w.block() + 1)
+			_, err = w.write(b[BlockSize:])
+		} else {
+			_, err = w.write(b[:])
+		}
 		if err != nil {
 			return err
 		}
