@@ -101,7 +101,7 @@ func (l *ActorLeaf) Close() error {
 
 // LimitActorLeafGrowth sets memory.high on the actor's leaf to ceiling bytes, or
 // to its current usage plus headroom bytes if that is more, plus borrow bytes,
-// and returns a func that lifts it again. Past memory.high the kernel reclaims the leaf's page
+// and returns a func that puts back the memory.high it replaced. Past memory.high the kernel reclaims the leaf's page
 // cache and throttles whoever is allocating, where at the worker pod's
 // memory.max it may OOM-kill instead.
 func LimitActorLeafGrowth(actorUID string, headroom, ceiling, borrow int64) (func(), error) {
@@ -118,12 +118,16 @@ func limitLeafGrowth(root, actorUID string, headroom, ceiling, borrow int64) (fu
 		return nil, err
 	}
 	high := filepath.Join(path, "memory.high")
+	previous, err := os.ReadFile(high)
+	if err != nil {
+		return nil, fmt.Errorf("while limiting cgroup %q: %w", path, err)
+	}
 	if err := writeExisting(high, strconv.FormatInt(max(current+headroom, ceiling)+borrow, 10)); err != nil {
 		return nil, fmt.Errorf("while limiting cgroup %q: %w", path, err)
 	}
 	return func() {
 		// the leaf may already be gone, and its limit with it
-		_ = writeExisting(high, "max")
+		_ = writeExisting(high, strings.TrimSpace(string(previous)))
 	}, nil
 }
 
