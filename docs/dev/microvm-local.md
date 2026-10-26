@@ -107,10 +107,11 @@ brew install lima docker
 
 ### 2. Launch Lima with nested virtualization
 
-Start the `docker-rootful` template with nested virtualization and a writable home mount:
+Start the `docker-rootful` template with nested virtualization, a writable home mount, and an Ubuntu 24.04 guest (see below for why):
 
 ```sh
-limactl start --name=docker-nested template:docker-rootful --cpus=8 --memory=16 --nested-virt --mount-writable
+limactl start --name=docker-nested template:docker-rootful --cpus=8 --memory=16 --nested-virt --mount-writable \
+  --set '.images = [{"location":"https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img","arch":"aarch64"}]'
 ```
 
 If prompted to edit the configuration, verify it includes at least:
@@ -130,13 +131,33 @@ The writable home mount lets the kind/ko workflows write into your checkout,
 8 CPUs / 16 GiB is a comfortable floor for the control plane plus a microVM
 worker, and `vzNAT` gives the VM outbound networking under the vz VM type.
 
+kind needs more inotify instances than Ubuntu's default of 128 once more than
+one cluster runs in the VM
+([kind known issues](https://kind.sigs.k8s.io/docs/user/known-issues/#pod-errors-due-to-too-many-open-files)).
+Raise them persistently:
+
+```sh
+limactl shell docker-nested sudo tee /etc/sysctl.d/99-inotify.conf <<'EOF'
+fs.inotify.max_user_watches = 524288
+fs.inotify.max_user_instances = 512
+EOF
+limactl shell docker-nested sudo sysctl --system
+```
+
 On `arm64` (`amd64` is unaffected), Linux 6.19 and newer clear the active state
 of GICv3 LPIs when folding list registers on a VM exit (upstream commit
 `73c9726975af`). Under nested virtualization, hardware EOI in the L2 microVM
 guest then leaves the interrupt priority active in `ICH_AP1R0_EL2` and blocks
-subsequent `virtio` interrupts. Enable `kvm-arm.vgic_v3_group1_trap=1` on the
-Lima guest kernel so L1 KVM traps Group 1 EOI writes and clears the active
-priority in software:
+subsequent `virtio` interrupts, so microVM guests hang at boot. The template's
+default image, Ubuntu 26.04, ships Linux 7.0. Ubuntu 24.04 ships 6.8, which
+predates the change.
+
+If you need a newer guest kernel, enable `kvm-arm.vgic_v3_group1_trap=1` so L1
+KVM traps Group 1 EOI writes and clears the active priority in software. This
+traps every interrupt acknowledge and EOI from the microVM guests, so it costs
+performance: with many microVMs running at once, guests stall and drop their
+agent connection on restore (the e2e suites failed at `E2E_PARALLELISM=8` and
+passed at `E2E_PARALLELISM=1`).
 
 ```sh
 limactl shell docker-nested sudo tee /etc/default/grub.d/99-vgic-trap.cfg <<'EOF'
