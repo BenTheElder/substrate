@@ -4,7 +4,9 @@ Each directory here is a self-contained plugin: a Go module of its own that
 plugs into substrate through its public APIs.
 
 This is a temporary location. Each plugin will move to a repository of its
-own, and its path here goes away when it does. Until then:
+own in the [agent-substrate-plugins](https://github.com/agent-substrate-plugins)
+organization, named for the plugin API it implements and then its backend,
+and its path here goes away when it does. Until then:
 
 - **Do not depend on these paths.** Nothing else in the repository should
   build on, script against or link into a plugin's directory. The only
@@ -16,4 +18,9 @@ own, and its path here goes away when it does. Until then:
 - **A plugin imports only substrate's public `api/` and `pkg/` packages**, so
   it can move out as it is. Its `go.mod` replaces the substrate module with this
   checkout, so it builds against the current tree.
+
+## Moved
+
+- `gcp-secret-manager`:
+  [agent-substrate-plugins/credprovider-gcp-secret-manager](https://github.com/agent-substrate-plugins/credprovider-gcp-secret-manager)
 
