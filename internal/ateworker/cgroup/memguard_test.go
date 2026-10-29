@@ -18,10 +18,12 @@ package cgroup
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 )
 
 // overLimitLeaf is a leaf past the overshoot cap of limit, which a guard kills
@@ -99,5 +101,69 @@ func TestMemoryGuardPaused(t *testing.T) {
 	g.Resume(0)
 	if _, ok := g.Check(context.Background(), root, name); ok {
 		t.Error("Check() killed after Resume(0)")
+	}
+}
+
+// A pause waits out a kill in progress, so a checkpoint never moves a sandbox
+// out from under its kill.
+func TestMemoryGuardPauseWaitsForKill(t *testing.T) {
+	const limit = 256 << 20
+	root, name := overLimitLeaf(t, limit)
+	events := filepath.Join(root, name, "cgroup.events")
+	if err := os.WriteFile(events, []byte("populated 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var g MemoryGuard
+	g.Resume(limit)
+	if _, ok := g.Check(context.Background(), root, name); !ok {
+		t.Fatal("Check() did not kill a cgroup over its limit")
+	}
+	paused := make(chan struct{})
+	go func() {
+		g.Pause()
+		close(paused)
+	}()
+	select {
+	case <-paused:
+		t.Fatal("Pause() returned while the kill was still waiting for the cgroup to empty")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := os.WriteFile(events, []byte("populated 0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	<-paused
+}
+
+// Page cache doesn't make a cgroup near its limit.
+func TestMemoryGuardNearIgnoresPageCache(t *testing.T) {
+	const limit = 256 << 20
+	root, name := t.TempDir(), "uid-a"
+	dir := filepath.Join(root, name)
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		cache uint64
+		want  bool
+	}{
+		{cache: 64 << 20, want: false},
+		{cache: 0, want: true},
+	} {
+		for f, v := range map[string]string{
+			"memory.current":      strconv.Itoa(limit) + "\n",
+			"memory.stat":         fmt.Sprintf("anon 1\ninactive_file %d\nactive_file 0\n", tc.cache),
+			"memory.pressure":     "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+			"memory.events.local": "high 0\n",
+		} {
+			if err := os.WriteFile(filepath.Join(dir, f), []byte(v), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var g MemoryGuard
+		g.Resume(limit)
+		g.Check(context.Background(), root, name)
+		if got := g.Near(); got != tc.want {
+			t.Errorf("with %d of page cache: Near() = %t, want %t", tc.cache, got, tc.want)
+		}
 	}
 }

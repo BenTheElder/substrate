@@ -19,7 +19,6 @@ package main
 import (
 	"context"
 	"log/slog"
-	"time"
 
 	"go.ate.dev/substrate/internal/ateattr"
 	"go.ate.dev/substrate/internal/ateworker/cgroup"
@@ -36,37 +35,37 @@ func (s *AteWorkerService) leafMemoryHigh(memoryBytes int64) int64 {
 	return actorBooking(memoryBytes)
 }
 
-// watchMemory kills actors stuck at their cgroup's memory.high, until ctx is
-// done.
-func (s *AteWorkerService) watchMemory(ctx context.Context) {
-	ticker := time.NewTicker(cgroup.MemoryGuardInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			for _, h := range s.hostedActors() {
-				s.checkMemory(ctx, h)
-			}
+// MemoryTargets returns the running microVMs for cgroup.WatchMemory to guard.
+func (s *AteWorkerService) MemoryTargets() []cgroup.MemoryTarget {
+	s.actorsMu.RLock()
+	defer s.actorsMu.RUnlock()
+	targets := make([]cgroup.MemoryTarget, 0, len(s.actors))
+	for _, h := range s.actors {
+		if h.vm != nil && !h.vm.stopping.Load() {
+			targets = append(targets, memoryTarget{h: h, ra: h.vm})
 		}
 	}
+	return targets
 }
 
-// checkMemory kills h's VMM and virtiofsd if their cgroup is stuck at its
-// memory.high. watchVM then reports the actor crashed.
-func (s *AteWorkerService) checkMemory(ctx context.Context, h *hostedActor) {
-	s.actorsMu.RLock()
-	ra := h.vm
-	s.actorsMu.RUnlock()
-	if ra == nil || ra.stopping.Load() {
-		return
-	}
-	kill, ok := ra.memory.Check(ctx, cgroup.Root, h.attribution.UID)
-	if !ok {
-		return
-	}
-	attrs := append(ateattr.ActorLogAttrs(h.attribution),
+// memoryTarget is an actor's cgroup, which holds its VMM and virtiofsd. When
+// its guard kills them, watchVM reports the actor crashed.
+type memoryTarget struct {
+	h  *hostedActor
+	ra *runningActor
+}
+
+func (t memoryTarget) MemoryGuard() *cgroup.MemoryGuard {
+	return &t.ra.memory
+}
+
+func (t memoryTarget) MemoryCgroup() (root, name string) {
+	return cgroup.Root, t.h.attribution.UID
+}
+
+func (t memoryTarget) MemoryKilled(kill cgroup.Kill) {
+	ctx := context.Background()
+	attrs := append(ateattr.ActorLogAttrs(t.h.attribution),
 		slog.Uint64("memoryLimitBytes", kill.Limit),
 		slog.Uint64(string(ateattr.StatsMemoryUsageKey), kill.Current))
 	slog.LogAttrs(ctx, slog.LevelWarn, "Killing a microVM over its memory limit", attrs...)

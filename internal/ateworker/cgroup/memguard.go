@@ -33,7 +33,8 @@ import (
 // systemd ignores.
 // https://github.com/opencontainers/cgroups/blob/19a241326c83a5100dff94732733791a0c9e4720/systemd/v2.go#L366-L382
 
-// MemoryGuardInterval is how often a MemoryGuard should be checked.
+// MemoryGuardInterval is how often WatchMemory checks a cgroup that reported a
+// memory event.
 const MemoryGuardInterval = 250 * time.Millisecond
 
 // MemoryGuard kills one cgroup once a MemoryWatch finds it stuck at its
@@ -41,6 +42,9 @@ const MemoryGuardInterval = 250 * time.Millisecond
 type MemoryGuard struct {
 	limit  atomic.Uint64
 	killed atomic.Bool
+	// near is set when the last check found the cgroup close enough to its
+	// limit to check it often
+	near atomic.Bool
 	// mu is held while a check or a kill runs, and guards watch
 	mu    sync.Mutex
 	watch MemoryWatch
@@ -58,15 +62,24 @@ type Kill struct {
 // memory.high, and reports whether it did. A guard that is paused, already
 // killing, or has killed does nothing.
 func (g *MemoryGuard) Check(ctx context.Context, root, name string) (Kill, bool) {
+	return g.check(ctx, root, name, false)
+}
+
+// check is Check, told whether the cgroup reported a memory event since the
+// last check.
+func (g *MemoryGuard) check(ctx context.Context, root, name string, woke bool) (Kill, bool) {
 	if !g.mu.TryLock() {
 		return Kill{}, false
 	}
 	limit := g.limit.Load()
 	if limit == 0 || g.killed.Load() {
+		g.near.Store(false)
 		g.mu.Unlock()
 		return Kill{}, false
 	}
+	g.watch.woke = woke
 	over, current, err := g.watch.Check(filepath.Join(root, name), limit, time.Now())
+	g.near.Store(err == nil && (over || g.watch.sampling()))
 	if err != nil || !over {
 		// a read fails when the cgroup is going away
 		g.mu.Unlock()
@@ -81,6 +94,12 @@ func (g *MemoryGuard) Check(ctx context.Context, root, name string) (Kill, bool)
 		done <- KillLeafUnder(killCtx, root, name)
 	}()
 	return Kill{Limit: limit, Current: current, Done: done}, true
+}
+
+// Near reports whether the last check found the cgroup within 1/16 of its
+// limit, page cache aside.
+func (g *MemoryGuard) Near() bool {
+	return g.near.Load()
 }
 
 // Killed reports whether the guard killed its cgroup.

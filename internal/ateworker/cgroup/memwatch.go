@@ -46,6 +46,9 @@ const (
 // stalled on memory. Check it on a timer, one MemoryWatch per cgroup.
 type MemoryWatch struct {
 	samples []stallSample
+	// woke is set when the cgroup reported a memory event since the last
+	// check, which the first sample counts as its own memory.high event
+	woke bool
 }
 
 type stallSample struct {
@@ -67,6 +70,8 @@ type stallSample struct {
 // stall. Its own memory.high events, so stalls from node-wide reclaim don't
 // count.
 func (w *MemoryWatch) Check(dir string, limit uint64, now time.Time) (bool, uint64, error) {
+	woke := w.woke
+	w.woke = false
 	current, err := memoryCurrent(dir)
 	if err != nil {
 		return false, 0, err
@@ -94,7 +99,11 @@ func (w *MemoryWatch) Check(dir string, limit uint64, now time.Time) (bool, uint
 	if err != nil {
 		return false, current, err
 	}
-	w.samples = append(w.samples, stallSample{at: now, stall: stall, high: high})
+	sample := stallSample{at: now, stall: stall, high: high}
+	if woke && len(w.samples) == 0 && high > 0 {
+		sample.high--
+	}
+	w.samples = append(w.samples, sample)
 	// drop what fell out of the window, keeping one sample at or before its start
 	for len(w.samples) > 1 && now.Sub(w.samples[1].at) >= memoryStallWindow {
 		w.samples = w.samples[1:]
@@ -106,6 +115,12 @@ func (w *MemoryWatch) Check(dir string, limit uint64, now time.Time) (bool, uint
 	}
 	stalled := time.Duration(stall-first.stall) * time.Microsecond
 	return high > first.high && float64(stalled) >= memoryStallKill*float64(span), current, nil
+}
+
+// sampling reports whether the last check found the cgroup close enough to
+// its limit, page cache aside, to sample its stalls.
+func (w *MemoryWatch) sampling() bool {
+	return len(w.samples) > 0
 }
 
 // memoryCurrent reads memory.current. A missing file is an error wrapping

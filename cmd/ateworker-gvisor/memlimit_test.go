@@ -96,13 +96,24 @@ func TestRemoveStaleSandboxLeaf(t *testing.T) {
 	}
 }
 
-// A sandbox past the overshoot cap is killed once, and a checkpoint pausing
-// the watch waits for the kill.
-func TestCheckMemoryKillsOncePausesForCheckpoint(t *testing.T) {
+// The watch guards each hosted sandbox's cgroup, except ones being stopped.
+func TestMemoryTargets(t *testing.T) {
 	root := t.TempDir()
-	s := &AteWorkerService{cgroupRoot: root, throttleMemory: true}
-	h := &hostedActor{attribution: resources.ActorAttribution{UID: "uid-a"}}
+	running := &hostedActor{attribution: resources.ActorAttribution{UID: "uid-a"}}
+	stopping := &hostedActor{attribution: resources.ActorAttribution{UID: "uid-b"}}
+	stopping.stopping.Store(true)
+	s := &AteWorkerService{cgroupRoot: root, actors: map[string]*hostedActor{"uid-a": running, "uid-b": stopping}}
+
+	targets := s.MemoryTargets()
+	if len(targets) != 1 || targets[0].MemoryGuard() != &running.memory {
+		t.Fatalf("MemoryTargets() = %v, want only the running sandbox", targets)
+	}
 	leaf := s.sandboxLeaf("uid-a")
+	if r, name := targets[0].MemoryCgroup(); filepath.Join(r, name) != leaf {
+		t.Errorf("MemoryCgroup() = %s/%s, want %s", r, name, leaf)
+	}
+
+	// a sandbox past the overshoot cap is killed through that cgroup
 	if err := os.Mkdir(leaf, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -112,24 +123,16 @@ func TestCheckMemoryKillsOncePausesForCheckpoint(t *testing.T) {
 		"cgroup.kill":    "",
 		"cgroup.events":  "populated 0\nfrozen 0\n",
 	})
-	h.memory.Resume(limit)
-
-	s.checkMemory(context.Background(), h)
-	if !h.memory.Killed() {
+	running.memory.Resume(limit)
+	r, name := targets[0].MemoryCgroup()
+	kill, ok := running.memory.Check(context.Background(), r, name)
+	if !ok {
 		t.Fatal("sandbox over its limit was not killed")
 	}
-	if got := h.memory.Pause(); got != limit {
-		t.Errorf("Pause() = %d, want %d", got, limit)
+	if err := <-kill.Done; err != nil {
+		t.Fatal(err)
 	}
 	if got := readCgroupFile(t, leaf, "cgroup.kill"); got != "1" {
-		t.Errorf("cgroup.kill = %q after pausing, want the kill done", got)
-	}
-
-	writeCgroupFiles(t, leaf, map[string]string{"cgroup.kill": ""})
-	h.memory.Resume(limit)
-	s.checkMemory(context.Background(), h)
-	h.memory.Pause()
-	if got := readCgroupFile(t, leaf, "cgroup.kill"); got != "" {
-		t.Errorf("sandbox was killed twice")
+		t.Errorf("cgroup.kill = %q, want 1", got)
 	}
 }

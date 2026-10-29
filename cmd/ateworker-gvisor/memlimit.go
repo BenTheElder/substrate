@@ -101,33 +101,35 @@ func swapMemoryMaxForHigh(dir string) (uint64, error) {
 	return limit, nil
 }
 
-// watchMemory kills sandboxes that stay over their memory limit, until ctx is
-// done.
-func (s *AteWorkerService) watchMemory(ctx context.Context) {
-	ticker := time.NewTicker(cgroup.MemoryGuardInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			for _, h := range s.hostedActors() {
-				s.checkMemory(ctx, h)
-			}
+// MemoryTargets returns the sandboxes for cgroup.WatchMemory to guard.
+func (s *AteWorkerService) MemoryTargets() []cgroup.MemoryTarget {
+	hosted := s.hostedActors()
+	targets := make([]cgroup.MemoryTarget, 0, len(hosted))
+	for _, h := range hosted {
+		if !h.stopping.Load() {
+			targets = append(targets, memoryTarget{s: s, h: h})
 		}
 	}
+	return targets
 }
 
-// checkMemory kills h's sandbox if it is stuck at its memory limit.
-func (s *AteWorkerService) checkMemory(ctx context.Context, h *hostedActor) {
-	if h.stopping.Load() {
-		return
-	}
-	kill, ok := h.memory.Check(ctx, s.cgroupRoot, filepath.Base(s.sandboxLeaf(h.attribution.UID)))
-	if !ok {
-		return
-	}
-	attrs := append(ateattr.ActorLogAttrs(h.attribution),
+// memoryTarget is an actor's sandbox cgroup.
+type memoryTarget struct {
+	s *AteWorkerService
+	h *hostedActor
+}
+
+func (t memoryTarget) MemoryGuard() *cgroup.MemoryGuard {
+	return &t.h.memory
+}
+
+func (t memoryTarget) MemoryCgroup() (root, name string) {
+	return t.s.cgroupRoot, filepath.Base(t.s.sandboxLeaf(t.h.attribution.UID))
+}
+
+func (t memoryTarget) MemoryKilled(kill cgroup.Kill) {
+	ctx := context.Background()
+	attrs := append(ateattr.ActorLogAttrs(t.h.attribution),
 		slog.Uint64("memoryLimitBytes", kill.Limit),
 		slog.Uint64(string(ateattr.StatsMemoryUsageKey), kill.Current))
 	slog.LogAttrs(ctx, slog.LevelWarn, "Killing a sandbox over its memory limit", attrs...)

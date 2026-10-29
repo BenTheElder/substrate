@@ -162,3 +162,31 @@ func TestMemoryWatchMissingCgroup(t *testing.T) {
 		t.Error("Check() on a missing cgroup succeeded")
 	}
 }
+
+// The event that woke the watch counts as the cgroup's own memory.high event,
+// so a stuck cgroup doesn't wait for another one.
+func TestMemoryWatchCountsTheWakingEvent(t *testing.T) {
+	const limit = 256 << 20
+	for _, woke := range []bool{false, true} {
+		dir := t.TempDir()
+		start := time.Now()
+		var w MemoryWatch
+		var got bool
+		for i, stallMs := range []uint64{0, 900} {
+			writeCgroupFiles(t, dir, map[string]string{
+				"memory.events.local": "low 0\nhigh 5\nmax 0\noom 0\noom_kill 0\n",
+				"memory.current":      fmt.Sprint(limit),
+				"memory.stat":         "anon 1\ninactive_file 0\nactive_file 0\n",
+				"memory.pressure":     fmt.Sprintf("some avg10=0.00 avg60=0.00 avg300=0.00 total=%d\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n", stallMs*1000),
+			})
+			w.woke = woke && i == 0
+			var err error
+			if got, _, err = w.Check(dir, limit, start.Add(time.Duration(i)*time.Second)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got != woke {
+			t.Errorf("woke=%t: Check() = %t, want %t", woke, got, woke)
+		}
+	}
+}

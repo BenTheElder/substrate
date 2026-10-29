@@ -282,7 +282,7 @@ func do(ctx context.Context) error {
 	ateworkerService.usage = workerstats.NewUsageEmitter(lp, usageStdout, pool)
 	defer workerstats.StartSampler(ctx, *usageSampleInterval, func(ctx context.Context) { ateworkerService.sweepUsage(ctx) })()
 	if ateworkerService.throttleMemory {
-		go ateworkerService.watchMemory(ctx)
+		go cgroup.WatchMemory(ctx, ateworkerService)
 	}
 
 	svr := grpc.NewServer(
@@ -404,7 +404,7 @@ type AteWorkerService struct {
 	cgroupRoot string
 
 	// throttleMemory is set when sandboxes get memory.high in place of
-	// memory.max, with watchMemory killing the ones stuck there.
+	// memory.max, with cgroup.WatchMemory killing the ones stuck there.
 	throttleMemory bool
 
 	// readSandboxCgroup overrides cgroupstats.Read when set. Only tests set it:

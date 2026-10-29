@@ -253,7 +253,7 @@ func do(ctx context.Context) error {
 	ateworkerService.usage = workerstats.NewUsageEmitter(lp, usageStdout, pool)
 	defer workerstats.StartSampler(ctx, *usageSampleInterval, func(ctx context.Context) { ateworkerService.sweepUsage(ctx) })()
 	if ateworkerService.throttleMemory {
-		go ateworkerService.watchMemory(ctx)
+		go cgroup.WatchMemory(ctx, ateworkerService)
 	}
 
 	svr := grpc.NewServer(
@@ -394,7 +394,7 @@ type AteWorkerService struct {
 	snapshotWrites chan struct{}
 	borrow         *memborrow.Ledger
 	// throttleMemory is set when actor cgroups get memory.high at what the
-	// actor books, with watchMemory killing the ones stuck there.
+	// actor books, with cgroup.WatchMemory killing the ones stuck there.
 	throttleMemory bool
 
 	// actorLogger forwards the actor container's stdout/stderr to the worker pod's
