@@ -17,6 +17,7 @@
 package cgroup
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -169,13 +170,14 @@ func actorLeafMemory(root, actorUID string) (int64, error) {
 	return current, nil
 }
 
-// PodMemory returns the worker pod's memory limit and usage. limit is 0 when
-// the pod has none.
-func PodMemory() (limit, current int64, err error) {
+// PodMemory returns the worker pod's memory limit and what it uses besides
+// clean page cache, which the kernel can reclaim. limit is 0 when the pod has
+// none.
+func PodMemory() (limit, used int64, err error) {
 	return podMemory(Root)
 }
 
-func podMemory(root string) (limit, current int64, err error) {
+func podMemory(root string) (limit, used int64, err error) {
 	raw, err := os.ReadFile(filepath.Join(root, "memory.max"))
 	if err != nil {
 		return 0, 0, err
@@ -185,13 +187,45 @@ func podMemory(root string) (limit, current int64, err error) {
 			return 0, 0, fmt.Errorf("while parsing memory.max %q: %w", raw, err)
 		}
 	}
-	if raw, err = os.ReadFile(filepath.Join(root, "memory.current")); err != nil {
+	used, err = memoryUnreclaimable(root)
+	if err != nil {
 		return 0, 0, err
 	}
-	if current, err = parseBytes(raw); err != nil {
-		return 0, 0, fmt.Errorf("while parsing memory.current %q: %w", raw, err)
+	return limit, used, nil
+}
+
+// memoryUnreclaimable is anon, shmem (memfd guest RAM), kernel, sock, and
+// page cache that is dirty or under writeback, from one memory.stat read. The
+// kernel only flushes memory.stat past a threshold of updates, so mixing it
+// with memory.current could count fresh page cache as used.
+// https://github.com/torvalds/linux/blob/v7.0/mm/memcontrol.c#L561-L564
+func memoryUnreclaimable(root string) (int64, error) {
+	path := filepath.Join(root, "memory.stat")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
 	}
-	return limit, current, nil
+	var used int64
+	var anon bool
+	for line := range bytes.Lines(b) {
+		f := bytes.Fields(line)
+		if len(f) != 2 {
+			continue
+		}
+		switch k := string(f[0]); k {
+		case "anon", "shmem", "kernel", "sock", "file_dirty", "file_writeback":
+			v, err := strconv.ParseInt(string(f[1]), 10, 64)
+			if err != nil {
+				return 0, fmt.Errorf("while parsing %s in %q: %w", k, path, err)
+			}
+			used += v
+			anon = anon || k == "anon"
+		}
+	}
+	if !anon {
+		return 0, fmt.Errorf("no anon in %q: %w", path, fs.ErrNotExist)
+	}
+	return used, nil
 }
 
 func parseBytes(raw []byte) (int64, error) {

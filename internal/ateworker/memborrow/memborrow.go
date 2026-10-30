@@ -38,7 +38,7 @@ type Ledger struct {
 	// limit, less what its hosted actors booked.
 	Unbooked func(podLimit int64) int64
 	// PodMemory replaces cgroup.PodMemory in tests.
-	PodMemory func() (limit, current int64, err error)
+	PodMemory func() (limit, used int64, err error)
 
 	mu    sync.Mutex
 	bytes int64
@@ -46,7 +46,7 @@ type Ledger struct {
 	returned chan struct{}
 }
 
-func (l *Ledger) podMemory() (limit, current int64, err error) {
+func (l *Ledger) podMemory() (limit, used int64, err error) {
 	if l.PodMemory != nil {
 		return l.PodMemory()
 	}
@@ -60,7 +60,7 @@ func (l *Ledger) Take(want int64) int64 {
 	if l == nil {
 		return 0
 	}
-	limit, current, err := l.podMemory()
+	limit, used, err := l.podMemory()
 	if err != nil {
 		return 0
 	}
@@ -68,7 +68,7 @@ func (l *Ledger) Take(want int64) int64 {
 	defer l.mu.Unlock()
 	n := want
 	if limit != 0 {
-		n = min(want, l.Unbooked(limit)-l.bytes, limit-current-margin)
+		n = min(want, l.Unbooked(limit)-l.bytes, limit-used-margin)
 	}
 	if n <= 0 {
 		return 0
