@@ -162,8 +162,7 @@ func (p *Plugin) Run(ctx context.Context) error {
 		return fmt.Errorf("while watching %q: %w", pluginapi.DevicePluginPath, err)
 	}
 
-	// sockets are unlinked when their server stops, so these are left over
-	// from a previous atelet that did not exit cleanly
+	// earlier atelets leave their socket behind, as the server runs until exit
 	stale, err := filepath.Glob(p.socketPrefix + "*.sock")
 	if err != nil {
 		return fmt.Errorf("while listing stale sockets: %w", err)
