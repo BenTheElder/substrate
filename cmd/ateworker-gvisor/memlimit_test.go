@@ -109,7 +109,7 @@ func TestCheckMemoryKillsOncePausesForCheckpoint(t *testing.T) {
 	const limit = 256 << 20
 	writeCgroupFiles(t, leaf, map[string]string{
 		"memory.current": strconv.Itoa(limit+32<<20) + "\n",
-		"memory.stat":    "anon " + strconv.Itoa(limit+32<<20) + "\ninactive_file 0\nactive_file 0\n",
+		"memory.stat":    "anon " + strconv.Itoa(limit+32<<20) + "\n",
 		"cgroup.kill":    "",
 		"cgroup.events":  "populated 0\nfrozen 0\n",
 	})

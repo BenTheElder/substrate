@@ -71,6 +71,8 @@ func (w *MemoryWatch) Check(dir string, limit uint64, now time.Time) (bool, uint
 	if err != nil {
 		return false, 0, err
 	}
+	// used is part of current, so it's under the limit too, and the rest of
+	// the cgroup's files needn't be read
 	if current < limit-limit/16 {
 		w.samples = w.samples[:0]
 		return false, current, nil
@@ -120,11 +122,13 @@ func memoryCurrent(dir string) (uint64, error) {
 	return strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
 }
 
-// memoryUsed is what the cgroup holds besides reclaimable page cache: anon,
-// shmem, which holds memfd-backed memory such as a gVisor sentry's or a
-// microVM guest's, kernel and sock. All from one memory.stat read, which the
-// kernel only flushes past a threshold of updates, so it can trail
-// memory.current, and mixing the two could count fresh page cache as used.
+// memoryUsed is what the cgroup holds besides page cache, from one
+// memory.stat read. memory.stat splits charged memory into anon, file, kernel
+// and sock, where file is page cache plus shmem (memfd-backed memory such as a
+// gVisor sentry's or a microVM guest's), so this is anon + shmem + kernel +
+// sock. The kernel only flushes memory.stat past a threshold of updates, so it
+// can trail memory.current, and mixing the two could count fresh page cache as
+// used.
 // https://github.com/torvalds/linux/blob/v7.0/mm/memcontrol.c#L561-L564
 func memoryUsed(dir string) (uint64, error) {
 	path := filepath.Join(dir, "memory.stat")
@@ -150,7 +154,7 @@ func memoryUsed(dir string) (uint64, error) {
 		}
 	}
 	if !anon {
-		return 0, fmt.Errorf("no anon in %q: %w", path, fs.ErrNotExist)
+		return 0, fmt.Errorf("no anon in %q", path)
 	}
 	return used, nil
 }
@@ -174,7 +178,7 @@ func memoryStall(dir string) (uint64, error) {
 			}
 		}
 	}
-	return 0, fmt.Errorf("no some total in %q", path)
+	return 0, fmt.Errorf("no some line with a total in %q", path)
 }
 
 // memoryHighEvents is memory.events.local's high: how many times the cgroup
