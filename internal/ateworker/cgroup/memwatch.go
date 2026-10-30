@@ -58,7 +58,7 @@ type stallSample struct {
 // memory.current: stalled on memory for at least memoryStallKill of the last
 // memoryStallWindow while hitting its own memory.high with at most 1/16 of the
 // limit in reclaimable page cache, or over the limit by more than 1/16 of it
-// or memoryOvershootMax at all.
+// or memoryOvershootMax at all, page cache aside.
 //
 // Stalls rather than memory.current over the limit, because reclaim keeps
 // pulling a throttled cgroup back under memory.high between allocations, and
@@ -71,9 +71,6 @@ func (w *MemoryWatch) Check(dir string, limit uint64, now time.Time) (bool, uint
 	if err != nil {
 		return false, 0, err
 	}
-	if current > limit+min(limit/16, memoryOvershootMax) {
-		return true, current, nil
-	}
 	if current < limit-limit/16 {
 		w.samples = w.samples[:0]
 		return false, current, nil
@@ -82,7 +79,13 @@ func (w *MemoryWatch) Check(dir string, limit uint64, now time.Time) (bool, uint
 	if err != nil {
 		return false, current, err
 	}
-	if current-min(cache, current) < limit-limit/16 {
+	// e.g. a snapshot write's dirty pages, which reclaim can't drop until
+	// they're written back
+	used := current - min(cache, current)
+	if used > limit+min(limit/16, memoryOvershootMax) {
+		return true, current, nil
+	}
+	if used < limit-limit/16 {
 		w.samples = w.samples[:0]
 		return false, current, nil
 	}

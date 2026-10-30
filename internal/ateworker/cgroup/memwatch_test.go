@@ -97,6 +97,13 @@ func TestMemoryWatch(t *testing.T) {
 			},
 		},
 		{
+			// e.g. a snapshot write's dirty pages after memory.high comes back
+			name: "far over on page cache is not killed",
+			steps: []step{
+				{0, 2 * limit, limit, 0, false, 0},
+			},
+		},
+		{
 			name: "stalls age out of the window",
 			steps: []step{
 				{0, limit, 0, 0, false, 0},
