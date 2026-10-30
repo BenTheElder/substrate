@@ -149,6 +149,25 @@ func (p *Plugin) newSocket() string {
 	return p.socketPrefix + rand.Text() + ".sock"
 }
 
+// removeSockets removes the sockets newSocket made for prefix. The random part
+// is base32 and has no "-", which tells them apart from the sockets of a
+// resource named like ours plus a "-" suffix, e.g. "ate.dev/kvm-gpu".
+func removeSockets(prefix string) error {
+	matches, err := filepath.Glob(prefix + "*.sock")
+	if err != nil {
+		return fmt.Errorf("while listing sockets: %w", err)
+	}
+	for _, path := range matches {
+		if strings.Contains(strings.TrimPrefix(path, prefix), "-") {
+			continue
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("while removing socket %q: %w", path, err)
+		}
+	}
+	return nil
+}
+
 // Run serves the plugin and keeps it registered until ctx is cancelled. Kubelet
 // forgets registered plugins when it restarts and signals that by recreating its
 // socket, so re-register then or the resource disappears from the node.
@@ -163,14 +182,8 @@ func (p *Plugin) Run(ctx context.Context) error {
 	}
 
 	// earlier atelets leave their socket behind, as the server runs until exit
-	stale, err := filepath.Glob(p.socketPrefix + "*.sock")
-	if err != nil {
-		return fmt.Errorf("while listing stale sockets: %w", err)
-	}
-	for _, path := range stale {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("while removing stale socket %q: %w", path, err)
-		}
+	if err := removeSockets(p.socketPrefix); err != nil {
+		return err
 	}
 
 	for ctx.Err() == nil {
