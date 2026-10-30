@@ -171,9 +171,9 @@ func pollWritebackFiles(files []*os.File, startAsyncWrite bool) bool {
 		}
 		var cstat unix.Cachestat_t
 		if err := cachestatFn(uint(f.Fd()), &unix.CachestatRange{}, &cstat, 0); err != nil {
-			if startAsyncWrite {
-				_ = syncFileRangeFn(int(f.Fd()), 0, 0, unix.SYNC_FILE_RANGE_WRITE)
-			}
+			// no cachestat before Linux 6.5, so wait for write-out instead of
+			// giving the memory back while the pages are still dirty
+			_ = syncFileRangeFn(int(f.Fd()), 0, 0, unix.SYNC_FILE_RANGE_WAIT_BEFORE|unix.SYNC_FILE_RANGE_WRITE|unix.SYNC_FILE_RANGE_WAIT_AFTER)
 			_ = f.Close()
 			files[i] = nil
 			continue

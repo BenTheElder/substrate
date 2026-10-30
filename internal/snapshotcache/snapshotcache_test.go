@@ -243,3 +243,32 @@ func TestStartWriteback(t *testing.T) {
 		t.Errorf("asyncWrites = %d, want 1", got)
 	}
 }
+
+func TestStartWritebackWithoutCachestat(t *testing.T) {
+	origCachestat := cachestatFn
+	origSyncFileRange := syncFileRangeFn
+	t.Cleanup(func() {
+		cachestatFn = origCachestat
+		syncFileRangeFn = origSyncFileRange
+	})
+	img := filepath.Join(t.TempDir(), "memory-ranges")
+	if err := os.WriteFile(img, []byte("snapshot pages"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cachestatFn = func(uint, *unix.CachestatRange, *unix.Cachestat_t, uint) error { return unix.ENOSYS }
+	var waited atomic.Bool
+	syncFileRangeFn = func(_ int, _ int64, _ int64, flags int) error {
+		if flags&unix.SYNC_FILE_RANGE_WAIT_AFTER != 0 {
+			waited.Store(true)
+		}
+		return nil
+	}
+	done := make(chan struct{})
+	if err := StartWriteback([]string{img}, func() { close(done) }); err != nil {
+		t.Fatalf("StartWriteback: %v", err)
+	}
+	<-done
+	if !waited.Load() {
+		t.Error("done ran without waiting for write-out")
+	}
+}
