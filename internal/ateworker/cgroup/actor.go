@@ -194,10 +194,12 @@ func podMemory(root string) (limit, used int64, err error) {
 	return limit, used, nil
 }
 
-// memoryUnreclaimable is anon, shmem (memfd guest RAM), kernel, sock, and
-// page cache that is dirty or under writeback, from one memory.stat read. The
-// kernel only flushes memory.stat past a threshold of updates, so mixing it
-// with memory.current could count fresh page cache as used.
+// memoryUnreclaimable is what the cgroup holds besides clean page cache, from
+// one memory.stat read. memory.stat splits charged memory into anon, file,
+// kernel and sock, where file is page cache plus shmem (memfd guest RAM), so
+// this is anon + shmem + kernel + sock plus page cache that is dirty or under
+// writeback. The kernel only flushes memory.stat past a threshold of updates,
+// so mixing it with memory.current could count fresh page cache as used.
 // https://github.com/torvalds/linux/blob/v7.0/mm/memcontrol.c#L561-L564
 func memoryUnreclaimable(root string) (int64, error) {
 	path := filepath.Join(root, "memory.stat")
@@ -223,7 +225,7 @@ func memoryUnreclaimable(root string) (int64, error) {
 		}
 	}
 	if !anon {
-		return 0, fmt.Errorf("no anon in %q: %w", path, fs.ErrNotExist)
+		return 0, fmt.Errorf("no anon in %q", path)
 	}
 	return used, nil
 }
