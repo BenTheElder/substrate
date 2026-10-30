@@ -16,6 +16,15 @@
 
 package main
 
+import (
+	"context"
+	"io/fs"
+	"path/filepath"
+
+	"go.ate.dev/substrate/internal/snapshotcache"
+	"go.ate.dev/substrate/internal/tarutil"
+)
+
 // unbookedMemory is the worker's reported memory capacity less what its
 // actors booked, overhead included.
 func (s *AteWorkerService) unbookedMemory(podLimit int64) int64 {
@@ -34,4 +43,49 @@ func actorBooking(memoryBytes int64) int64 {
 	const gib = 1 << 30
 	perGiB := actorOverhead.GetMemoryBytesPerGib()
 	return memoryBytes + actorOverhead.GetMemoryBytes() + memoryBytes/gib*perGiB + memoryBytes%gib*perGiB/gib
+}
+
+// archiveDir archives srcDir to tarPath. When the pod can lend the whole
+// directory, the archive goes to the page cache without a write-behind, and
+// the loan comes back once it's on disk. Otherwise its dirty pages are bounded.
+func (s *AteWorkerService) archiveDir(ctx context.Context, tarPath, srcDir string) error {
+	size, err := dirSize(srcDir)
+	var borrowed int64
+	if err == nil {
+		borrowed = s.borrow.Take(size)
+	}
+	if err != nil || borrowed < size {
+		s.borrow.Return(borrowed)
+		return tarutil.CreateWithRoot(ctx, tarPath, srcDir)
+	}
+	if err := tarutil.CreateWithRoot(ctx, tarPath, srcDir, tarutil.WriteBehind(0)); err != nil {
+		s.borrow.Return(borrowed)
+		return err
+	}
+	if err := snapshotcache.StartWriteback([]string{tarPath}, func() { s.borrow.Return(borrowed) }); err != nil {
+		s.borrow.Return(borrowed)
+	}
+	return nil
+}
+
+// dirSize is at least how big a tar of dir is: each regular file's data padded
+// to a 512 byte block, plus 2KiB per entry for its header and a PAX header
+// carrying its xattrs.
+func dirSize(dir string) (int64, error) {
+	var size int64
+	err := filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		size += 2 << 10
+		if d.Type().IsRegular() {
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			size += (info.Size() + 511) &^ 511
+		}
+		return nil
+	})
+	return size, err
 }
