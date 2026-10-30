@@ -47,7 +47,7 @@ func TestDirSize(t *testing.T) {
 		t.Fatal(err)
 	}
 	// dir, sub, f and l are 4 entries, and f's 1000 bytes pad to 1024
-	if got, err := dirSize(dir); err != nil || got != 4*2048+1024 {
+	if got, err := dirSize(t.Context(), dir); err != nil || got != 4*2048+1024 {
 		t.Errorf("dirSize() = %d, %v, want %d", got, err, 4*2048+1024)
 	}
 }

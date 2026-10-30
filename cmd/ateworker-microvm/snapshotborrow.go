@@ -49,32 +49,38 @@ func actorBooking(memoryBytes int64) int64 {
 // directory, the archive goes to the page cache without a write-behind, and
 // the loan comes back once it's on disk. Otherwise its dirty pages are bounded.
 func (s *AteWorkerService) archiveDir(ctx context.Context, tarPath, srcDir string) error {
-	size, err := dirSize(srcDir)
-	var borrowed int64
-	if err == nil {
-		borrowed = s.borrow.Take(size)
+	var size int64
+	lent := false
+	if s.borrow != nil {
+		var err error
+		if size, err = dirSize(ctx, srcDir); err == nil {
+			lent = s.borrow.TakeAll(size)
+		}
 	}
-	if err != nil || borrowed < size {
-		s.borrow.Return(borrowed)
+	if !lent {
 		return tarutil.CreateWithRoot(ctx, tarPath, srcDir)
 	}
 	if err := tarutil.CreateWithRoot(ctx, tarPath, srcDir, tarutil.WriteBehind(0)); err != nil {
-		s.borrow.Return(borrowed)
+		s.borrow.Return(size)
 		return err
 	}
-	if err := snapshotcache.StartWriteback([]string{tarPath}, func() { s.borrow.Return(borrowed) }); err != nil {
-		s.borrow.Return(borrowed)
+	if err := snapshotcache.StartWriteback([]string{tarPath}, func() { s.borrow.Return(size) }); err != nil {
+		s.borrow.Return(size)
 	}
 	return nil
 }
 
-// dirSize is at least how big a tar of dir is: each regular file's data padded
+// dirSize estimates how big a tar of dir is: each regular file's data padded
 // to a 512 byte block, plus 2KiB per entry for its header and a PAX header
-// carrying its xattrs.
-func dirSize(dir string) (int64, error) {
+// carrying its xattrs. Hardlinks count once per link, which leaves room for
+// the archive's end blocks.
+func dirSize(ctx context.Context, dir string) (int64, error) {
 	var size int64
 	err := filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
 		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		size += 2 << 10
