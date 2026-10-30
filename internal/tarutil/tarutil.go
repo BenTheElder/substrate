@@ -185,8 +185,10 @@ func create(ctx context.Context, tarPath, srcDir string, skip SkipFunc, includeR
 	defer f.Close()
 
 	bw := tarWriterPool.Get().(*bufio.Writer)
+	var wb *writeBehind
 	if o.writeBehind > 0 {
-		bw.Reset(&writeBehind{f: f, chunk: o.writeBehind})
+		wb = &writeBehind{f: f, chunk: o.writeBehind}
+		bw.Reset(wb)
 	} else {
 		bw.Reset(f)
 	}
@@ -204,6 +206,13 @@ func create(ctx context.Context, tarPath, srcDir string, skip SkipFunc, includeR
 	// The end of the archive is still in the buffer; flush it before returning.
 	if err := bw.Flush(); err != nil {
 		return fmt.Errorf("flushing tar %q: %w", tarPath, err)
+	}
+	if wb != nil {
+		// start on the last, partial chunk too, so it isn't left for the
+		// kernel's own writeback
+		if err := unix.SyncFileRange(int(f.Fd()), wb.started, wb.written-wb.started, unix.SYNC_FILE_RANGE_WRITE); err != nil {
+			return fmt.Errorf("while writing out %q: %w", tarPath, err)
+		}
 	}
 	// No fsync: local-only snapshots aren't guaranteed to survive a node
 	// restart, and atelet doesn't trust a local snapshot written before the
