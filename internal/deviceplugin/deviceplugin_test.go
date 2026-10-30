@@ -26,21 +26,25 @@ import (
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 )
 
-// Each resource gets its own socket in the directory kubelet watches, and two
-// resources must never collide on one filename.
+// Each resource gets its own sockets in the directory kubelet watches, two
+// resources never collide on one filename, and no socket is reused.
 func TestSocketPathsAreDistinctAndInKubeletDir(t *testing.T) {
 	kvm := New(HostDevice{ResourceName: "ate.dev/kvm", Path: "/dev/kvm"})
 	other := New(HostDevice{ResourceName: "ate.dev/other", Path: "/dev/other"})
 
-	if kvm.socket == other.socket {
-		t.Errorf("sockets collide: %q", kvm.socket)
+	if kvm.socketPrefix == other.socketPrefix {
+		t.Errorf("socket prefixes collide: %q", kvm.socketPrefix)
 	}
 	for _, p := range []*Plugin{kvm, other} {
-		if got := filepath.Dir(p.socket) + "/"; got != pluginapi.DevicePluginPath {
-			t.Errorf("socket %q is not in %q", p.socket, pluginapi.DevicePluginPath)
+		socket := p.newSocket()
+		if got := filepath.Dir(socket) + "/"; got != pluginapi.DevicePluginPath {
+			t.Errorf("socket %q is not in %q", socket, pluginapi.DevicePluginPath)
 		}
-		if filepath.Ext(p.socket) != ".sock" {
-			t.Errorf("socket %q should end in .sock", p.socket)
+		if filepath.Ext(socket) != ".sock" {
+			t.Errorf("socket %q should end in .sock", socket)
+		}
+		if again := p.newSocket(); again == socket {
+			t.Errorf("newSocket() returned %q twice", socket)
 		}
 	}
 }
