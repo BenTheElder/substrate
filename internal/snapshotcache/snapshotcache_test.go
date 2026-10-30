@@ -19,7 +19,9 @@ package snapshotcache
 import (
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -196,4 +198,48 @@ func TestEvictFiles(t *testing.T) {
 			t.Errorf("EvictFiles() = true after inode replacement, want false")
 		}
 	})
+}
+
+func TestStartWriteback(t *testing.T) {
+	origCachestat := cachestatFn
+	origSyncFileRange := syncFileRangeFn
+	origDelays := RetryDelays
+	t.Cleanup(func() {
+		cachestatFn = origCachestat
+		syncFileRangeFn = origSyncFileRange
+		RetryDelays = origDelays
+	})
+	RetryDelays = []time.Duration{0, 0}
+
+	dir := t.TempDir()
+	img := filepath.Join(dir, "memory-ranges")
+	if err := os.WriteFile(img, []byte("snapshot pages"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls atomic.Int32
+	var asyncWrites atomic.Int32
+	cachestatFn = func(_ uint, _ *unix.CachestatRange, cstat *unix.Cachestat_t, _ uint) error {
+		if calls.Add(1) <= 2 {
+			*cstat = unix.Cachestat_t{Cache: 16, Dirty: 8}
+			return nil
+		}
+		*cstat = unix.Cachestat_t{Cache: 16, Dirty: 0, Writeback: 0}
+		return nil
+	}
+	syncFileRangeFn = func(_ int, _ int64, _ int64, flags int) error {
+		if flags == unix.SYNC_FILE_RANGE_WRITE {
+			asyncWrites.Add(1)
+		}
+		return nil
+	}
+
+	done := make(chan struct{})
+	if err := StartWriteback([]string{img}, func() { close(done) }); err != nil {
+		t.Fatalf("StartWriteback: %v", err)
+	}
+	<-done
+	if got := asyncWrites.Load(); got != 1 {
+		t.Errorf("asyncWrites = %d, want 1", got)
+	}
 }
