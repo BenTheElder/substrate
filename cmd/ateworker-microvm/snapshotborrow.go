@@ -20,6 +20,7 @@ import (
 	"context"
 	"io/fs"
 	"log/slog"
+	"math"
 	"path/filepath"
 
 	"go.ate.dev/substrate/internal/snapshotcache"
@@ -85,14 +86,20 @@ func dirSize(ctx context.Context, dir string) (int64, error) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		size += 2 << 10
+		n := int64(2 << 10)
 		if d.Type().IsRegular() {
 			info, err := d.Info()
 			if err != nil {
 				return err
 			}
-			size += (info.Size() + 511) &^ 511
+			n += (info.Size() + 511) &^ 511
 		}
+		// sparse files can claim far more than the disk holds
+		if size > math.MaxInt64-n {
+			size = math.MaxInt64
+			return filepath.SkipAll
+		}
+		size += n
 		return nil
 	})
 	return size, err
