@@ -49,8 +49,8 @@ var (
 	fadviseFn       = unix.Fadvise
 	syncFileRangeFn = unix.SyncFileRange
 
-	// RetryDelays are the backoff intervals between post-restore eviction
-	// passes when dirty pages are waiting for background kernel writeback.
+	// RetryDelays are the backoff intervals between passes over files that
+	// still have dirty or writeback pages. StartWriteback repeats the last one.
 	RetryDelays = []time.Duration{
 		500 * time.Millisecond,
 		1500 * time.Millisecond,
@@ -138,21 +138,10 @@ func StartWriteback(paths []string, done func()) error {
 				done()
 			}
 		}()
-		if !pollWritebackFiles(files, false) {
-			return
-		}
-		for i, delay := range RetryDelays {
-			time.Sleep(delay)
-			// Start asynchronous data-only writeback after the first backoff if
-			// pages are still dirty.
-			if !pollWritebackFiles(files, i == 0) {
-				return
-			}
-		}
-		for _, f := range files {
-			if f != nil {
-				_ = syncFileRangeFn(int(f.Fd()), 0, 0, unix.SYNC_FILE_RANGE_WAIT_BEFORE|unix.SYNC_FILE_RANGE_WRITE|unix.SYNC_FILE_RANGE_WAIT_AFTER)
-			}
+		// poll instead of waiting on write-out, so a file unlinked meanwhile is
+		// closed and its dirty pages dropped instead of written back
+		for i := 0; pollWritebackFiles(files, i > 0); i++ {
+			time.Sleep(RetryDelays[min(i, len(RetryDelays)-1)])
 		}
 	}()
 	return nil
