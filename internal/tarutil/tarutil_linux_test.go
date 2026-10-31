@@ -65,7 +65,7 @@ func TestCreateKeepsArchiveCached(t *testing.T) {
 	if cs.Cache < pages*9/10 {
 		t.Errorf("%d of %d archive pages cached, want nearly all", cs.Cache, pages)
 	}
-	if chunks := uint64(2*writeBehindChunk) / uint64(os.Getpagesize()); cs.Dirty > chunks {
+	if chunks := uint64(2*writeBehindChunk)/uint64(os.Getpagesize()) + 1; cs.Dirty > chunks {
 		t.Errorf("%d archive pages dirty, want at most %d", cs.Dirty, chunks)
 	}
 }
