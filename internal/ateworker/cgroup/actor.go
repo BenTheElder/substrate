@@ -17,13 +17,13 @@
 package cgroup
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -194,40 +194,11 @@ func podMemory(root string) (limit, used int64, err error) {
 	return limit, used, nil
 }
 
-// memoryUnreclaimable is what the cgroup holds besides clean page cache, from
-// one memory.stat read. memory.stat splits charged memory into anon, file,
-// kernel and sock, where file is page cache plus shmem (memfd guest RAM), so
-// this is anon + shmem + kernel + sock plus page cache that is dirty or under
-// writeback. The kernel only flushes memory.stat past a threshold of updates,
-// so mixing it with memory.current could count fresh page cache as used.
-// https://github.com/torvalds/linux/blob/v7.0/mm/memcontrol.c#L561-L564
+// memoryUnreclaimable is memoryUsed plus page cache that is dirty or under
+// writeback, which reclaim can't drop either.
 func memoryUnreclaimable(root string) (int64, error) {
-	path := filepath.Join(root, "memory.stat")
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return 0, err
-	}
-	var used int64
-	var anon bool
-	for line := range bytes.Lines(b) {
-		f := bytes.Fields(line)
-		if len(f) != 2 {
-			continue
-		}
-		switch k := string(f[0]); k {
-		case "anon", "shmem", "kernel", "sock", "file_dirty", "file_writeback":
-			v, err := strconv.ParseInt(string(f[1]), 10, 64)
-			if err != nil {
-				return 0, fmt.Errorf("while parsing %s in %q: %w", k, path, err)
-			}
-			used += v
-			anon = anon || k == "anon"
-		}
-	}
-	if !anon {
-		return 0, fmt.Errorf("no anon in %q", path)
-	}
-	return used, nil
+	used, err := sumMemoryStat(root, slices.Concat(memoryUsedStats, []string{"file_dirty", "file_writeback"})...)
+	return int64(used), err
 }
 
 func parseBytes(raw []byte) (int64, error) {
