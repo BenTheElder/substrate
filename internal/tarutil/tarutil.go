@@ -83,9 +83,10 @@ func copyPooled(dst io.Writer, src io.Reader) (int64, error) {
 }
 
 // writeBehindChunk is how much of an archive may be dirty in the page cache
-// before we start writing it out, unless WriteBehind says otherwise. Dirty pages can't be reclaimed, and piling up
-// a whole archive of them can run a worker pod out of memory. Written pages stay
-// cached, since they are reclaimable and a local resume reads them back.
+// before we start writing it out, unless WriteBehind says otherwise. Dirty
+// pages can't be reclaimed, and piling up a whole archive of them can run a
+// worker pod out of memory. Written pages stay cached, since they are
+// reclaimable and a local resume reads them back.
 const writeBehindChunk = 8 << 20
 
 // writeBehind writes to f, starting write-out of each full chunk and waiting
@@ -207,7 +208,7 @@ func create(ctx context.Context, tarPath, srcDir string, skip SkipFunc, includeR
 	if err := bw.Flush(); err != nil {
 		return fmt.Errorf("flushing tar %q: %w", tarPath, err)
 	}
-	if wb != nil {
+	if wb != nil && wb.written > wb.started {
 		// start on the last, partial chunk too, so it isn't left for the
 		// kernel's own writeback
 		if err := unix.SyncFileRange(int(f.Fd()), wb.started, wb.written-wb.started, unix.SYNC_FILE_RANGE_WRITE); err != nil {
