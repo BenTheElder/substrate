@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"io/fs"
+	"log/slog"
 	"path/filepath"
 
 	"go.ate.dev/substrate/internal/snapshotcache"
@@ -66,6 +67,7 @@ func (s *AteWorkerService) archiveDir(ctx context.Context, tarPath, srcDir strin
 	}
 	if err := snapshotcache.StartWriteback([]string{tarPath}, func() { s.borrow.Return(size) }); err != nil {
 		s.borrow.Return(size)
+		slog.WarnContext(ctx, "Failed to start archive writeback", slog.String("path", tarPath), slog.Any("err", err))
 	}
 	return nil
 }
