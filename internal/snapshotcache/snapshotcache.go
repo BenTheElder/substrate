@@ -140,7 +140,7 @@ func StartWriteback(paths []string, done func()) error {
 		}()
 		// poll instead of waiting on write-out, so a file unlinked meanwhile is
 		// closed and its dirty pages dropped instead of written back
-		for i := 0; pollWritebackFiles(files, i > 0); i++ {
+		for i := 0; pollWritebackFiles(files, i == 1); i++ {
 			time.Sleep(RetryDelays[min(i, len(RetryDelays)-1)])
 		}
 	}()
@@ -172,12 +172,34 @@ func pollWritebackFiles(files []*os.File, startAsyncWrite bool) bool {
 			files[i] = nil
 			continue
 		}
-		anyRemaining = true
-		if startAsyncWrite && cstat.Dirty > 0 {
-			_ = syncFileRangeFn(int(f.Fd()), 0, 0, unix.SYNC_FILE_RANGE_WRITE)
+		if startAsyncWrite && cstat.Dirty > 0 && !startWriteOut(f) {
+			_ = f.Close()
+			files[i] = nil
+			continue
 		}
+		anyRemaining = true
 	}
 	return anyRemaining
+}
+
+// writeOutChunk is how much of a file startWriteOut submits per call
+const writeOutChunk = 64 << 20
+
+// startWriteOut starts write-out of f's dirty pages, and reports whether f is
+// still linked. Starting write-out can block for a long time on a busy disk, so
+// it goes a chunk at a time and stops once f is unlinked.
+// https://github.com/torvalds/linux/blob/v6.12/fs/sync.c#L315-L317
+func startWriteOut(f *os.File) bool {
+	for off := int64(0); ; off += writeOutChunk {
+		info, err := f.Stat()
+		if err != nil || isUnlinked(info) {
+			return false
+		}
+		if off >= info.Size() {
+			return true
+		}
+		_ = syncFileRangeFn(int(f.Fd()), off, writeOutChunk, unix.SYNC_FILE_RANGE_WRITE)
+	}
 }
 
 func isUnlinked(info fs.FileInfo) bool {
