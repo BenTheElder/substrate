@@ -95,3 +95,37 @@ func TestCreateWithoutWriteBehind(t *testing.T) {
 		t.Errorf("extracted %d bytes that differ from the %d archived", len(got), len(want))
 	}
 }
+
+func TestCreateDropCache(t *testing.T) {
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "big"), make([]byte, 4*writeBehindChunk), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	var fs unix.Statfs_t
+	if err := unix.Statfs(dir, &fs); err != nil {
+		t.Fatal(err)
+	}
+	if fs.Type == unix.TMPFS_MAGIC || fs.Type == unix.OVERLAYFS_SUPER_MAGIC {
+		t.Skip("TMPDIR is on tmpfs or overlayfs, where cachestat can't see eviction")
+	}
+	tarPath := filepath.Join(dir, "out.tar")
+	if err := Create(context.Background(), tarPath, src, DropCache()); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	f, err := os.Open(tarPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	var cs unix.Cachestat_t
+	if err := unix.Cachestat(uint(f.Fd()), &unix.CachestatRange{}, &cs, 0); err != nil {
+		if errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EOPNOTSUPP) {
+			t.Skipf("cachestat: %v", err)
+		}
+		t.Fatal(err)
+	}
+	if most := uint64(2*writeBehindChunk)/uint64(os.Getpagesize()) + 1; cs.Cache > most {
+		t.Errorf("%d archive pages cached, want at most %d", cs.Cache, most)
+	}
+}

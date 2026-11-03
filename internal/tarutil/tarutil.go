@@ -92,8 +92,10 @@ const writeBehindChunk = 8 << 20
 // writeBehind writes to f, starting write-out of each full chunk and waiting
 // for the one before it, so at most about two chunks are dirty.
 type writeBehind struct {
-	f       *os.File
-	chunk   int64
+	f     *os.File
+	chunk int64
+	// drop drops each chunk from the page cache once it's written out
+	drop    bool
 	written int64
 	// started is where write-out was last started, and waited where the
 	// previous chunk ends
@@ -115,6 +117,10 @@ func (w *writeBehind) Write(p []byte) (int, error) {
 		if err := unix.SyncFileRange(fd, w.waited, w.started-w.waited, unix.SYNC_FILE_RANGE_WAIT_BEFORE|unix.SYNC_FILE_RANGE_WRITE|unix.SYNC_FILE_RANGE_WAIT_AFTER); err != nil {
 			return n, fmt.Errorf("while writing out archive: %w", err)
 		}
+		if w.drop {
+			// best effort, the range is on disk already
+			_ = unix.Fadvise(fd, w.waited, w.started-w.waited, unix.FADV_DONTNEED)
+		}
 		w.waited = w.started
 	}
 	w.started = w.written
@@ -126,6 +132,7 @@ type Option func(*options)
 
 type options struct {
 	writeBehind int64
+	dropCache   bool
 }
 
 // WriteBehind sets how much of the archive may be dirty in the page cache
@@ -133,6 +140,13 @@ type options struct {
 // memory to spare. The default is writeBehindChunk.
 func WriteBehind(chunk int64) Option {
 	return func(o *options) { o.writeBehind = chunk }
+}
+
+// DropCache drops each chunk of the archive from the page cache once it's
+// written out, for a caller that can't afford to keep it cached. It has no
+// effect with WriteBehind(0).
+func DropCache() Option {
+	return func(o *options) { o.dropCache = true }
 }
 
 type writerOnly struct{ io.Writer }
@@ -188,7 +202,7 @@ func create(ctx context.Context, tarPath, srcDir string, skip SkipFunc, includeR
 	bw := tarWriterPool.Get().(*bufio.Writer)
 	var wb *writeBehind
 	if o.writeBehind > 0 {
-		wb = &writeBehind{f: f, chunk: o.writeBehind}
+		wb = &writeBehind{f: f, chunk: o.writeBehind, drop: o.dropCache}
 		bw.Reset(wb)
 	} else {
 		bw.Reset(f)

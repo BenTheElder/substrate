@@ -50,7 +50,8 @@ func actorBooking(memoryBytes int64) int64 {
 
 // archiveDir archives srcDir to tarPath. When the pod can lend the whole
 // directory, the archive goes to the page cache without a write-behind, and
-// the loan comes back once it's on disk. Otherwise its dirty pages are bounded.
+// the loan comes back once it's on disk. Otherwise its dirty pages are bounded
+// and it's dropped from the page cache as it's written.
 // On error the partial archive is removed and nothing stays borrowed.
 func (s *AteWorkerService) archiveDir(ctx context.Context, tarPath, srcDir string) error {
 	var size int64
@@ -62,7 +63,9 @@ func (s *AteWorkerService) archiveDir(ctx context.Context, tarPath, srcDir strin
 		}
 	}
 	if !lent {
-		return tarutil.CreateWithRoot(ctx, tarPath, srcDir)
+		// without the memory to keep it cached, keep it out of the page cache
+		// too, so it doesn't push out the snapshot a local resume reads
+		return tarutil.CreateWithRoot(ctx, tarPath, srcDir, tarutil.DropCache())
 	}
 	if err := tarutil.CreateWithRoot(ctx, tarPath, srcDir, tarutil.WriteBehind(0)); err != nil {
 		// create has closed it, so unlinking drops its dirty pages without
