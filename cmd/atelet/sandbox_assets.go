@@ -645,6 +645,13 @@ func writeSandboxRecord(actorUID string, rec *sandboxAssetsRecord) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return wrapFileSystemErr("while creating actor dir", err)
 	}
+	// Replacing a file by rename makes ext4 write the new one out first, which
+	// waits behind whatever the disk is busy writing. A restore on the same
+	// node usually writes the same record, so leave an unchanged one alone.
+	// https://github.com/torvalds/linux/blob/v6.12/fs/ext4/namei.c#L3869-L3870
+	if old, err := os.ReadFile(path); err == nil && bytes.Equal(old, data) {
+		return nil
+	}
 	if err := atomicfile.Write(path, data, 0o600); err != nil {
 		return wrapFileSystemErr("while writing sandbox record", err)
 	}
