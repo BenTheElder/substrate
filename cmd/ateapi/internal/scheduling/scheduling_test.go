@@ -17,6 +17,7 @@ package scheduling
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"testing"
 
@@ -536,8 +537,12 @@ type fleet []*ateapi.Worker
 
 func (f fleet) Workers() ([]*ateapi.Worker, error) { return f, nil }
 
+// liveFleet is a fleet a test can change between Schedule calls.
+type liveFleet struct{ fleet }
+
 func worker(pod, class, node string, lbls map[string]string, opts ...func(*ateapi.Worker)) *ateapi.Worker {
 	w := &ateapi.Worker{
+		Metadata:  &ateapi.ResourceMetadata{Name: pod},
 		WorkerPod: pod,
 		NodeName:  node,
 		Labels:    lbls,
@@ -712,6 +717,61 @@ func TestSchedulePowerOfTwoChoicesShiftedSecondSample(t *testing.T) {
 	}
 	if got.GetWorkerPod() != "w-2" {
 		t.Fatalf("Schedule() = %q, want %q", got.GetWorkerPod(), "w-2")
+	}
+}
+
+func TestScheduleRotatesThroughWorkers(t *testing.T) {
+	f := fleet{
+		worker("w-0", "gvisor", "node-a", nil, withMaxActors(4)),
+		worker("w-1", "gvisor", "node-b", nil, withMaxActors(4)),
+		worker("w-2", "gvisor", "node-c", nil, withMaxActors(4), assigned("demo", "a")),
+	}
+	s := New(f, WithIntn(firstIntn))
+	// The first pick is power of two choices over all three; after that each
+	// pick goes to the worker picked least recently, busy or not.
+	for i, want := range []string{"w-0", "w-1", "w-2", "w-0", "w-1"} {
+		got, err := s.Schedule(context.Background(), Constraints{})
+		if err != nil {
+			t.Fatalf("Schedule() #%d error = %v", i, err)
+		}
+		if got.GetWorkerPod() != want {
+			t.Fatalf("Schedule() #%d = %q, want %q", i, got.GetWorkerPod(), want)
+		}
+	}
+}
+
+func TestSchedulePrefersNewWorker(t *testing.T) {
+	f := &liveFleet{fleet{
+		worker("w-0", "gvisor", "node-a", nil, withMaxActors(4)),
+		worker("w-1", "gvisor", "node-b", nil, withMaxActors(4)),
+	}}
+	s := New(f, WithIntn(firstIntn))
+	for range 3 {
+		if _, err := s.Schedule(context.Background(), Constraints{}); err != nil {
+			t.Fatalf("Schedule() error = %v", err)
+		}
+	}
+	f.fleet = append(f.fleet, worker("w-new", "gvisor", "node-c", nil, withMaxActors(4)))
+	got, err := s.Schedule(context.Background(), Constraints{})
+	if err != nil {
+		t.Fatalf("Schedule() error = %v", err)
+	}
+	if got.GetWorkerPod() != "w-new" {
+		t.Fatalf("Schedule() = %q, want %q", got.GetWorkerPod(), "w-new")
+	}
+}
+
+func TestScheduleForgetsDeletedWorkers(t *testing.T) {
+	f := &liveFleet{}
+	s := New(f, WithIntn(firstIntn)).(*scheduler)
+	for i := range 10 {
+		f.fleet = fleet{worker(fmt.Sprintf("w-%d", i), "gvisor", "node-a", nil)}
+		if _, err := s.Schedule(context.Background(), Constraints{}); err != nil {
+			t.Fatalf("Schedule() error = %v", err)
+		}
+	}
+	if got := len(s.placed); got > 2 {
+		t.Fatalf("scheduler remembers %d workers, want at most 2 for a fleet of 1", got)
 	}
 }
 

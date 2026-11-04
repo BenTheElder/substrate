@@ -23,6 +23,7 @@ import (
 	"math/bits"
 	"math/rand"
 	"slices"
+	"sync"
 
 	"go.ate.dev/substrate/api/ateapi/v1"
 	"go.ate.dev/substrate/internal/hardware"
@@ -96,30 +97,41 @@ type scheduler struct {
 	// intn returns a uniformly distributed random value in [0,n).
 	// Defaults to the global math/rand source
 	intn func(n int) int
+
+	mu sync.Mutex
+	// placed maps a worker name to the sequence number of its last pick.
+	// in memory and per replica, so a restart or another replica only
+	// loosens the rotation
+	placed map[string]uint64
+	seq    uint64
 }
 
 // Option configures the Scheduler returned by New.
 type Option func(*scheduler)
 
 // WithIntn overrides the random source used to sample candidate pairs: when
-// n >= 2 candidates exist, Schedule calls intn(n) and then intn(n-1).
+// n >= 2 candidates tie for least recently picked, Schedule calls intn(n) and
+// then intn(n-1).
 func WithIntn(intn func(n int) int) Option {
 	return func(s *scheduler) { s.intn = intn }
 }
 
 // New returns a Scheduler placing onto workers reported by source.
 func New(source WorkerSource, opts ...Option) Scheduler {
-	s := &scheduler{source: source, intn: rand.Intn}
+	s := &scheduler{source: source, intn: rand.Intn, placed: map[string]uint64{}}
 	for _, opt := range opts {
 		opt(s)
 	}
 	return s
 }
 
-// Schedule filters the fleet for eligible candidates with room, samples two at
-// random (power of two choices), and returns the less-loaded one, where load is
-// the higher of actor-slot and compute-resource utilization. Spreading across
-// the warm pool avoids hotspots until autoscaling reclaims idle workers.
+// Schedule filters the fleet for eligible candidates with room and returns the
+// one it picked least recently. Suspended actors stay bound to the node they
+// were placed on, so we spread placements even when few actors are running.
+// Among candidates never picked, it
+// samples two at random (power of two choices) and returns the less-loaded
+// one, where load is the higher of actor-slot and compute-resource
+// utilization.
 func (s *scheduler) Schedule(ctx context.Context, constraints Constraints) (*ateapi.Worker, error) {
 	workers, err := s.source.Workers()
 	if err != nil {
@@ -143,19 +155,57 @@ func (s *scheduler) Schedule(ctx context.Context, constraints Constraints) (*ate
 	if len(candidates) == 0 {
 		return nil, ErrNoCapacity
 	}
-	if len(candidates) == 1 {
-		return candidates[0].worker, nil
-	}
 
+	// record the pick before the bind commits, so concurrent picks rotate
+	// through workers
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	picked := s.pick(s.leastRecent(candidates))
+	s.seq++
+	s.placed[picked.GetMetadata().GetName()] = s.seq
+	if len(s.placed) > 2*len(workers) {
+		s.prune(workers)
+	}
+	return picked, nil
+}
+
+// leastRecent filters candidates in place to those picked least recently.
+func (s *scheduler) leastRecent(candidates []candidate) []candidate {
+	oldest := uint64(math.MaxUint64)
+	for _, c := range candidates {
+		oldest = min(oldest, s.placed[c.worker.GetMetadata().GetName()])
+	}
+	return slices.DeleteFunc(candidates, func(c candidate) bool {
+		return s.placed[c.worker.GetMetadata().GetName()] != oldest
+	})
+}
+
+// pick returns the less loaded of two random candidates.
+func (s *scheduler) pick(candidates []candidate) *ateapi.Worker {
+	if len(candidates) == 1 {
+		return candidates[0].worker
+	}
 	i := s.intn(len(candidates))
 	j := s.intn(len(candidates) - 1)
 	if j >= i {
 		j++
 	}
 	if lessLoaded(&candidates[j], &candidates[i]) {
-		return candidates[j].worker, nil
+		return candidates[j].worker
 	}
-	return candidates[i].worker, nil
+	return candidates[i].worker
+}
+
+// prune forgets workers no longer in the fleet.
+func (s *scheduler) prune(workers []*ateapi.Worker) {
+	live := make(map[string]uint64, len(workers))
+	for _, w := range workers {
+		name := w.GetMetadata().GetName()
+		if seq, ok := s.placed[name]; ok {
+			live[name] = seq
+		}
+	}
+	s.placed = live
 }
 
 // candidate pairs an eligible worker with its cached compute utilization.
