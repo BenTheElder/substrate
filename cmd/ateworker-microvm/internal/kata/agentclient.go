@@ -215,6 +215,37 @@ func (a *AgentClient) AddARPNeighbors(ctx context.Context, neighbors []*agentpb.
 	return nil
 }
 
+// ExecProcess spawns a new process inside an existing container. Mirrors
+// grpc.AgentService/ExecProcess (returns google.protobuf.Empty; kata-agent does
+// not return the in-container PID).
+func (a *AgentClient) ExecProcess(ctx context.Context, req *agentpb.ExecProcessRequest) error {
+	if err := a.client.Call(ctx, "grpc.AgentService", "ExecProcess", req, &emptypb.Empty{}); err != nil {
+		return fmt.Errorf("agent ExecProcess: %w", err)
+	}
+	return nil
+}
+
+// WriteStdin writes data to an exec'd process's stdin and returns the number of
+// bytes accepted. Mirrors grpc.AgentService/WriteStdin.
+func (a *AgentClient) WriteStdin(ctx context.Context, containerID, execID string, data []byte) (uint32, error) {
+	resp := &agentpb.WriteStreamResponse{}
+	req := &agentpb.WriteStreamRequest{ContainerId: containerID, ExecId: execID, Data: data}
+	if err := a.client.Call(ctx, "grpc.AgentService", "WriteStdin", req, resp); err != nil {
+		return 0, fmt.Errorf("agent WriteStdin: %w", err)
+	}
+	return resp.GetLen(), nil
+}
+
+// CloseStdin closes stdin (sends EOF) for an exec'd process. Mirrors
+// grpc.AgentService/CloseStdin.
+func (a *AgentClient) CloseStdin(ctx context.Context, containerID, execID string) error {
+	req := &agentpb.CloseStdinRequest{ContainerId: containerID, ExecId: execID}
+	if err := a.client.Call(ctx, "grpc.AgentService", "CloseStdin", req, &emptypb.Empty{}); err != nil {
+		return fmt.Errorf("agent CloseStdin: %w", err)
+	}
+	return nil
+}
+
 // SignalProcess sends signal to a process in the guest. Targeting the container's
 // init process (ExecId == ContainerId) delivers the signal to the workload; an
 // empty execID delivers it to ALL processes in the container. Used during
