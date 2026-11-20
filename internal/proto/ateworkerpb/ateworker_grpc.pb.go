@@ -39,6 +39,13 @@ const (
 	Worker_GetWorkloadStats_FullMethodName       = "/ateworker.Worker/GetWorkloadStats"
 	Worker_GetActiveWorkloadStats_FullMethodName = "/ateworker.Worker/GetActiveWorkloadStats"
 	Worker_TerminateWorkload_FullMethodName      = "/ateworker.Worker/TerminateWorkload"
+	Worker_StartProcess_FullMethodName           = "/ateworker.Worker/StartProcess"
+	Worker_GetProcess_FullMethodName             = "/ateworker.Worker/GetProcess"
+	Worker_StreamProcessOutput_FullMethodName    = "/ateworker.Worker/StreamProcessOutput"
+	Worker_WriteProcessInput_FullMethodName      = "/ateworker.Worker/WriteProcessInput"
+	Worker_SignalProcess_FullMethodName          = "/ateworker.Worker/SignalProcess"
+	Worker_ReadFile_FullMethodName               = "/ateworker.Worker/ReadFile"
+	Worker_WriteFile_FullMethodName              = "/ateworker.Worker/WriteFile"
 )
 
 // WorkerClient is the client API for Worker service.
@@ -125,6 +132,22 @@ type WorkerClient interface {
 	// TerminateWorkload stops and deletes container workloads and cleans up
 	// network and bundle overlays on the worker.
 	TerminateWorkload(ctx context.Context, in *TerminateWorkloadRequest, opts ...grpc.CallOption) (*TerminateWorkloadResponse, error)
+	// StartProcess launches a process inside an actor container and returns its
+	// Process state immediately.
+	StartProcess(ctx context.Context, in *StartProcessRequest, opts ...grpc.CallOption) (*Process, error)
+	// GetProcess returns the current state of a process started by StartProcess.
+	GetProcess(ctx context.Context, in *GetProcessRequest, opts ...grpc.CallOption) (*Process, error)
+	// StreamProcessOutput streams stdout and stderr from a process, optionally
+	// following until exit and ending with the final Process message.
+	StreamProcessOutput(ctx context.Context, in *StreamProcessOutputRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ProcessOutput], error)
+	// WriteProcessInput streams stdin bytes to a process started with stdin enabled.
+	WriteProcessInput(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[WriteProcessInputRequest, WriteProcessInputResponse], error)
+	// SignalProcess delivers a POSIX signal to a process and its process group.
+	SignalProcess(ctx context.Context, in *SignalProcessRequest, opts ...grpc.CallOption) (*Process, error)
+	// ReadFile streams raw bytes of a file inside an actor container.
+	ReadFile(ctx context.Context, in *ReadFileRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ReadFileResponse], error)
+	// WriteFile streams raw bytes to a file inside an actor container.
+	WriteFile(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[WriteFileRequest, WriteFileResponse], error)
 }
 
 type workerClient struct {
@@ -194,6 +217,100 @@ func (c *workerClient) TerminateWorkload(ctx context.Context, in *TerminateWorkl
 	}
 	return out, nil
 }
+
+func (c *workerClient) StartProcess(ctx context.Context, in *StartProcessRequest, opts ...grpc.CallOption) (*Process, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Process)
+	err := c.cc.Invoke(ctx, Worker_StartProcess_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *workerClient) GetProcess(ctx context.Context, in *GetProcessRequest, opts ...grpc.CallOption) (*Process, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Process)
+	err := c.cc.Invoke(ctx, Worker_GetProcess_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *workerClient) StreamProcessOutput(ctx context.Context, in *StreamProcessOutputRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ProcessOutput], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Worker_ServiceDesc.Streams[0], Worker_StreamProcessOutput_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[StreamProcessOutputRequest, ProcessOutput]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Worker_StreamProcessOutputClient = grpc.ServerStreamingClient[ProcessOutput]
+
+func (c *workerClient) WriteProcessInput(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[WriteProcessInputRequest, WriteProcessInputResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Worker_ServiceDesc.Streams[1], Worker_WriteProcessInput_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[WriteProcessInputRequest, WriteProcessInputResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Worker_WriteProcessInputClient = grpc.ClientStreamingClient[WriteProcessInputRequest, WriteProcessInputResponse]
+
+func (c *workerClient) SignalProcess(ctx context.Context, in *SignalProcessRequest, opts ...grpc.CallOption) (*Process, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Process)
+	err := c.cc.Invoke(ctx, Worker_SignalProcess_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *workerClient) ReadFile(ctx context.Context, in *ReadFileRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ReadFileResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Worker_ServiceDesc.Streams[2], Worker_ReadFile_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[ReadFileRequest, ReadFileResponse]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Worker_ReadFileClient = grpc.ServerStreamingClient[ReadFileResponse]
+
+func (c *workerClient) WriteFile(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[WriteFileRequest, WriteFileResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Worker_ServiceDesc.Streams[3], Worker_WriteFile_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[WriteFileRequest, WriteFileResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Worker_WriteFileClient = grpc.ClientStreamingClient[WriteFileRequest, WriteFileResponse]
 
 // WorkerServer is the server API for Worker service.
 // All implementations must embed UnimplementedWorkerServer
@@ -279,6 +396,22 @@ type WorkerServer interface {
 	// TerminateWorkload stops and deletes container workloads and cleans up
 	// network and bundle overlays on the worker.
 	TerminateWorkload(context.Context, *TerminateWorkloadRequest) (*TerminateWorkloadResponse, error)
+	// StartProcess launches a process inside an actor container and returns its
+	// Process state immediately.
+	StartProcess(context.Context, *StartProcessRequest) (*Process, error)
+	// GetProcess returns the current state of a process started by StartProcess.
+	GetProcess(context.Context, *GetProcessRequest) (*Process, error)
+	// StreamProcessOutput streams stdout and stderr from a process, optionally
+	// following until exit and ending with the final Process message.
+	StreamProcessOutput(*StreamProcessOutputRequest, grpc.ServerStreamingServer[ProcessOutput]) error
+	// WriteProcessInput streams stdin bytes to a process started with stdin enabled.
+	WriteProcessInput(grpc.ClientStreamingServer[WriteProcessInputRequest, WriteProcessInputResponse]) error
+	// SignalProcess delivers a POSIX signal to a process and its process group.
+	SignalProcess(context.Context, *SignalProcessRequest) (*Process, error)
+	// ReadFile streams raw bytes of a file inside an actor container.
+	ReadFile(*ReadFileRequest, grpc.ServerStreamingServer[ReadFileResponse]) error
+	// WriteFile streams raw bytes to a file inside an actor container.
+	WriteFile(grpc.ClientStreamingServer[WriteFileRequest, WriteFileResponse]) error
 	mustEmbedUnimplementedWorkerServer()
 }
 
@@ -306,6 +439,27 @@ func (UnimplementedWorkerServer) GetActiveWorkloadStats(context.Context, *GetAct
 }
 func (UnimplementedWorkerServer) TerminateWorkload(context.Context, *TerminateWorkloadRequest) (*TerminateWorkloadResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method TerminateWorkload not implemented")
+}
+func (UnimplementedWorkerServer) StartProcess(context.Context, *StartProcessRequest) (*Process, error) {
+	return nil, status.Error(codes.Unimplemented, "method StartProcess not implemented")
+}
+func (UnimplementedWorkerServer) GetProcess(context.Context, *GetProcessRequest) (*Process, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetProcess not implemented")
+}
+func (UnimplementedWorkerServer) StreamProcessOutput(*StreamProcessOutputRequest, grpc.ServerStreamingServer[ProcessOutput]) error {
+	return status.Error(codes.Unimplemented, "method StreamProcessOutput not implemented")
+}
+func (UnimplementedWorkerServer) WriteProcessInput(grpc.ClientStreamingServer[WriteProcessInputRequest, WriteProcessInputResponse]) error {
+	return status.Error(codes.Unimplemented, "method WriteProcessInput not implemented")
+}
+func (UnimplementedWorkerServer) SignalProcess(context.Context, *SignalProcessRequest) (*Process, error) {
+	return nil, status.Error(codes.Unimplemented, "method SignalProcess not implemented")
+}
+func (UnimplementedWorkerServer) ReadFile(*ReadFileRequest, grpc.ServerStreamingServer[ReadFileResponse]) error {
+	return status.Error(codes.Unimplemented, "method ReadFile not implemented")
+}
+func (UnimplementedWorkerServer) WriteFile(grpc.ClientStreamingServer[WriteFileRequest, WriteFileResponse]) error {
+	return status.Error(codes.Unimplemented, "method WriteFile not implemented")
 }
 func (UnimplementedWorkerServer) mustEmbedUnimplementedWorkerServer() {}
 func (UnimplementedWorkerServer) testEmbeddedByValue()                {}
@@ -436,6 +590,96 @@ func _Worker_TerminateWorkload_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Worker_StartProcess_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StartProcessRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkerServer).StartProcess(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Worker_StartProcess_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkerServer).StartProcess(ctx, req.(*StartProcessRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Worker_GetProcess_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetProcessRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkerServer).GetProcess(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Worker_GetProcess_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkerServer).GetProcess(ctx, req.(*GetProcessRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Worker_StreamProcessOutput_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(StreamProcessOutputRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(WorkerServer).StreamProcessOutput(m, &grpc.GenericServerStream[StreamProcessOutputRequest, ProcessOutput]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Worker_StreamProcessOutputServer = grpc.ServerStreamingServer[ProcessOutput]
+
+func _Worker_WriteProcessInput_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(WorkerServer).WriteProcessInput(&grpc.GenericServerStream[WriteProcessInputRequest, WriteProcessInputResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Worker_WriteProcessInputServer = grpc.ClientStreamingServer[WriteProcessInputRequest, WriteProcessInputResponse]
+
+func _Worker_SignalProcess_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SignalProcessRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkerServer).SignalProcess(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Worker_SignalProcess_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkerServer).SignalProcess(ctx, req.(*SignalProcessRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Worker_ReadFile_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(ReadFileRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(WorkerServer).ReadFile(m, &grpc.GenericServerStream[ReadFileRequest, ReadFileResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Worker_ReadFileServer = grpc.ServerStreamingServer[ReadFileResponse]
+
+func _Worker_WriteFile_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(WorkerServer).WriteFile(&grpc.GenericServerStream[WriteFileRequest, WriteFileResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Worker_WriteFileServer = grpc.ClientStreamingServer[WriteFileRequest, WriteFileResponse]
+
 // Worker_ServiceDesc is the grpc.ServiceDesc for Worker service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -467,7 +711,40 @@ var Worker_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "TerminateWorkload",
 			Handler:    _Worker_TerminateWorkload_Handler,
 		},
+		{
+			MethodName: "StartProcess",
+			Handler:    _Worker_StartProcess_Handler,
+		},
+		{
+			MethodName: "GetProcess",
+			Handler:    _Worker_GetProcess_Handler,
+		},
+		{
+			MethodName: "SignalProcess",
+			Handler:    _Worker_SignalProcess_Handler,
+		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "StreamProcessOutput",
+			Handler:       _Worker_StreamProcessOutput_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "WriteProcessInput",
+			Handler:       _Worker_WriteProcessInput_Handler,
+			ClientStreams: true,
+		},
+		{
+			StreamName:    "ReadFile",
+			Handler:       _Worker_ReadFile_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "WriteFile",
+			Handler:       _Worker_WriteFile_Handler,
+			ClientStreams: true,
+		},
+	},
 	Metadata: "internal/proto/ateworkerpb/ateworker.proto",
 }

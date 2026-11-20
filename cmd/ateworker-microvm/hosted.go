@@ -27,6 +27,7 @@ import (
 	"go.ate.dev/substrate/internal/apierror"
 	"go.ate.dev/substrate/internal/ateworker/actornet"
 	"go.ate.dev/substrate/internal/ateworker/cgroup"
+	"go.ate.dev/substrate/internal/ateworker/procman"
 	"go.ate.dev/substrate/internal/atunnel/ingress"
 	"go.ate.dev/substrate/internal/netns"
 	"go.ate.dev/substrate/internal/resources"
@@ -44,6 +45,8 @@ type hostedActor struct {
 	vm *runningActor
 	// Nil when no guest stats connection is available.
 	guest *guestStatsTarget
+	// Nil until the guest agent is ready for exec/file RPCs.
+	procs *procman.Manager
 
 	// usage is this activation's epoch, CPU baseline, and latest sample.
 	// Immutable after admission.

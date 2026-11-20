@@ -23,6 +23,8 @@ package ateworkerpb
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	durationpb "google.golang.org/protobuf/types/known/durationpb"
+	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
@@ -154,6 +156,186 @@ func (x StatsSource) Number() protoreflect.EnumNumber {
 // Deprecated: Use StatsSource.Descriptor instead.
 func (StatsSource) EnumDescriptor() ([]byte, []int) {
 	return file_internal_proto_ateworkerpb_ateworker_proto_rawDescGZIP(), []int{1}
+}
+
+type ProcessState int32
+
+const (
+	ProcessState_PROCESS_STATE_UNSPECIFIED ProcessState = 0
+	ProcessState_PROCESS_STATE_RUNNING     ProcessState = 1
+	ProcessState_PROCESS_STATE_EXITED      ProcessState = 2
+)
+
+// Enum value maps for ProcessState.
+var (
+	ProcessState_name = map[int32]string{
+		0: "PROCESS_STATE_UNSPECIFIED",
+		1: "PROCESS_STATE_RUNNING",
+		2: "PROCESS_STATE_EXITED",
+	}
+	ProcessState_value = map[string]int32{
+		"PROCESS_STATE_UNSPECIFIED": 0,
+		"PROCESS_STATE_RUNNING":     1,
+		"PROCESS_STATE_EXITED":      2,
+	}
+)
+
+func (x ProcessState) Enum() *ProcessState {
+	p := new(ProcessState)
+	*p = x
+	return p
+}
+
+func (x ProcessState) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ProcessState) Descriptor() protoreflect.EnumDescriptor {
+	return file_internal_proto_ateworkerpb_ateworker_proto_enumTypes[2].Descriptor()
+}
+
+func (ProcessState) Type() protoreflect.EnumType {
+	return &file_internal_proto_ateworkerpb_ateworker_proto_enumTypes[2]
+}
+
+func (x ProcessState) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ProcessState.Descriptor instead.
+func (ProcessState) EnumDescriptor() ([]byte, []int) {
+	return file_internal_proto_ateworkerpb_ateworker_proto_rawDescGZIP(), []int{2}
+}
+
+// POSIX signal numbers (Linux x86/arm64).
+type Signal int32
+
+const (
+	Signal_SIGNAL_UNSPECIFIED Signal = 0
+	Signal_SIGNAL_HUP         Signal = 1
+	Signal_SIGNAL_INT         Signal = 2
+	Signal_SIGNAL_QUIT        Signal = 3
+	Signal_SIGNAL_ILL         Signal = 4
+	Signal_SIGNAL_TRAP        Signal = 5
+	Signal_SIGNAL_ABRT        Signal = 6
+	Signal_SIGNAL_BUS         Signal = 7
+	Signal_SIGNAL_FPE         Signal = 8
+	Signal_SIGNAL_KILL        Signal = 9
+	Signal_SIGNAL_USR1        Signal = 10
+	Signal_SIGNAL_SEGV        Signal = 11
+	Signal_SIGNAL_USR2        Signal = 12
+	Signal_SIGNAL_PIPE        Signal = 13
+	Signal_SIGNAL_ALRM        Signal = 14
+	Signal_SIGNAL_TERM        Signal = 15
+	Signal_SIGNAL_CHLD        Signal = 17
+	Signal_SIGNAL_CONT        Signal = 18
+	Signal_SIGNAL_STOP        Signal = 19
+	Signal_SIGNAL_TSTP        Signal = 20
+	Signal_SIGNAL_TTIN        Signal = 21
+	Signal_SIGNAL_TTOU        Signal = 22
+	Signal_SIGNAL_URG         Signal = 23
+	Signal_SIGNAL_XCPU        Signal = 24
+	Signal_SIGNAL_XFSZ        Signal = 25
+	Signal_SIGNAL_VTALRM      Signal = 26
+	Signal_SIGNAL_PROF        Signal = 27
+	Signal_SIGNAL_WINCH       Signal = 28
+	Signal_SIGNAL_IO          Signal = 29
+	Signal_SIGNAL_SYS         Signal = 31
+)
+
+// Enum value maps for Signal.
+var (
+	Signal_name = map[int32]string{
+		0:  "SIGNAL_UNSPECIFIED",
+		1:  "SIGNAL_HUP",
+		2:  "SIGNAL_INT",
+		3:  "SIGNAL_QUIT",
+		4:  "SIGNAL_ILL",
+		5:  "SIGNAL_TRAP",
+		6:  "SIGNAL_ABRT",
+		7:  "SIGNAL_BUS",
+		8:  "SIGNAL_FPE",
+		9:  "SIGNAL_KILL",
+		10: "SIGNAL_USR1",
+		11: "SIGNAL_SEGV",
+		12: "SIGNAL_USR2",
+		13: "SIGNAL_PIPE",
+		14: "SIGNAL_ALRM",
+		15: "SIGNAL_TERM",
+		17: "SIGNAL_CHLD",
+		18: "SIGNAL_CONT",
+		19: "SIGNAL_STOP",
+		20: "SIGNAL_TSTP",
+		21: "SIGNAL_TTIN",
+		22: "SIGNAL_TTOU",
+		23: "SIGNAL_URG",
+		24: "SIGNAL_XCPU",
+		25: "SIGNAL_XFSZ",
+		26: "SIGNAL_VTALRM",
+		27: "SIGNAL_PROF",
+		28: "SIGNAL_WINCH",
+		29: "SIGNAL_IO",
+		31: "SIGNAL_SYS",
+	}
+	Signal_value = map[string]int32{
+		"SIGNAL_UNSPECIFIED": 0,
+		"SIGNAL_HUP":         1,
+		"SIGNAL_INT":         2,
+		"SIGNAL_QUIT":        3,
+		"SIGNAL_ILL":         4,
+		"SIGNAL_TRAP":        5,
+		"SIGNAL_ABRT":        6,
+		"SIGNAL_BUS":         7,
+		"SIGNAL_FPE":         8,
+		"SIGNAL_KILL":        9,
+		"SIGNAL_USR1":        10,
+		"SIGNAL_SEGV":        11,
+		"SIGNAL_USR2":        12,
+		"SIGNAL_PIPE":        13,
+		"SIGNAL_ALRM":        14,
+		"SIGNAL_TERM":        15,
+		"SIGNAL_CHLD":        17,
+		"SIGNAL_CONT":        18,
+		"SIGNAL_STOP":        19,
+		"SIGNAL_TSTP":        20,
+		"SIGNAL_TTIN":        21,
+		"SIGNAL_TTOU":        22,
+		"SIGNAL_URG":         23,
+		"SIGNAL_XCPU":        24,
+		"SIGNAL_XFSZ":        25,
+		"SIGNAL_VTALRM":      26,
+		"SIGNAL_PROF":        27,
+		"SIGNAL_WINCH":       28,
+		"SIGNAL_IO":          29,
+		"SIGNAL_SYS":         31,
+	}
+)
+
+func (x Signal) Enum() *Signal {
+	p := new(Signal)
+	*p = x
+	return p
+}
+
+func (x Signal) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (Signal) Descriptor() protoreflect.EnumDescriptor {
+	return file_internal_proto_ateworkerpb_ateworker_proto_enumTypes[3].Descriptor()
+}
+
+func (Signal) Type() protoreflect.EnumType {
+	return &file_internal_proto_ateworkerpb_ateworker_proto_enumTypes[3]
+}
+
+func (x Signal) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use Signal.Descriptor instead.
+func (Signal) EnumDescriptor() ([]byte, []int) {
+	return file_internal_proto_ateworkerpb_ateworker_proto_rawDescGZIP(), []int{3}
 }
 
 // ActorDirs is the set of per-actor directories atelet prepares on the volume
@@ -2045,11 +2227,833 @@ func (x *GetActiveWorkloadStatsResponse) GetSamples() []*WorkloadStatsSample {
 	return nil
 }
 
+type Process struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ProcessId     string                 `protobuf:"bytes,1,opt,name=process_id,json=processId,proto3" json:"process_id,omitempty"`
+	Command       []string               `protobuf:"bytes,2,rep,name=command,proto3" json:"command,omitempty"`
+	Pid           int32                  `protobuf:"varint,3,opt,name=pid,proto3" json:"pid,omitempty"`
+	State         ProcessState           `protobuf:"varint,4,opt,name=state,proto3,enum=ateworker.ProcessState" json:"state,omitempty"`
+	ExitCode      int32                  `protobuf:"varint,5,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
+	StartedAt     *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
+	FinishedAt    *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=finished_at,json=finishedAt,proto3" json:"finished_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Process) Reset() {
+	*x = Process{}
+	mi := &file_internal_proto_ateworkerpb_ateworker_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Process) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Process) ProtoMessage() {}
+
+func (x *Process) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_proto_ateworkerpb_ateworker_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Process.ProtoReflect.Descriptor instead.
+func (*Process) Descriptor() ([]byte, []int) {
+	return file_internal_proto_ateworkerpb_ateworker_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *Process) GetProcessId() string {
+	if x != nil {
+		return x.ProcessId
+	}
+	return ""
+}
+
+func (x *Process) GetCommand() []string {
+	if x != nil {
+		return x.Command
+	}
+	return nil
+}
+
+func (x *Process) GetPid() int32 {
+	if x != nil {
+		return x.Pid
+	}
+	return 0
+}
+
+func (x *Process) GetState() ProcessState {
+	if x != nil {
+		return x.State
+	}
+	return ProcessState_PROCESS_STATE_UNSPECIFIED
+}
+
+func (x *Process) GetExitCode() int32 {
+	if x != nil {
+		return x.ExitCode
+	}
+	return 0
+}
+
+func (x *Process) GetStartedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.StartedAt
+	}
+	return nil
+}
+
+func (x *Process) GetFinishedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.FinishedAt
+	}
+	return nil
+}
+
+type StartProcessRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ActorUid      string                 `protobuf:"bytes,1,opt,name=actor_uid,json=actorUid,proto3" json:"actor_uid,omitempty"`
+	ContainerName string                 `protobuf:"bytes,2,opt,name=container_name,json=containerName,proto3" json:"container_name,omitempty"`
+	Command       []string               `protobuf:"bytes,3,rep,name=command,proto3" json:"command,omitempty"`
+	Cwd           string                 `protobuf:"bytes,4,opt,name=cwd,proto3" json:"cwd,omitempty"`
+	Env           map[string]string      `protobuf:"bytes,5,rep,name=env,proto3" json:"env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Stdin         bool                   `protobuf:"varint,6,opt,name=stdin,proto3" json:"stdin,omitempty"`
+	Timeout       *durationpb.Duration   `protobuf:"bytes,7,opt,name=timeout,proto3" json:"timeout,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StartProcessRequest) Reset() {
+	*x = StartProcessRequest{}
+	mi := &file_internal_proto_ateworkerpb_ateworker_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StartProcessRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StartProcessRequest) ProtoMessage() {}
+
+func (x *StartProcessRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_proto_ateworkerpb_ateworker_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StartProcessRequest.ProtoReflect.Descriptor instead.
+func (*StartProcessRequest) Descriptor() ([]byte, []int) {
+	return file_internal_proto_ateworkerpb_ateworker_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *StartProcessRequest) GetActorUid() string {
+	if x != nil {
+		return x.ActorUid
+	}
+	return ""
+}
+
+func (x *StartProcessRequest) GetContainerName() string {
+	if x != nil {
+		return x.ContainerName
+	}
+	return ""
+}
+
+func (x *StartProcessRequest) GetCommand() []string {
+	if x != nil {
+		return x.Command
+	}
+	return nil
+}
+
+func (x *StartProcessRequest) GetCwd() string {
+	if x != nil {
+		return x.Cwd
+	}
+	return ""
+}
+
+func (x *StartProcessRequest) GetEnv() map[string]string {
+	if x != nil {
+		return x.Env
+	}
+	return nil
+}
+
+func (x *StartProcessRequest) GetStdin() bool {
+	if x != nil {
+		return x.Stdin
+	}
+	return false
+}
+
+func (x *StartProcessRequest) GetTimeout() *durationpb.Duration {
+	if x != nil {
+		return x.Timeout
+	}
+	return nil
+}
+
+type GetProcessRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ActorUid      string                 `protobuf:"bytes,1,opt,name=actor_uid,json=actorUid,proto3" json:"actor_uid,omitempty"`
+	ProcessId     string                 `protobuf:"bytes,2,opt,name=process_id,json=processId,proto3" json:"process_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetProcessRequest) Reset() {
+	*x = GetProcessRequest{}
+	mi := &file_internal_proto_ateworkerpb_ateworker_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetProcessRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetProcessRequest) ProtoMessage() {}
+
+func (x *GetProcessRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_proto_ateworkerpb_ateworker_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetProcessRequest.ProtoReflect.Descriptor instead.
+func (*GetProcessRequest) Descriptor() ([]byte, []int) {
+	return file_internal_proto_ateworkerpb_ateworker_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *GetProcessRequest) GetActorUid() string {
+	if x != nil {
+		return x.ActorUid
+	}
+	return ""
+}
+
+func (x *GetProcessRequest) GetProcessId() string {
+	if x != nil {
+		return x.ProcessId
+	}
+	return ""
+}
+
+type StreamProcessOutputRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ActorUid      string                 `protobuf:"bytes,1,opt,name=actor_uid,json=actorUid,proto3" json:"actor_uid,omitempty"`
+	ProcessId     string                 `protobuf:"bytes,2,opt,name=process_id,json=processId,proto3" json:"process_id,omitempty"`
+	StdoutOffset  int64                  `protobuf:"varint,3,opt,name=stdout_offset,json=stdoutOffset,proto3" json:"stdout_offset,omitempty"`
+	StderrOffset  int64                  `protobuf:"varint,4,opt,name=stderr_offset,json=stderrOffset,proto3" json:"stderr_offset,omitempty"`
+	Follow        bool                   `protobuf:"varint,5,opt,name=follow,proto3" json:"follow,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StreamProcessOutputRequest) Reset() {
+	*x = StreamProcessOutputRequest{}
+	mi := &file_internal_proto_ateworkerpb_ateworker_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StreamProcessOutputRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StreamProcessOutputRequest) ProtoMessage() {}
+
+func (x *StreamProcessOutputRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_proto_ateworkerpb_ateworker_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StreamProcessOutputRequest.ProtoReflect.Descriptor instead.
+func (*StreamProcessOutputRequest) Descriptor() ([]byte, []int) {
+	return file_internal_proto_ateworkerpb_ateworker_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *StreamProcessOutputRequest) GetActorUid() string {
+	if x != nil {
+		return x.ActorUid
+	}
+	return ""
+}
+
+func (x *StreamProcessOutputRequest) GetProcessId() string {
+	if x != nil {
+		return x.ProcessId
+	}
+	return ""
+}
+
+func (x *StreamProcessOutputRequest) GetStdoutOffset() int64 {
+	if x != nil {
+		return x.StdoutOffset
+	}
+	return 0
+}
+
+func (x *StreamProcessOutputRequest) GetStderrOffset() int64 {
+	if x != nil {
+		return x.StderrOffset
+	}
+	return 0
+}
+
+func (x *StreamProcessOutputRequest) GetFollow() bool {
+	if x != nil {
+		return x.Follow
+	}
+	return false
+}
+
+type ProcessOutput struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Output:
+	//
+	//	*ProcessOutput_Stdout
+	//	*ProcessOutput_Stderr
+	//	*ProcessOutput_Exit
+	Output        isProcessOutput_Output `protobuf_oneof:"output"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProcessOutput) Reset() {
+	*x = ProcessOutput{}
+	mi := &file_internal_proto_ateworkerpb_ateworker_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProcessOutput) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProcessOutput) ProtoMessage() {}
+
+func (x *ProcessOutput) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_proto_ateworkerpb_ateworker_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProcessOutput.ProtoReflect.Descriptor instead.
+func (*ProcessOutput) Descriptor() ([]byte, []int) {
+	return file_internal_proto_ateworkerpb_ateworker_proto_rawDescGZIP(), []int{27}
+}
+
+func (x *ProcessOutput) GetOutput() isProcessOutput_Output {
+	if x != nil {
+		return x.Output
+	}
+	return nil
+}
+
+func (x *ProcessOutput) GetStdout() []byte {
+	if x != nil {
+		if x, ok := x.Output.(*ProcessOutput_Stdout); ok {
+			return x.Stdout
+		}
+	}
+	return nil
+}
+
+func (x *ProcessOutput) GetStderr() []byte {
+	if x != nil {
+		if x, ok := x.Output.(*ProcessOutput_Stderr); ok {
+			return x.Stderr
+		}
+	}
+	return nil
+}
+
+func (x *ProcessOutput) GetExit() *Process {
+	if x != nil {
+		if x, ok := x.Output.(*ProcessOutput_Exit); ok {
+			return x.Exit
+		}
+	}
+	return nil
+}
+
+type isProcessOutput_Output interface {
+	isProcessOutput_Output()
+}
+
+type ProcessOutput_Stdout struct {
+	Stdout []byte `protobuf:"bytes,1,opt,name=stdout,proto3,oneof"`
+}
+
+type ProcessOutput_Stderr struct {
+	Stderr []byte `protobuf:"bytes,2,opt,name=stderr,proto3,oneof"`
+}
+
+type ProcessOutput_Exit struct {
+	Exit *Process `protobuf:"bytes,3,opt,name=exit,proto3,oneof"`
+}
+
+func (*ProcessOutput_Stdout) isProcessOutput_Output() {}
+
+func (*ProcessOutput_Stderr) isProcessOutput_Output() {}
+
+func (*ProcessOutput_Exit) isProcessOutput_Output() {}
+
+type WriteProcessInputRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ActorUid      string                 `protobuf:"bytes,1,opt,name=actor_uid,json=actorUid,proto3" json:"actor_uid,omitempty"`
+	ProcessId     string                 `protobuf:"bytes,2,opt,name=process_id,json=processId,proto3" json:"process_id,omitempty"`
+	Data          []byte                 `protobuf:"bytes,3,opt,name=data,proto3" json:"data,omitempty"`
+	Close         bool                   `protobuf:"varint,4,opt,name=close,proto3" json:"close,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WriteProcessInputRequest) Reset() {
+	*x = WriteProcessInputRequest{}
+	mi := &file_internal_proto_ateworkerpb_ateworker_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WriteProcessInputRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WriteProcessInputRequest) ProtoMessage() {}
+
+func (x *WriteProcessInputRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_proto_ateworkerpb_ateworker_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WriteProcessInputRequest.ProtoReflect.Descriptor instead.
+func (*WriteProcessInputRequest) Descriptor() ([]byte, []int) {
+	return file_internal_proto_ateworkerpb_ateworker_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *WriteProcessInputRequest) GetActorUid() string {
+	if x != nil {
+		return x.ActorUid
+	}
+	return ""
+}
+
+func (x *WriteProcessInputRequest) GetProcessId() string {
+	if x != nil {
+		return x.ProcessId
+	}
+	return ""
+}
+
+func (x *WriteProcessInputRequest) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+func (x *WriteProcessInputRequest) GetClose() bool {
+	if x != nil {
+		return x.Close
+	}
+	return false
+}
+
+type WriteProcessInputResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	BytesWritten  int64                  `protobuf:"varint,1,opt,name=bytes_written,json=bytesWritten,proto3" json:"bytes_written,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WriteProcessInputResponse) Reset() {
+	*x = WriteProcessInputResponse{}
+	mi := &file_internal_proto_ateworkerpb_ateworker_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WriteProcessInputResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WriteProcessInputResponse) ProtoMessage() {}
+
+func (x *WriteProcessInputResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_proto_ateworkerpb_ateworker_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WriteProcessInputResponse.ProtoReflect.Descriptor instead.
+func (*WriteProcessInputResponse) Descriptor() ([]byte, []int) {
+	return file_internal_proto_ateworkerpb_ateworker_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *WriteProcessInputResponse) GetBytesWritten() int64 {
+	if x != nil {
+		return x.BytesWritten
+	}
+	return 0
+}
+
+type SignalProcessRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ActorUid      string                 `protobuf:"bytes,1,opt,name=actor_uid,json=actorUid,proto3" json:"actor_uid,omitempty"`
+	ProcessId     string                 `protobuf:"bytes,2,opt,name=process_id,json=processId,proto3" json:"process_id,omitempty"`
+	Signal        Signal                 `protobuf:"varint,3,opt,name=signal,proto3,enum=ateworker.Signal" json:"signal,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SignalProcessRequest) Reset() {
+	*x = SignalProcessRequest{}
+	mi := &file_internal_proto_ateworkerpb_ateworker_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SignalProcessRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SignalProcessRequest) ProtoMessage() {}
+
+func (x *SignalProcessRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_proto_ateworkerpb_ateworker_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SignalProcessRequest.ProtoReflect.Descriptor instead.
+func (*SignalProcessRequest) Descriptor() ([]byte, []int) {
+	return file_internal_proto_ateworkerpb_ateworker_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *SignalProcessRequest) GetActorUid() string {
+	if x != nil {
+		return x.ActorUid
+	}
+	return ""
+}
+
+func (x *SignalProcessRequest) GetProcessId() string {
+	if x != nil {
+		return x.ProcessId
+	}
+	return ""
+}
+
+func (x *SignalProcessRequest) GetSignal() Signal {
+	if x != nil {
+		return x.Signal
+	}
+	return Signal_SIGNAL_UNSPECIFIED
+}
+
+type ReadFileRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ActorUid      string                 `protobuf:"bytes,1,opt,name=actor_uid,json=actorUid,proto3" json:"actor_uid,omitempty"`
+	ContainerName string                 `protobuf:"bytes,2,opt,name=container_name,json=containerName,proto3" json:"container_name,omitempty"`
+	Path          string                 `protobuf:"bytes,3,opt,name=path,proto3" json:"path,omitempty"`
+	Mode          uint32                 `protobuf:"varint,4,opt,name=mode,proto3" json:"mode,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReadFileRequest) Reset() {
+	*x = ReadFileRequest{}
+	mi := &file_internal_proto_ateworkerpb_ateworker_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReadFileRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReadFileRequest) ProtoMessage() {}
+
+func (x *ReadFileRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_proto_ateworkerpb_ateworker_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReadFileRequest.ProtoReflect.Descriptor instead.
+func (*ReadFileRequest) Descriptor() ([]byte, []int) {
+	return file_internal_proto_ateworkerpb_ateworker_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *ReadFileRequest) GetActorUid() string {
+	if x != nil {
+		return x.ActorUid
+	}
+	return ""
+}
+
+func (x *ReadFileRequest) GetContainerName() string {
+	if x != nil {
+		return x.ContainerName
+	}
+	return ""
+}
+
+func (x *ReadFileRequest) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *ReadFileRequest) GetMode() uint32 {
+	if x != nil {
+		return x.Mode
+	}
+	return 0
+}
+
+type ReadFileResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Chunk         []byte                 `protobuf:"bytes,1,opt,name=chunk,proto3" json:"chunk,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReadFileResponse) Reset() {
+	*x = ReadFileResponse{}
+	mi := &file_internal_proto_ateworkerpb_ateworker_proto_msgTypes[32]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReadFileResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReadFileResponse) ProtoMessage() {}
+
+func (x *ReadFileResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_proto_ateworkerpb_ateworker_proto_msgTypes[32]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReadFileResponse.ProtoReflect.Descriptor instead.
+func (*ReadFileResponse) Descriptor() ([]byte, []int) {
+	return file_internal_proto_ateworkerpb_ateworker_proto_rawDescGZIP(), []int{32}
+}
+
+func (x *ReadFileResponse) GetChunk() []byte {
+	if x != nil {
+		return x.Chunk
+	}
+	return nil
+}
+
+type WriteFileRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ActorUid      string                 `protobuf:"bytes,1,opt,name=actor_uid,json=actorUid,proto3" json:"actor_uid,omitempty"`
+	ContainerName string                 `protobuf:"bytes,2,opt,name=container_name,json=containerName,proto3" json:"container_name,omitempty"`
+	Path          string                 `protobuf:"bytes,3,opt,name=path,proto3" json:"path,omitempty"`
+	Mode          uint32                 `protobuf:"varint,4,opt,name=mode,proto3" json:"mode,omitempty"`
+	SeekOffset    int64                  `protobuf:"varint,5,opt,name=seek_offset,json=seekOffset,proto3" json:"seek_offset,omitempty"`
+	Chunk         []byte                 `protobuf:"bytes,6,opt,name=chunk,proto3" json:"chunk,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WriteFileRequest) Reset() {
+	*x = WriteFileRequest{}
+	mi := &file_internal_proto_ateworkerpb_ateworker_proto_msgTypes[33]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WriteFileRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WriteFileRequest) ProtoMessage() {}
+
+func (x *WriteFileRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_proto_ateworkerpb_ateworker_proto_msgTypes[33]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WriteFileRequest.ProtoReflect.Descriptor instead.
+func (*WriteFileRequest) Descriptor() ([]byte, []int) {
+	return file_internal_proto_ateworkerpb_ateworker_proto_rawDescGZIP(), []int{33}
+}
+
+func (x *WriteFileRequest) GetActorUid() string {
+	if x != nil {
+		return x.ActorUid
+	}
+	return ""
+}
+
+func (x *WriteFileRequest) GetContainerName() string {
+	if x != nil {
+		return x.ContainerName
+	}
+	return ""
+}
+
+func (x *WriteFileRequest) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *WriteFileRequest) GetMode() uint32 {
+	if x != nil {
+		return x.Mode
+	}
+	return 0
+}
+
+func (x *WriteFileRequest) GetSeekOffset() int64 {
+	if x != nil {
+		return x.SeekOffset
+	}
+	return 0
+}
+
+func (x *WriteFileRequest) GetChunk() []byte {
+	if x != nil {
+		return x.Chunk
+	}
+	return nil
+}
+
+type WriteFileResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	BytesWritten  int64                  `protobuf:"varint,1,opt,name=bytes_written,json=bytesWritten,proto3" json:"bytes_written,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WriteFileResponse) Reset() {
+	*x = WriteFileResponse{}
+	mi := &file_internal_proto_ateworkerpb_ateworker_proto_msgTypes[34]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WriteFileResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WriteFileResponse) ProtoMessage() {}
+
+func (x *WriteFileResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_proto_ateworkerpb_ateworker_proto_msgTypes[34]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WriteFileResponse.ProtoReflect.Descriptor instead.
+func (*WriteFileResponse) Descriptor() ([]byte, []int) {
+	return file_internal_proto_ateworkerpb_ateworker_proto_rawDescGZIP(), []int{34}
+}
+
+func (x *WriteFileResponse) GetBytesWritten() int64 {
+	if x != nil {
+		return x.BytesWritten
+	}
+	return 0
+}
+
 var File_internal_proto_ateworkerpb_ateworker_proto protoreflect.FileDescriptor
 
 const file_internal_proto_ateworkerpb_ateworker_proto_rawDesc = "" +
 	"\n" +
-	"*internal/proto/ateworkerpb/ateworker.proto\x12\tateworker\"\x81\x03\n" +
+	"*internal/proto/ateworkerpb/ateworker.proto\x12\tateworker\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x81\x03\n" +
 	"\tActorDirs\x12\x19\n" +
 	"\broot_dir\x18\x01 \x01(\tR\arootDir\x12$\n" +
 	"\x0eoci_bundle_dir\x18\x02 \x01(\tR\fociBundleDir\x12%\n" +
@@ -2191,7 +3195,75 @@ const file_internal_proto_ateworkerpb_ateworker_proto_rawDesc = "" +
 	"\x06sample\x18\x01 \x01(\v2\x1e.ateworker.WorkloadStatsSampleR\x06sample\"\x1f\n" +
 	"\x1dGetActiveWorkloadStatsRequest\"Z\n" +
 	"\x1eGetActiveWorkloadStatsResponse\x128\n" +
-	"\asamples\x18\x01 \x03(\v2\x1e.ateworker.WorkloadStatsSampleR\asamples*\x90\x01\n" +
+	"\asamples\x18\x01 \x03(\v2\x1e.ateworker.WorkloadStatsSampleR\asamples\"\x98\x02\n" +
+	"\aProcess\x12\x1d\n" +
+	"\n" +
+	"process_id\x18\x01 \x01(\tR\tprocessId\x12\x18\n" +
+	"\acommand\x18\x02 \x03(\tR\acommand\x12\x10\n" +
+	"\x03pid\x18\x03 \x01(\x05R\x03pid\x12-\n" +
+	"\x05state\x18\x04 \x01(\x0e2\x17.ateworker.ProcessStateR\x05state\x12\x1b\n" +
+	"\texit_code\x18\x05 \x01(\x05R\bexitCode\x129\n" +
+	"\n" +
+	"started_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\x12;\n" +
+	"\vfinished_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"finishedAt\"\xc3\x02\n" +
+	"\x13StartProcessRequest\x12\x1b\n" +
+	"\tactor_uid\x18\x01 \x01(\tR\bactorUid\x12%\n" +
+	"\x0econtainer_name\x18\x02 \x01(\tR\rcontainerName\x12\x18\n" +
+	"\acommand\x18\x03 \x03(\tR\acommand\x12\x10\n" +
+	"\x03cwd\x18\x04 \x01(\tR\x03cwd\x129\n" +
+	"\x03env\x18\x05 \x03(\v2'.ateworker.StartProcessRequest.EnvEntryR\x03env\x12\x14\n" +
+	"\x05stdin\x18\x06 \x01(\bR\x05stdin\x123\n" +
+	"\atimeout\x18\a \x01(\v2\x19.google.protobuf.DurationR\atimeout\x1a6\n" +
+	"\bEnvEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"O\n" +
+	"\x11GetProcessRequest\x12\x1b\n" +
+	"\tactor_uid\x18\x01 \x01(\tR\bactorUid\x12\x1d\n" +
+	"\n" +
+	"process_id\x18\x02 \x01(\tR\tprocessId\"\xba\x01\n" +
+	"\x1aStreamProcessOutputRequest\x12\x1b\n" +
+	"\tactor_uid\x18\x01 \x01(\tR\bactorUid\x12\x1d\n" +
+	"\n" +
+	"process_id\x18\x02 \x01(\tR\tprocessId\x12#\n" +
+	"\rstdout_offset\x18\x03 \x01(\x03R\fstdoutOffset\x12#\n" +
+	"\rstderr_offset\x18\x04 \x01(\x03R\fstderrOffset\x12\x16\n" +
+	"\x06follow\x18\x05 \x01(\bR\x06follow\"w\n" +
+	"\rProcessOutput\x12\x18\n" +
+	"\x06stdout\x18\x01 \x01(\fH\x00R\x06stdout\x12\x18\n" +
+	"\x06stderr\x18\x02 \x01(\fH\x00R\x06stderr\x12(\n" +
+	"\x04exit\x18\x03 \x01(\v2\x12.ateworker.ProcessH\x00R\x04exitB\b\n" +
+	"\x06output\"\x80\x01\n" +
+	"\x18WriteProcessInputRequest\x12\x1b\n" +
+	"\tactor_uid\x18\x01 \x01(\tR\bactorUid\x12\x1d\n" +
+	"\n" +
+	"process_id\x18\x02 \x01(\tR\tprocessId\x12\x12\n" +
+	"\x04data\x18\x03 \x01(\fR\x04data\x12\x14\n" +
+	"\x05close\x18\x04 \x01(\bR\x05close\"@\n" +
+	"\x19WriteProcessInputResponse\x12#\n" +
+	"\rbytes_written\x18\x01 \x01(\x03R\fbytesWritten\"}\n" +
+	"\x14SignalProcessRequest\x12\x1b\n" +
+	"\tactor_uid\x18\x01 \x01(\tR\bactorUid\x12\x1d\n" +
+	"\n" +
+	"process_id\x18\x02 \x01(\tR\tprocessId\x12)\n" +
+	"\x06signal\x18\x03 \x01(\x0e2\x11.ateworker.SignalR\x06signal\"}\n" +
+	"\x0fReadFileRequest\x12\x1b\n" +
+	"\tactor_uid\x18\x01 \x01(\tR\bactorUid\x12%\n" +
+	"\x0econtainer_name\x18\x02 \x01(\tR\rcontainerName\x12\x12\n" +
+	"\x04path\x18\x03 \x01(\tR\x04path\x12\x12\n" +
+	"\x04mode\x18\x04 \x01(\rR\x04mode\"(\n" +
+	"\x10ReadFileResponse\x12\x14\n" +
+	"\x05chunk\x18\x01 \x01(\fR\x05chunk\"\xb5\x01\n" +
+	"\x10WriteFileRequest\x12\x1b\n" +
+	"\tactor_uid\x18\x01 \x01(\tR\bactorUid\x12%\n" +
+	"\x0econtainer_name\x18\x02 \x01(\tR\rcontainerName\x12\x12\n" +
+	"\x04path\x18\x03 \x01(\tR\x04path\x12\x12\n" +
+	"\x04mode\x18\x04 \x01(\rR\x04mode\x12\x1f\n" +
+	"\vseek_offset\x18\x05 \x01(\x03R\n" +
+	"seekOffset\x12\x14\n" +
+	"\x05chunk\x18\x06 \x01(\fR\x05chunk\"8\n" +
+	"\x11WriteFileResponse\x12#\n" +
+	"\rbytes_written\x18\x01 \x01(\x03R\fbytesWritten*\x90\x01\n" +
 	"\x10SnapshotFidelity\x12!\n" +
 	"\x1dSNAPSHOT_FIDELITY_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19SNAPSHOT_FIDELITY_VOLUMES\x10\x01\x12\x1c\n" +
@@ -2200,14 +3272,65 @@ const file_internal_proto_ateworkerpb_ateworker_proto_rawDesc = "" +
 	"\vStatsSource\x12\x1c\n" +
 	"\x18STATS_SOURCE_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13STATS_SOURCE_CGROUP\x10\x01\x12\x1c\n" +
-	"\x18STATS_SOURCE_GUEST_AGENT\x10\x022\xcb\x04\n" +
+	"\x18STATS_SOURCE_GUEST_AGENT\x10\x02*b\n" +
+	"\fProcessState\x12\x1d\n" +
+	"\x19PROCESS_STATE_UNSPECIFIED\x10\x00\x12\x19\n" +
+	"\x15PROCESS_STATE_RUNNING\x10\x01\x12\x18\n" +
+	"\x14PROCESS_STATE_EXITED\x10\x02*\x87\x04\n" +
+	"\x06Signal\x12\x16\n" +
+	"\x12SIGNAL_UNSPECIFIED\x10\x00\x12\x0e\n" +
+	"\n" +
+	"SIGNAL_HUP\x10\x01\x12\x0e\n" +
+	"\n" +
+	"SIGNAL_INT\x10\x02\x12\x0f\n" +
+	"\vSIGNAL_QUIT\x10\x03\x12\x0e\n" +
+	"\n" +
+	"SIGNAL_ILL\x10\x04\x12\x0f\n" +
+	"\vSIGNAL_TRAP\x10\x05\x12\x0f\n" +
+	"\vSIGNAL_ABRT\x10\x06\x12\x0e\n" +
+	"\n" +
+	"SIGNAL_BUS\x10\a\x12\x0e\n" +
+	"\n" +
+	"SIGNAL_FPE\x10\b\x12\x0f\n" +
+	"\vSIGNAL_KILL\x10\t\x12\x0f\n" +
+	"\vSIGNAL_USR1\x10\n" +
+	"\x12\x0f\n" +
+	"\vSIGNAL_SEGV\x10\v\x12\x0f\n" +
+	"\vSIGNAL_USR2\x10\f\x12\x0f\n" +
+	"\vSIGNAL_PIPE\x10\r\x12\x0f\n" +
+	"\vSIGNAL_ALRM\x10\x0e\x12\x0f\n" +
+	"\vSIGNAL_TERM\x10\x0f\x12\x0f\n" +
+	"\vSIGNAL_CHLD\x10\x11\x12\x0f\n" +
+	"\vSIGNAL_CONT\x10\x12\x12\x0f\n" +
+	"\vSIGNAL_STOP\x10\x13\x12\x0f\n" +
+	"\vSIGNAL_TSTP\x10\x14\x12\x0f\n" +
+	"\vSIGNAL_TTIN\x10\x15\x12\x0f\n" +
+	"\vSIGNAL_TTOU\x10\x16\x12\x0e\n" +
+	"\n" +
+	"SIGNAL_URG\x10\x17\x12\x0f\n" +
+	"\vSIGNAL_XCPU\x10\x18\x12\x0f\n" +
+	"\vSIGNAL_XFSZ\x10\x19\x12\x11\n" +
+	"\rSIGNAL_VTALRM\x10\x1a\x12\x0f\n" +
+	"\vSIGNAL_PROF\x10\x1b\x12\x10\n" +
+	"\fSIGNAL_WINCH\x10\x1c\x12\r\n" +
+	"\tSIGNAL_IO\x10\x1d\x12\x0e\n" +
+	"\n" +
+	"SIGNAL_SYS\x10\x1f2\xf0\b\n" +
 	"\x06Worker\x12N\n" +
 	"\vRunWorkload\x12\x1d.ateworker.RunWorkloadRequest\x1a\x1e.ateworker.RunWorkloadResponse\"\x00\x12c\n" +
 	"\x12CheckpointWorkload\x12$.ateworker.CheckpointWorkloadRequest\x1a%.ateworker.CheckpointWorkloadResponse\"\x00\x12Z\n" +
 	"\x0fRestoreWorkload\x12!.ateworker.RestoreWorkloadRequest\x1a\".ateworker.RestoreWorkloadResponse\"\x00\x12]\n" +
 	"\x10GetWorkloadStats\x12\".ateworker.GetWorkloadStatsRequest\x1a#.ateworker.GetWorkloadStatsResponse\"\x00\x12o\n" +
 	"\x16GetActiveWorkloadStats\x12(.ateworker.GetActiveWorkloadStatsRequest\x1a).ateworker.GetActiveWorkloadStatsResponse\"\x00\x12`\n" +
-	"\x11TerminateWorkload\x12#.ateworker.TerminateWorkloadRequest\x1a$.ateworker.TerminateWorkloadResponse\"\x00B1Z/go.ate.dev/substrate/internal/proto/ateworkerpbb\x06proto3"
+	"\x11TerminateWorkload\x12#.ateworker.TerminateWorkloadRequest\x1a$.ateworker.TerminateWorkloadResponse\"\x00\x12D\n" +
+	"\fStartProcess\x12\x1e.ateworker.StartProcessRequest\x1a\x12.ateworker.Process\"\x00\x12@\n" +
+	"\n" +
+	"GetProcess\x12\x1c.ateworker.GetProcessRequest\x1a\x12.ateworker.Process\"\x00\x12Z\n" +
+	"\x13StreamProcessOutput\x12%.ateworker.StreamProcessOutputRequest\x1a\x18.ateworker.ProcessOutput\"\x000\x01\x12b\n" +
+	"\x11WriteProcessInput\x12#.ateworker.WriteProcessInputRequest\x1a$.ateworker.WriteProcessInputResponse\"\x00(\x01\x12F\n" +
+	"\rSignalProcess\x12\x1f.ateworker.SignalProcessRequest\x1a\x12.ateworker.Process\"\x00\x12G\n" +
+	"\bReadFile\x12\x1a.ateworker.ReadFileRequest\x1a\x1b.ateworker.ReadFileResponse\"\x000\x01\x12J\n" +
+	"\tWriteFile\x12\x1b.ateworker.WriteFileRequest\x1a\x1c.ateworker.WriteFileResponse\"\x00(\x01B1Z/go.ate.dev/substrate/internal/proto/ateworkerpbb\x06proto3"
 
 var (
 	file_internal_proto_ateworkerpb_ateworker_proto_rawDescOnce sync.Once
@@ -2221,84 +3344,122 @@ func file_internal_proto_ateworkerpb_ateworker_proto_rawDescGZIP() []byte {
 	return file_internal_proto_ateworkerpb_ateworker_proto_rawDescData
 }
 
-var file_internal_proto_ateworkerpb_ateworker_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_internal_proto_ateworkerpb_ateworker_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
+var file_internal_proto_ateworkerpb_ateworker_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
+var file_internal_proto_ateworkerpb_ateworker_proto_msgTypes = make([]protoimpl.MessageInfo, 38)
 var file_internal_proto_ateworkerpb_ateworker_proto_goTypes = []any{
 	(SnapshotFidelity)(0),                  // 0: ateworker.SnapshotFidelity
 	(StatsSource)(0),                       // 1: ateworker.StatsSource
-	(*ActorDirs)(nil),                      // 2: ateworker.ActorDirs
-	(*TerminateWorkloadRequest)(nil),       // 3: ateworker.TerminateWorkloadRequest
-	(*TerminateWorkloadResponse)(nil),      // 4: ateworker.TerminateWorkloadResponse
-	(*RunWorkloadRequest)(nil),             // 5: ateworker.RunWorkloadRequest
-	(*EgressGateway)(nil),                  // 6: ateworker.EgressGateway
-	(*WorkloadSpec)(nil),                   // 7: ateworker.WorkloadSpec
-	(*Container)(nil),                      // 8: ateworker.Container
-	(*ContainerSpec)(nil),                  // 9: ateworker.ContainerSpec
-	(*ResourceRequirements)(nil),           // 10: ateworker.ResourceRequirements
-	(*Resources)(nil),                      // 11: ateworker.Resources
-	(*VolumeMount)(nil),                    // 12: ateworker.VolumeMount
-	(*WakeupProbe)(nil),                    // 13: ateworker.WakeupProbe
-	(*HttpGetAction)(nil),                  // 14: ateworker.HttpGetAction
-	(*RunWorkloadResponse)(nil),            // 15: ateworker.RunWorkloadResponse
-	(*CheckpointWorkloadRequest)(nil),      // 16: ateworker.CheckpointWorkloadRequest
-	(*CheckpointWorkloadResponse)(nil),     // 17: ateworker.CheckpointWorkloadResponse
-	(*RestoreWorkloadRequest)(nil),         // 18: ateworker.RestoreWorkloadRequest
-	(*RestoreWorkloadResponse)(nil),        // 19: ateworker.RestoreWorkloadResponse
-	(*GetWorkloadStatsRequest)(nil),        // 20: ateworker.GetWorkloadStatsRequest
-	(*WorkloadStatsSample)(nil),            // 21: ateworker.WorkloadStatsSample
-	(*GetWorkloadStatsResponse)(nil),       // 22: ateworker.GetWorkloadStatsResponse
-	(*GetActiveWorkloadStatsRequest)(nil),  // 23: ateworker.GetActiveWorkloadStatsRequest
-	(*GetActiveWorkloadStatsResponse)(nil), // 24: ateworker.GetActiveWorkloadStatsResponse
-	nil,                                    // 25: ateworker.RunWorkloadRequest.RuntimeAssetPathsEntry
-	nil,                                    // 26: ateworker.RestoreWorkloadRequest.RuntimeAssetPathsEntry
+	(ProcessState)(0),                      // 2: ateworker.ProcessState
+	(Signal)(0),                            // 3: ateworker.Signal
+	(*ActorDirs)(nil),                      // 4: ateworker.ActorDirs
+	(*TerminateWorkloadRequest)(nil),       // 5: ateworker.TerminateWorkloadRequest
+	(*TerminateWorkloadResponse)(nil),      // 6: ateworker.TerminateWorkloadResponse
+	(*RunWorkloadRequest)(nil),             // 7: ateworker.RunWorkloadRequest
+	(*EgressGateway)(nil),                  // 8: ateworker.EgressGateway
+	(*WorkloadSpec)(nil),                   // 9: ateworker.WorkloadSpec
+	(*Container)(nil),                      // 10: ateworker.Container
+	(*ContainerSpec)(nil),                  // 11: ateworker.ContainerSpec
+	(*ResourceRequirements)(nil),           // 12: ateworker.ResourceRequirements
+	(*Resources)(nil),                      // 13: ateworker.Resources
+	(*VolumeMount)(nil),                    // 14: ateworker.VolumeMount
+	(*WakeupProbe)(nil),                    // 15: ateworker.WakeupProbe
+	(*HttpGetAction)(nil),                  // 16: ateworker.HttpGetAction
+	(*RunWorkloadResponse)(nil),            // 17: ateworker.RunWorkloadResponse
+	(*CheckpointWorkloadRequest)(nil),      // 18: ateworker.CheckpointWorkloadRequest
+	(*CheckpointWorkloadResponse)(nil),     // 19: ateworker.CheckpointWorkloadResponse
+	(*RestoreWorkloadRequest)(nil),         // 20: ateworker.RestoreWorkloadRequest
+	(*RestoreWorkloadResponse)(nil),        // 21: ateworker.RestoreWorkloadResponse
+	(*GetWorkloadStatsRequest)(nil),        // 22: ateworker.GetWorkloadStatsRequest
+	(*WorkloadStatsSample)(nil),            // 23: ateworker.WorkloadStatsSample
+	(*GetWorkloadStatsResponse)(nil),       // 24: ateworker.GetWorkloadStatsResponse
+	(*GetActiveWorkloadStatsRequest)(nil),  // 25: ateworker.GetActiveWorkloadStatsRequest
+	(*GetActiveWorkloadStatsResponse)(nil), // 26: ateworker.GetActiveWorkloadStatsResponse
+	(*Process)(nil),                        // 27: ateworker.Process
+	(*StartProcessRequest)(nil),            // 28: ateworker.StartProcessRequest
+	(*GetProcessRequest)(nil),              // 29: ateworker.GetProcessRequest
+	(*StreamProcessOutputRequest)(nil),     // 30: ateworker.StreamProcessOutputRequest
+	(*ProcessOutput)(nil),                  // 31: ateworker.ProcessOutput
+	(*WriteProcessInputRequest)(nil),       // 32: ateworker.WriteProcessInputRequest
+	(*WriteProcessInputResponse)(nil),      // 33: ateworker.WriteProcessInputResponse
+	(*SignalProcessRequest)(nil),           // 34: ateworker.SignalProcessRequest
+	(*ReadFileRequest)(nil),                // 35: ateworker.ReadFileRequest
+	(*ReadFileResponse)(nil),               // 36: ateworker.ReadFileResponse
+	(*WriteFileRequest)(nil),               // 37: ateworker.WriteFileRequest
+	(*WriteFileResponse)(nil),              // 38: ateworker.WriteFileResponse
+	nil,                                    // 39: ateworker.RunWorkloadRequest.RuntimeAssetPathsEntry
+	nil,                                    // 40: ateworker.RestoreWorkloadRequest.RuntimeAssetPathsEntry
+	nil,                                    // 41: ateworker.StartProcessRequest.EnvEntry
+	(*timestamppb.Timestamp)(nil),          // 42: google.protobuf.Timestamp
+	(*durationpb.Duration)(nil),            // 43: google.protobuf.Duration
 }
 var file_internal_proto_ateworkerpb_ateworker_proto_depIdxs = []int32{
-	7,  // 0: ateworker.TerminateWorkloadRequest.spec:type_name -> ateworker.WorkloadSpec
-	2,  // 1: ateworker.TerminateWorkloadRequest.actor_dirs:type_name -> ateworker.ActorDirs
-	7,  // 2: ateworker.RunWorkloadRequest.spec:type_name -> ateworker.WorkloadSpec
-	25, // 3: ateworker.RunWorkloadRequest.runtime_asset_paths:type_name -> ateworker.RunWorkloadRequest.RuntimeAssetPathsEntry
-	6,  // 4: ateworker.RunWorkloadRequest.egress_gateway:type_name -> ateworker.EgressGateway
-	10, // 5: ateworker.RunWorkloadRequest.resources:type_name -> ateworker.ResourceRequirements
-	2,  // 6: ateworker.RunWorkloadRequest.actor_dirs:type_name -> ateworker.ActorDirs
-	8,  // 7: ateworker.WorkloadSpec.containers:type_name -> ateworker.Container
-	13, // 8: ateworker.Container.wakeup_probe:type_name -> ateworker.WakeupProbe
-	12, // 9: ateworker.Container.durable_dir_volume_mounts:type_name -> ateworker.VolumeMount
-	12, // 10: ateworker.Container.external_volume_mounts:type_name -> ateworker.VolumeMount
-	12, // 11: ateworker.Container.system_info_volume_mounts:type_name -> ateworker.VolumeMount
-	12, // 12: ateworker.Container.image_volume_mounts:type_name -> ateworker.VolumeMount
-	9,  // 13: ateworker.Container.container_spec:type_name -> ateworker.ContainerSpec
-	10, // 14: ateworker.ContainerSpec.resources:type_name -> ateworker.ResourceRequirements
-	11, // 15: ateworker.ResourceRequirements.limits:type_name -> ateworker.Resources
-	14, // 16: ateworker.WakeupProbe.http_get:type_name -> ateworker.HttpGetAction
-	7,  // 17: ateworker.CheckpointWorkloadRequest.spec:type_name -> ateworker.WorkloadSpec
+	9,  // 0: ateworker.TerminateWorkloadRequest.spec:type_name -> ateworker.WorkloadSpec
+	4,  // 1: ateworker.TerminateWorkloadRequest.actor_dirs:type_name -> ateworker.ActorDirs
+	9,  // 2: ateworker.RunWorkloadRequest.spec:type_name -> ateworker.WorkloadSpec
+	39, // 3: ateworker.RunWorkloadRequest.runtime_asset_paths:type_name -> ateworker.RunWorkloadRequest.RuntimeAssetPathsEntry
+	8,  // 4: ateworker.RunWorkloadRequest.egress_gateway:type_name -> ateworker.EgressGateway
+	12, // 5: ateworker.RunWorkloadRequest.resources:type_name -> ateworker.ResourceRequirements
+	4,  // 6: ateworker.RunWorkloadRequest.actor_dirs:type_name -> ateworker.ActorDirs
+	10, // 7: ateworker.WorkloadSpec.containers:type_name -> ateworker.Container
+	15, // 8: ateworker.Container.wakeup_probe:type_name -> ateworker.WakeupProbe
+	14, // 9: ateworker.Container.durable_dir_volume_mounts:type_name -> ateworker.VolumeMount
+	14, // 10: ateworker.Container.external_volume_mounts:type_name -> ateworker.VolumeMount
+	14, // 11: ateworker.Container.system_info_volume_mounts:type_name -> ateworker.VolumeMount
+	14, // 12: ateworker.Container.image_volume_mounts:type_name -> ateworker.VolumeMount
+	11, // 13: ateworker.Container.container_spec:type_name -> ateworker.ContainerSpec
+	12, // 14: ateworker.ContainerSpec.resources:type_name -> ateworker.ResourceRequirements
+	13, // 15: ateworker.ResourceRequirements.limits:type_name -> ateworker.Resources
+	16, // 16: ateworker.WakeupProbe.http_get:type_name -> ateworker.HttpGetAction
+	9,  // 17: ateworker.CheckpointWorkloadRequest.spec:type_name -> ateworker.WorkloadSpec
 	0,  // 18: ateworker.CheckpointWorkloadRequest.fidelity:type_name -> ateworker.SnapshotFidelity
-	2,  // 19: ateworker.CheckpointWorkloadRequest.actor_dirs:type_name -> ateworker.ActorDirs
-	7,  // 20: ateworker.RestoreWorkloadRequest.spec:type_name -> ateworker.WorkloadSpec
-	26, // 21: ateworker.RestoreWorkloadRequest.runtime_asset_paths:type_name -> ateworker.RestoreWorkloadRequest.RuntimeAssetPathsEntry
+	4,  // 19: ateworker.CheckpointWorkloadRequest.actor_dirs:type_name -> ateworker.ActorDirs
+	9,  // 20: ateworker.RestoreWorkloadRequest.spec:type_name -> ateworker.WorkloadSpec
+	40, // 21: ateworker.RestoreWorkloadRequest.runtime_asset_paths:type_name -> ateworker.RestoreWorkloadRequest.RuntimeAssetPathsEntry
 	0,  // 22: ateworker.RestoreWorkloadRequest.fidelity:type_name -> ateworker.SnapshotFidelity
-	6,  // 23: ateworker.RestoreWorkloadRequest.egress_gateway:type_name -> ateworker.EgressGateway
-	10, // 24: ateworker.RestoreWorkloadRequest.resources:type_name -> ateworker.ResourceRequirements
-	2,  // 25: ateworker.RestoreWorkloadRequest.actor_dirs:type_name -> ateworker.ActorDirs
+	8,  // 23: ateworker.RestoreWorkloadRequest.egress_gateway:type_name -> ateworker.EgressGateway
+	12, // 24: ateworker.RestoreWorkloadRequest.resources:type_name -> ateworker.ResourceRequirements
+	4,  // 25: ateworker.RestoreWorkloadRequest.actor_dirs:type_name -> ateworker.ActorDirs
 	1,  // 26: ateworker.WorkloadStatsSample.source:type_name -> ateworker.StatsSource
-	21, // 27: ateworker.GetWorkloadStatsResponse.sample:type_name -> ateworker.WorkloadStatsSample
-	21, // 28: ateworker.GetActiveWorkloadStatsResponse.samples:type_name -> ateworker.WorkloadStatsSample
-	5,  // 29: ateworker.Worker.RunWorkload:input_type -> ateworker.RunWorkloadRequest
-	16, // 30: ateworker.Worker.CheckpointWorkload:input_type -> ateworker.CheckpointWorkloadRequest
-	18, // 31: ateworker.Worker.RestoreWorkload:input_type -> ateworker.RestoreWorkloadRequest
-	20, // 32: ateworker.Worker.GetWorkloadStats:input_type -> ateworker.GetWorkloadStatsRequest
-	23, // 33: ateworker.Worker.GetActiveWorkloadStats:input_type -> ateworker.GetActiveWorkloadStatsRequest
-	3,  // 34: ateworker.Worker.TerminateWorkload:input_type -> ateworker.TerminateWorkloadRequest
-	15, // 35: ateworker.Worker.RunWorkload:output_type -> ateworker.RunWorkloadResponse
-	17, // 36: ateworker.Worker.CheckpointWorkload:output_type -> ateworker.CheckpointWorkloadResponse
-	19, // 37: ateworker.Worker.RestoreWorkload:output_type -> ateworker.RestoreWorkloadResponse
-	22, // 38: ateworker.Worker.GetWorkloadStats:output_type -> ateworker.GetWorkloadStatsResponse
-	24, // 39: ateworker.Worker.GetActiveWorkloadStats:output_type -> ateworker.GetActiveWorkloadStatsResponse
-	4,  // 40: ateworker.Worker.TerminateWorkload:output_type -> ateworker.TerminateWorkloadResponse
-	35, // [35:41] is the sub-list for method output_type
-	29, // [29:35] is the sub-list for method input_type
-	29, // [29:29] is the sub-list for extension type_name
-	29, // [29:29] is the sub-list for extension extendee
-	0,  // [0:29] is the sub-list for field type_name
+	23, // 27: ateworker.GetWorkloadStatsResponse.sample:type_name -> ateworker.WorkloadStatsSample
+	23, // 28: ateworker.GetActiveWorkloadStatsResponse.samples:type_name -> ateworker.WorkloadStatsSample
+	2,  // 29: ateworker.Process.state:type_name -> ateworker.ProcessState
+	42, // 30: ateworker.Process.started_at:type_name -> google.protobuf.Timestamp
+	42, // 31: ateworker.Process.finished_at:type_name -> google.protobuf.Timestamp
+	41, // 32: ateworker.StartProcessRequest.env:type_name -> ateworker.StartProcessRequest.EnvEntry
+	43, // 33: ateworker.StartProcessRequest.timeout:type_name -> google.protobuf.Duration
+	27, // 34: ateworker.ProcessOutput.exit:type_name -> ateworker.Process
+	3,  // 35: ateworker.SignalProcessRequest.signal:type_name -> ateworker.Signal
+	7,  // 36: ateworker.Worker.RunWorkload:input_type -> ateworker.RunWorkloadRequest
+	18, // 37: ateworker.Worker.CheckpointWorkload:input_type -> ateworker.CheckpointWorkloadRequest
+	20, // 38: ateworker.Worker.RestoreWorkload:input_type -> ateworker.RestoreWorkloadRequest
+	22, // 39: ateworker.Worker.GetWorkloadStats:input_type -> ateworker.GetWorkloadStatsRequest
+	25, // 40: ateworker.Worker.GetActiveWorkloadStats:input_type -> ateworker.GetActiveWorkloadStatsRequest
+	5,  // 41: ateworker.Worker.TerminateWorkload:input_type -> ateworker.TerminateWorkloadRequest
+	28, // 42: ateworker.Worker.StartProcess:input_type -> ateworker.StartProcessRequest
+	29, // 43: ateworker.Worker.GetProcess:input_type -> ateworker.GetProcessRequest
+	30, // 44: ateworker.Worker.StreamProcessOutput:input_type -> ateworker.StreamProcessOutputRequest
+	32, // 45: ateworker.Worker.WriteProcessInput:input_type -> ateworker.WriteProcessInputRequest
+	34, // 46: ateworker.Worker.SignalProcess:input_type -> ateworker.SignalProcessRequest
+	35, // 47: ateworker.Worker.ReadFile:input_type -> ateworker.ReadFileRequest
+	37, // 48: ateworker.Worker.WriteFile:input_type -> ateworker.WriteFileRequest
+	17, // 49: ateworker.Worker.RunWorkload:output_type -> ateworker.RunWorkloadResponse
+	19, // 50: ateworker.Worker.CheckpointWorkload:output_type -> ateworker.CheckpointWorkloadResponse
+	21, // 51: ateworker.Worker.RestoreWorkload:output_type -> ateworker.RestoreWorkloadResponse
+	24, // 52: ateworker.Worker.GetWorkloadStats:output_type -> ateworker.GetWorkloadStatsResponse
+	26, // 53: ateworker.Worker.GetActiveWorkloadStats:output_type -> ateworker.GetActiveWorkloadStatsResponse
+	6,  // 54: ateworker.Worker.TerminateWorkload:output_type -> ateworker.TerminateWorkloadResponse
+	27, // 55: ateworker.Worker.StartProcess:output_type -> ateworker.Process
+	27, // 56: ateworker.Worker.GetProcess:output_type -> ateworker.Process
+	31, // 57: ateworker.Worker.StreamProcessOutput:output_type -> ateworker.ProcessOutput
+	33, // 58: ateworker.Worker.WriteProcessInput:output_type -> ateworker.WriteProcessInputResponse
+	27, // 59: ateworker.Worker.SignalProcess:output_type -> ateworker.Process
+	36, // 60: ateworker.Worker.ReadFile:output_type -> ateworker.ReadFileResponse
+	38, // 61: ateworker.Worker.WriteFile:output_type -> ateworker.WriteFileResponse
+	49, // [49:62] is the sub-list for method output_type
+	36, // [36:49] is the sub-list for method input_type
+	36, // [36:36] is the sub-list for extension type_name
+	36, // [36:36] is the sub-list for extension extendee
+	0,  // [0:36] is the sub-list for field type_name
 }
 
 func init() { file_internal_proto_ateworkerpb_ateworker_proto_init() }
@@ -2308,13 +3469,18 @@ func file_internal_proto_ateworkerpb_ateworker_proto_init() {
 	}
 	file_internal_proto_ateworkerpb_ateworker_proto_msgTypes[3].OneofWrappers = []any{}
 	file_internal_proto_ateworkerpb_ateworker_proto_msgTypes[16].OneofWrappers = []any{}
+	file_internal_proto_ateworkerpb_ateworker_proto_msgTypes[27].OneofWrappers = []any{
+		(*ProcessOutput_Stdout)(nil),
+		(*ProcessOutput_Stderr)(nil),
+		(*ProcessOutput_Exit)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_internal_proto_ateworkerpb_ateworker_proto_rawDesc), len(file_internal_proto_ateworkerpb_ateworker_proto_rawDesc)),
-			NumEnums:      2,
-			NumMessages:   25,
+			NumEnums:      4,
+			NumMessages:   38,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

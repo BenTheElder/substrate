@@ -272,12 +272,11 @@ func (a *AgentClient) WaitProcess(ctx context.Context, containerID, execID strin
 	return resp.GetStatus(), nil
 }
 
-// ReadStdout reads up to max bytes from the container process's stdout. It is a
+// ReadStdout reads up to max bytes from a container process's stdout. It is a
 // unary RPC (NOT a server stream): each call returns whatever bytes the agent has
-// buffered (up to max), so callers loop until it returns an error — the agent
-// returns an error/EOF-like status once the stream ends (container exit / connection
-// close). Mirrors grpc.AgentService/ReadStdout. The kata-agent keys the stream by
-// ExecId, which ateworker sets equal to ContainerId.
+// buffered (up to max), so callers loop until it returns an error or empty data.
+// Mirrors grpc.AgentService/ReadStdout. For the container init process ateworker
+// sets execID equal to containerID; exec'd processes use their own execID.
 func (a *AgentClient) ReadStdout(ctx context.Context, containerID, execID string, max uint32) ([]byte, error) {
 	resp := &agentpb.ReadStreamResponse{}
 	req := &agentpb.ReadStreamRequest{ContainerId: containerID, ExecId: execID, Len: max}
@@ -338,16 +337,15 @@ type StreamReader struct {
 	stderr      bool
 }
 
-// NewStdioReader returns an io.Reader over the container's stdout (stderr=false)
-// or stderr (stderr=true). execID equals containerID (ateworker sets ExecId ==
-// ContainerId when it creates the container).
+// NewStdioReader returns an io.Reader over a container process's stdout
+// (stderr=false) or stderr (stderr=true).
 func NewStdioReader(ctx context.Context, ac *AgentClient, containerID, execID string, stderr bool) *StreamReader {
 	return &StreamReader{ctx: ctx, ac: ac, containerID: containerID, execID: execID, stderr: stderr}
 }
 
 // Read issues a single ReadStdout/ReadStderr RPC for up to len(p) bytes, copying
-// the returned data into p. It returns io.EOF on any RPC error so the consumer
-// stops cleanly when the container exits or the connection closes.
+// the returned data into p. It returns io.EOF on RPC error or an empty read so
+// the consumer stops cleanly when the stream ends or the connection closes.
 func (r *StreamReader) Read(p []byte) (int, error) {
 	var (
 		data []byte
@@ -358,7 +356,7 @@ func (r *StreamReader) Read(p []byte) (int, error) {
 	} else {
 		data, err = r.ac.ReadStdout(r.ctx, r.containerID, r.execID, uint32(len(p)))
 	}
-	if err != nil {
+	if err != nil || len(data) == 0 {
 		return 0, io.EOF
 	}
 	n := copy(p, data)

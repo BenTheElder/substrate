@@ -18,6 +18,9 @@ package ateworker;
 
 option go_package = "go.ate.dev/substrate/internal/proto/ateworkerpb";
 
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
 // Worker is the interface to control a single gVisor (or, in the future microVM)
 // guest inside a worker pod.
 //
@@ -103,6 +106,29 @@ service Worker {
   // TerminateWorkload stops and deletes container workloads and cleans up
   // network and bundle overlays on the worker.
   rpc TerminateWorkload(TerminateWorkloadRequest) returns (TerminateWorkloadResponse) {}
+
+  // StartProcess launches a process inside an actor container and returns its
+  // Process state immediately.
+  rpc StartProcess(StartProcessRequest) returns (Process) {}
+
+  // GetProcess returns the current state of a process started by StartProcess.
+  rpc GetProcess(GetProcessRequest) returns (Process) {}
+
+  // StreamProcessOutput streams stdout and stderr from a process, optionally
+  // following until exit and ending with the final Process message.
+  rpc StreamProcessOutput(StreamProcessOutputRequest) returns (stream ProcessOutput) {}
+
+  // WriteProcessInput streams stdin bytes to a process started with stdin enabled.
+  rpc WriteProcessInput(stream WriteProcessInputRequest) returns (WriteProcessInputResponse) {}
+
+  // SignalProcess delivers a POSIX signal to a process and its process group.
+  rpc SignalProcess(SignalProcessRequest) returns (Process) {}
+
+  // ReadFile streams raw bytes of a file inside an actor container.
+  rpc ReadFile(ReadFileRequest) returns (stream ReadFileResponse) {}
+
+  // WriteFile streams raw bytes to a file inside an actor container.
+  rpc WriteFile(stream WriteFileRequest) returns (WriteFileResponse) {}
 }
 
 // ActorDirs is the set of per-actor directories atelet prepares on the volume
@@ -662,4 +688,126 @@ message GetActiveWorkloadStatsResponse {
   // at most one entry until multi-actor workers land; consumers must not
   // assume that.
   repeated WorkloadStatsSample samples = 1;
+}
+
+enum ProcessState {
+  PROCESS_STATE_UNSPECIFIED = 0;
+  PROCESS_STATE_RUNNING = 1;
+  PROCESS_STATE_EXITED = 2;
+}
+
+// POSIX signal numbers (Linux x86/arm64).
+enum Signal {
+  SIGNAL_UNSPECIFIED = 0;
+  SIGNAL_HUP = 1;
+  SIGNAL_INT = 2;
+  SIGNAL_QUIT = 3;
+  SIGNAL_ILL = 4;
+  SIGNAL_TRAP = 5;
+  SIGNAL_ABRT = 6;
+  SIGNAL_BUS = 7;
+  SIGNAL_FPE = 8;
+  SIGNAL_KILL = 9;
+  SIGNAL_USR1 = 10;
+  SIGNAL_SEGV = 11;
+  SIGNAL_USR2 = 12;
+  SIGNAL_PIPE = 13;
+  SIGNAL_ALRM = 14;
+  SIGNAL_TERM = 15;
+  SIGNAL_CHLD = 17;
+  SIGNAL_CONT = 18;
+  SIGNAL_STOP = 19;
+  SIGNAL_TSTP = 20;
+  SIGNAL_TTIN = 21;
+  SIGNAL_TTOU = 22;
+  SIGNAL_URG = 23;
+  SIGNAL_XCPU = 24;
+  SIGNAL_XFSZ = 25;
+  SIGNAL_VTALRM = 26;
+  SIGNAL_PROF = 27;
+  SIGNAL_WINCH = 28;
+  SIGNAL_IO = 29;
+  SIGNAL_SYS = 31;
+}
+
+message Process {
+  string process_id = 1;
+  repeated string command = 2;
+  int32 pid = 3;
+  ProcessState state = 4;
+  int32 exit_code = 5;
+  google.protobuf.Timestamp started_at = 6;
+  google.protobuf.Timestamp finished_at = 7;
+}
+
+message StartProcessRequest {
+  string actor_uid = 1;
+  string container_name = 2;
+  repeated string command = 3;
+  string cwd = 4;
+  map<string, string> env = 5;
+  bool stdin = 6;
+  google.protobuf.Duration timeout = 7;
+}
+
+message GetProcessRequest {
+  string actor_uid = 1;
+  string process_id = 2;
+}
+
+message StreamProcessOutputRequest {
+  string actor_uid = 1;
+  string process_id = 2;
+  int64 stdout_offset = 3;
+  int64 stderr_offset = 4;
+  bool follow = 5;
+}
+
+message ProcessOutput {
+  oneof output {
+    bytes stdout = 1;
+    bytes stderr = 2;
+    Process exit = 3;
+  }
+}
+
+message WriteProcessInputRequest {
+  string actor_uid = 1;
+  string process_id = 2;
+  bytes data = 3;
+  bool close = 4;
+}
+
+message WriteProcessInputResponse {
+  int64 bytes_written = 1;
+}
+
+message SignalProcessRequest {
+  string actor_uid = 1;
+  string process_id = 2;
+  Signal signal = 3;
+}
+
+message ReadFileRequest {
+  string actor_uid = 1;
+  string container_name = 2;
+  string path = 3;
+  uint32 mode = 4;
+}
+
+message ReadFileResponse {
+  bytes chunk = 1;
+}
+
+message WriteFileRequest {
+  string actor_uid = 1;
+  string container_name = 2;
+  string path = 3;
+  uint32 mode = 4;
+  int64 seek_offset = 5;
+  bytes chunk = 6;
+}
+
+message WriteFileResponse {
+  int64 bytes_written = 1;
 }

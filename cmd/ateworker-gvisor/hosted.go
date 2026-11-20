@@ -28,6 +28,7 @@ import (
 	"go.ate.dev/substrate/internal/apierror"
 	"go.ate.dev/substrate/internal/ateworker/actornet"
 	"go.ate.dev/substrate/internal/ateworker/cgroup"
+	"go.ate.dev/substrate/internal/ateworker/procman"
 	"go.ate.dev/substrate/internal/atunnel/ingress"
 	"go.ate.dev/substrate/internal/proto/ateworkerpb"
 	"go.ate.dev/substrate/internal/resources"
@@ -41,6 +42,8 @@ type hostedActor struct {
 	network     *actornet.SandboxSession
 	// Set once the containers exist.
 	session *workloadSession
+	// Set once the sandbox is ready for exec/file RPCs.
+	procs *procman.Manager
 	// usage is this activation's epoch, CPU baseline, and latest sample.
 	usage *workerstats.Activation
 	// deadReported keeps the usage sweep to one warning per activation.
